@@ -1,0 +1,52 @@
+{
+  "name": "@icp-sdk/auth",
+  "version": "0.0.1",
+  "author": "DFINITY Stiftung <sdk@dfinity.org>",
+  "license": "Apache-2.0",
+  "description": "Authentication library for Internet Computer web apps",
+  "homepage": "https://js.icp.build/auth/",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/dfinity/icp-js-auth.git"
+  },
+  "bugs": {
+    "url": "https://github.com/dfinity/icp-js-auth/issues"
+  },
+  "sideEffects": false,
+  "type": "module",
+  "types": "./dist/esm/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/esm/index.d.ts",
+      "import": "./dist/esm/index.js",
+      "default": "./dist/esm/index.js"
+    },
+    "./client": {
+      "types": "./dist/esm/client/index.d.ts",
+      "import": "./dist/esm/client/index.js",
+      "default": "./dist/esm/client/index.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "dist",
+    "src",
+    "package.json",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "build": "vite build && pnpm lint:package",
+    "codestyle:check": "biome check",
+    "codestyle:fix": "biome check --write",
+    "lint:package": "publint --strict"
+  },
+  "packageManager": "pnpm@10.13.1",
+  "devDependencies": {
+    "@biomejs/biome": "^2.2.4",
+    "@tanstack/config": "^0.20.2",
+    "publint": "^0.3.13",
+    "typescript": "^5.9.2",
+    "vite": "^7.1.7"
+  }
+}
