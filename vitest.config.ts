@@ -8,6 +8,7 @@ const testConfig = defineConfig({
     dir: './tests',
     watch: false,
     typecheck: { enabled: true, tsconfig: './tsconfig.test.json' },
+    environment: 'jsdom',
   },
 });
 
