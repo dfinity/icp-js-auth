@@ -37,6 +37,7 @@
   ],
   "scripts": {
     "build": "vite build && pnpm lint:package",
+    "test": "vitest",
     "codestyle:check": "biome check",
     "codestyle:fix": "biome check --write",
     "lint:package": "publint --strict"
@@ -48,7 +49,8 @@
     "@tanstack/config": "^0.20.2",
     "publint": "^0.3.13",
     "typescript": "^5.9.2",
-    "vite": "^7.1.7"
+    "vite": "^7.1.7",
+    "vitest": "3.2.4"
   },
   "peerDependencies": {
     "@icp-sdk/core": "^4.0.4"
