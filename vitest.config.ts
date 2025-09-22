@@ -9,6 +9,7 @@ const testConfig = defineConfig({
     watch: false,
     typecheck: { enabled: true, tsconfig: './tsconfig.test.json' },
     environment: 'jsdom',
+    setupFiles: ['./tests/setup-idb.ts'],
   },
 });
 
