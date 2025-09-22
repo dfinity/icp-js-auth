@@ -18,5 +18,6 @@ jobs:
       - name: JS Build
         run: pnpm build
 
-      - name: JS Test
-        run: pnpm test
+      # TODO: Uncomment this once we have tests
+      # - name: JS Test
+      #   run: pnpm test
