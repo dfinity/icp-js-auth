@@ -44,9 +44,16 @@
   "packageManager": "pnpm@10.13.1",
   "devDependencies": {
     "@biomejs/biome": "^2.2.4",
+    "@icp-sdk/core": "^4.0.4",
     "@tanstack/config": "^0.20.2",
     "publint": "^0.3.13",
     "typescript": "^5.9.2",
     "vite": "^7.1.7"
+  },
+  "peerDependencies": {
+    "@icp-sdk/core": "^4.0.4"
+  },
+  "dependencies": {
+    "idb": "^8.0.3"
   }
 }
