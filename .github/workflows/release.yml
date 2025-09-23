@@ -35,9 +35,6 @@ jobs:
       - name: Build NPM package
         run: pnpm build
 
-      - name: Generate release notes
-        uses: dfinity/ci-tools/actions/generate-release-notes@main
-
       - name: Publish to npm
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
@@ -50,6 +47,9 @@ jobs:
             release_cmd="$release_cmd --tag beta"
           fi
           $release_cmd
+
+      - name: Generate release notes
+        uses: dfinity/ci-tools/actions/generate-release-notes@main
 
       - name: Create Github release
         uses: ncipollo/release-action@v1
