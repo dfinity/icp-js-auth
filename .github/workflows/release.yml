@@ -32,7 +32,7 @@ jobs:
         id: is_beta
         uses: dfinity/ci-tools/actions/is-beta-tag@main
 
-      - name: Build NPM packages
+      - name: Build NPM package
         run: pnpm build
 
       - name: Generate release notes
@@ -43,6 +43,8 @@ jobs:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_ACCESS_TOKEN }}
           NPM_CONFIG_PROVENANCE: 'true'
         run: |
+          pnpm pack
+
           release_cmd="pnpm publish --verbose --access public"
           if [ "${{ steps.is_beta.outputs.is_beta_tag }}" = 'true' ]; then
             release_cmd="$release_cmd --tag beta"
@@ -52,7 +54,7 @@ jobs:
       - name: Create Github release
         uses: ncipollo/release-action@v1
         with:
-          artifacts: 'dfinity-pic-${{ github.ref_name }}.tgz'
+          artifacts: 'icp-sdk-auth-${{ github.ref_name }}.tgz'
           bodyFile: 'RELEASE_NOTES.md'
           tag: '${{ github.ref_name }}'
           commit: 'main'
