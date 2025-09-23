@@ -42,7 +42,7 @@ jobs:
         run: |
           pnpm pack
 
-          release_cmd="pnpm publish --verbose --access public"
+          release_cmd="pnpm publish --verbose --access public --no-git-checks"
           if [ "${{ steps.is_beta.outputs.is_beta_tag }}" = 'true' ]; then
             release_cmd="$release_cmd --tag beta"
           fi
