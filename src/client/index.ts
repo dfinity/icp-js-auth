@@ -1,3 +1,7 @@
+/**
+ * @module api/client
+ */
+
 export * from './auth-client.ts';
 export { type DBCreateOptions, IdbKeyVal } from './db.ts';
 export * from './idle-manager.ts';

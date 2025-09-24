@@ -1,0 +1,31 @@
+[
+  {
+    "label": "Getting Started",
+    "items": [
+      { "label": "Overview", "link": "/" },
+      { "label": "Installation", "link": "/installation" },
+      { "label": "Quick Start", "link": "/quick-start" }
+    ]
+  },
+  {
+    "label": "Modules",
+    "items": [
+      {
+        "label": "Client",
+        "collapsed": true,
+        "autogenerate": {
+          "collapsed": true,
+          "directory": "api/client/"
+        }
+      }
+    ]
+  },
+  {
+    "label": "Upgrading",
+    "autogenerate": { "directory": "upgrading", "collapsed": true }
+  },
+  {
+    "label": "Changelog",
+    "link": "/changelog"
+  }
+]

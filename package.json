@@ -35,6 +35,12 @@
     "README.md",
     "LICENSE"
   ],
+  "keywords": [
+    "internet computer",
+    "icp",
+    "authentication",
+    "internet identity"
+  ],
   "scripts": {
     "build": "vite build && pnpm lint:package",
     "test": "vitest",

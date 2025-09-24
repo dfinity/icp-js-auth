@@ -1,0 +1,83 @@
+---
+title: ICP JS Auth
+next: false
+prev: false
+tableOfContents: false
+hero:
+  title: ICP JavaScript SDK <span class="dfn-text-gradient">Auth</span>
+  tagline: Authentication library for Internet Computer web apps
+  image:
+    file: ../../../../assets/icp.svg
+    alt: Internet Computer Logo
+head:
+  - tag: style
+    content: |
+      .sl-container {
+        max-width: 70rem;
+      }
+---
+
+import { Card, CardGrid, LinkButton } from '@astrojs/starlight/components';
+
+### Get Started
+
+<CardGrid>
+    <Card title="Installation">
+        <LinkButton
+            href="/auth/latest/installation"
+            variant="minimal"
+            icon="right-caret"
+            iconPlacement="start"
+        >
+            Install the <code class="dfn-text-highlight">@icp-sdk/auth</code> package
+        </LinkButton>
+    </Card>
+
+    <Card title="Quick Start">
+        <LinkButton
+            href="/auth/latest/quick-start"
+            variant="minimal"
+            icon="right-caret"
+            iconPlacement="start"
+        >
+            Get started with the <code class="dfn-text-highlight">@icp-sdk/auth</code> package
+        </LinkButton>
+    </Card>
+</CardGrid>
+
+### Modules
+
+<CardGrid>
+    <Card title="Client">
+        Authenticate users with Internet Identity.
+        <br />
+        <LinkButton
+            href="/auth/latest/api/client"
+            variant="minimal"
+            icon="right-caret"
+            iconPlacement="start"
+        >
+            See <code class="dfn-text-highlight">@icp-sdk/auth/client</code> docs
+        </LinkButton>
+    </Card>
+</CardGrid>
+
+### Upgrading
+
+<CardGrid>
+    <Card title="ICP JS SDK Auth">
+        <p>
+            If you're using <code>@dfinity/auth-client</code> version 3.x, you can migrate to
+            <code>@icp-sdk/auth</code> with the help of our migration guide.
+        </p>
+
+        <LinkButton
+            href="/auth/latest/upgrading/v4"
+            variant="minimal"
+            icon="right-caret"
+            iconPlacement="start"
+        >
+            Migrate to <code class="dfn-text-highlight">@icp-sdk/auth</code>
+        </LinkButton>
+    </Card>
+</CardGrid>

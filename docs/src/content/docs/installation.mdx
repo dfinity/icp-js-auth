@@ -1,0 +1,35 @@
+---
+title: Installation
+description: How to install the @icp-sdk/auth package.
+---
+
+import { Code, Tabs, TabItem } from '@astrojs/starlight/components';
+
+<Tabs>
+  <TabItem label="npm" icon="npm">
+    <Code lang="shell" code="npm install @icp-sdk/auth" />
+  </TabItem>
+  <TabItem label="pnpm" icon="pnpm">
+    <Code lang="shell" code="pnpm add @icp-sdk/auth" />
+
+    You might need to install the peer dependencies of `@icp-sdk/auth` manually:
+    <Code
+      lang="shell"
+      code="pnpm install @icp-sdk/core"
+    />
+  </TabItem>
+  <TabItem label="bun" icon="bun">
+    <Code lang="shell" code="bun add @icp-sdk/auth" />
+  </TabItem>
+  <TabItem label="yarn" icon="seti:yarn">
+    <Code lang="shell" code="yarn add @icp-sdk/auth" />
+  </TabItem>
+</Tabs>
+
+> Note: this package is only meant to be used in **browser** environments.
+
+## CDN
+
+We do not recommend using the CDN distribution of the `@icp-sdk/auth` package for **production** applications.
+
+It can constitute a security risk, because the CDN can potentially serve a different IC mainnet [root key](https://internetcomputer.org/docs/references/ic-interface-spec/#root-of-trust).
