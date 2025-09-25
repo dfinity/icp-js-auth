@@ -77,3 +77,7 @@ If you want to submit a pull request to fix an issue or add a feature, here's a 
 11. Wait for the pull request to be reviewed.
 12. Make changes to the pull request, if requested.
 13. Celebrate your success after your pull request is merged!
+
+# Development
+
+See [HACKING.md](../HACKING.md) for more information.
