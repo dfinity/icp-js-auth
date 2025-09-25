@@ -65,7 +65,7 @@ Additional documentation can be found [here](https://js.icp.build/auth/latest/).
 
 ## Contributing
 
-Contributions are welcome! Please see the [contribution guide](./CONTRIBUTING.md) for more information.
+Contributions are welcome! Please see the [contribution guide](./.github/CONTRIBUTING.md) for more information.
 
 ## License
 
