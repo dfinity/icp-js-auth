@@ -20,7 +20,7 @@ jobs:
       id-token: write
     steps:
       - name: Checkout Code
-        uses: actions/checkout@v4
+        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
 
       - name: Setup Python
         uses: dfinity/ci-tools/actions/setup-python@main
@@ -55,7 +55,7 @@ jobs:
         uses: dfinity/ci-tools/actions/generate-release-notes@main
 
       - name: Create Github release
-        uses: ncipollo/release-action@v1
+        uses: ncipollo/release-action@b7eabc95ff50cbeeedec83973935c8f306dfcd0b # v1.20.0
         with:
           artifacts: 'icp-sdk-auth-${{ github.ref_name }}.tgz'
           bodyFile: 'RELEASE_NOTES.md'
