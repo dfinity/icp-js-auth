@@ -33,6 +33,12 @@ jobs:
         with:
           ref: ${{ inputs.ref }}
 
+      - name: Setup Python
+        uses: dfinity/ci-tools/actions/setup-python@main
+
+      - name: Setup Commitizen
+        uses: dfinity/ci-tools/actions/setup-commitizen@main
+
       - name: Setup PNPM
         uses: dfinity/ci-tools/actions/setup-pnpm@main
 
@@ -58,7 +64,7 @@ jobs:
         run: pnpm build
 
       - name: Checkout icp-pages branch
-        uses: actions/checkout@v4
+        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
         with:
           ref: icp-pages
           path: icp-pages
