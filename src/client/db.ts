@@ -12,9 +12,9 @@ const _openDbStore = async (
   version: number,
 ) => {
   // Clear legacy stored delegations
-  if (localStorage?.getItem(KEY_STORAGE_DELEGATION)) {
-    localStorage.removeItem(KEY_STORAGE_DELEGATION);
-    localStorage.removeItem(KEY_STORAGE_KEY);
+  if (globalThis.localStorage?.getItem(KEY_STORAGE_DELEGATION)) {
+    globalThis.localStorage.removeItem(KEY_STORAGE_DELEGATION);
+    globalThis.localStorage.removeItem(KEY_STORAGE_KEY);
   }
   return await openDB(dbName, version, {
     upgrade: (database) => {

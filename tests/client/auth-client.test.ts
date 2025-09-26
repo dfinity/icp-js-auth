@@ -441,7 +441,7 @@ describe('Auth Client login', () => {
     idpMock.ready('http://127.0.0.1');
 
     const call = idpWindow.postMessage.mock.calls[0][0];
-    expect(call['derivationOrigin']).toBe('http://127.0.0.1:1234');
+    expect(call.derivationOrigin).toBe('http://127.0.0.1:1234');
   });
 
   it('should ignore authorize-ready events with bad origin', async () => {
