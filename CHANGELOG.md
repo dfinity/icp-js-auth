@@ -1,5 +1,9 @@
 ## Unreleased
 
+### Fix
+
+- downgrade idb (#28)
+
 ## 4.0.0 (2025-09-26)
 
 Publishes the new `@icp-sdk/auth` package.
