@@ -1,4 +1,8 @@
-## Unreleased
+## 4.0.1 (2025-09-26)
+
+### Fix
+
+- Downgrade idb to fix the "localStorage is not defined" error when the library is used in a web worker context. (#28)
 
 ## 4.0.0 (2025-09-26)
 
