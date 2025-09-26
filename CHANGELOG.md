@@ -1,4 +1,8 @@
-## Unreleased
+## 4.0.0 (2025-09-26)
+
+Publishes the new `@icp-sdk/auth` package.
+
+See the [upgrading guide](https://js.icp.build/auth/v4.0/upgrading/v4) for more information.
 
 ## 4.0.0-beta.2 (2025-09-23)
 
