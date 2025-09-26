@@ -12,7 +12,7 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       is_beta: ${{ steps.is_beta.outputs.is_beta_tag }}
-      major_minor_patch_version: ${{ steps.ver.outputs.major_minor_patch_version }}
+      major_minor_patch_version_tag: ${{ steps.ver.outputs.major_minor_patch_version_tag }}
     environment:
       name: release
       url: https://www.npmjs.com/package/@icp-sdk/auth
@@ -44,6 +44,7 @@ jobs:
         run: |
           echo "major_minor_version=v${{ steps.extract-version.outputs.major }}.${{ steps.extract-version.outputs.minor }}" >> $GITHUB_OUTPUT
           echo "major_minor_patch_version=v${{ steps.extract-version.outputs.major }}.${{ steps.extract-version.outputs.minor }}.${{ steps.extract-version.outputs.patch }}" >> $GITHUB_OUTPUT
+          echo "major_minor_patch_version_tag=${{ steps.extract-version.outputs.major }}.${{ steps.extract-version.outputs.minor }}.${{ steps.extract-version.outputs.patch }}" >> $GITHUB_OUTPUT
 
       - name: Build NPM package
         run: pnpm build
@@ -79,5 +80,5 @@ jobs:
     if: ${{ needs.release.outputs.is_beta == 'false' }}
     uses: ./.github/workflows/publish-docs.yml
     with:
-      ref: ${{ needs.release.outputs.major_minor_patch_version }}
+      ref: ${{ needs.release.outputs.major_minor_patch_version_tag }}
     secrets: inherit
