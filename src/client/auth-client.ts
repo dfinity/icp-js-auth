@@ -24,6 +24,7 @@ import {
   KEY_STORAGE_KEY,
   KEY_VECTOR,
   LocalStorage,
+  type StoredKey,
 } from './storage.ts';
 
 const NANOSECONDS_PER_SECOND = BigInt(1_000_000_000);
@@ -308,7 +309,6 @@ export class AuthClient {
       // Create a new key (whether or not one was in storage).
       if (keyType === ED25519_KEY_LABEL) {
         key = Ed25519KeyIdentity.generate();
-        await storage.set(KEY_STORAGE_KEY, JSON.stringify((key as Ed25519KeyIdentity).toJSON()));
       } else {
         if (options.storage && keyType === ECDSA_KEY_LABEL) {
           console.warn(
@@ -316,8 +316,8 @@ export class AuthClient {
           );
         }
         key = await ECDSAKeyIdentity.generate();
-        await storage.set(KEY_STORAGE_KEY, (key as ECDSAKeyIdentity).getKeyPair());
       }
+      await persistKey(storage, key);
     }
 
     return new AuthClient(identity, key, chain, storage, idleManager, options);
@@ -400,6 +400,11 @@ export class AuthClient {
     if (this._chain) {
       await this._storage.set(KEY_STORAGE_DELEGATION, JSON.stringify(this._chain.toJSON()));
     }
+
+    // Ensure the stored key in persistent storage matches the in-memory key that
+    // was used to obtain the delegation. This avoids key/delegation mismatches
+    // across multiple tabs overwriting each other's cached keys.
+    await persistKey(this._storage, this._key);
 
     // onSuccess should be the last thing to do to avoid consumers
     // interfering by navigating or refreshing the page
@@ -590,4 +595,22 @@ function mergeLoginOptions(
     ...otherLoginOptions,
     customValues,
   };
+}
+
+function toStoredKey(key: SignIdentity | PartialIdentity): StoredKey {
+  if (key instanceof ECDSAKeyIdentity) {
+    return key.getKeyPair();
+  }
+  if (key instanceof Ed25519KeyIdentity) {
+    return JSON.stringify(key.toJSON());
+  }
+  throw new Error('Unsupported key type');
+}
+
+async function persistKey(
+  storage: AuthClientStorage,
+  key: SignIdentity | PartialIdentity,
+): Promise<void> {
+  const serialized = toStoredKey(key);
+  await storage.set(KEY_STORAGE_KEY, serialized);
 }
