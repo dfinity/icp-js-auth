@@ -1,6 +1,6 @@
 import { Actor, type AgentError, HttpAgent } from '@icp-sdk/core/agent';
 import { IDL } from '@icp-sdk/core/candid';
-import { DelegationChain, Ed25519KeyIdentity } from '@icp-sdk/core/identity';
+import { DelegationChain, ECDSAKeyIdentity, Ed25519KeyIdentity } from '@icp-sdk/core/identity';
 import { Principal } from '@icp-sdk/core/principal';
 import { beforeEach, describe, expect, it, type Mock, vi } from 'vitest';
 import { AuthClient, ERROR_USER_INTERRUPT } from '../../src/client/auth-client.ts';
@@ -10,6 +10,7 @@ import {
   KEY_STORAGE_DELEGATION,
   KEY_STORAGE_KEY,
   LocalStorage,
+  type StoredKey,
 } from '../../src/client/storage.ts';
 
 /**
@@ -563,6 +564,111 @@ describe('Auth Client login', () => {
         })(),
       ),
     ).rejects.toMatch(ERROR_USER_INTERRUPT);
+  });
+
+  it('should overwrite stored Ed25519 key with in-memory key on login', async () => {
+    setup({
+      onAuthRequest: () => {
+        idpMock.send({
+          kind: 'authorize-client-success',
+          delegations: [
+            {
+              delegation: {
+                pubkey: Uint8Array.from([]),
+                expiration: BigInt(0),
+              },
+              signature: Uint8Array.from([]),
+            },
+          ],
+          userPublicKey: Uint8Array.from([]),
+        });
+      },
+    });
+
+    const fakeStore: Record<string, string> = {};
+    const storage: AuthClientStorage = {
+      remove: vi.fn(async (k) => {
+        delete fakeStore[k];
+      }),
+      get: vi.fn(async (k) => fakeStore[k] ?? null),
+      set: vi.fn(async (k, v) => {
+        fakeStore[k] = v as unknown as string;
+      }),
+    };
+
+    const client = await AuthClient.create({ storage, keyType: 'Ed25519' });
+
+    const initialKey = fakeStore[KEY_STORAGE_KEY];
+    expect(typeof initialKey).toBe('string');
+
+    // Simulate another tab overwriting the stored key
+    const overwrittenKey = 'overwritten-key-from-another-tab';
+    fakeStore[KEY_STORAGE_KEY] = overwrittenKey;
+
+    await new Promise<void>((resolve, reject) => {
+      client.login({
+        onSuccess: resolve,
+        onError: reject,
+      });
+      idpMock.ready();
+    });
+
+    expect(fakeStore[KEY_STORAGE_KEY]).toEqual(initialKey);
+    expect(fakeStore[KEY_STORAGE_KEY]).not.toEqual(overwrittenKey);
+  });
+
+  it('should overwrite stored ECDSA key pair with in-memory key on login', async () => {
+    setup({
+      onAuthRequest: () => {
+        idpMock.send({
+          kind: 'authorize-client-success',
+          delegations: [
+            {
+              delegation: {
+                pubkey: Uint8Array.from([]),
+                expiration: BigInt(0),
+              },
+              signature: Uint8Array.from([]),
+            },
+          ],
+          userPublicKey: Uint8Array.from([]),
+        });
+      },
+    });
+
+    const fakeStore: Record<string, StoredKey> = {};
+    const storage: AuthClientStorage = {
+      remove: vi.fn(async (k: string) => {
+        delete fakeStore[k];
+      }),
+      get: vi.fn(async (k: string): Promise<StoredKey | null> => fakeStore[k] ?? null),
+      set: vi.fn(async (k: string, v: StoredKey) => {
+        fakeStore[k] = v;
+      }),
+    };
+
+    const client = await AuthClient.create({ storage }); // default ECDSA
+
+    const initialKeyPair = fakeStore[KEY_STORAGE_KEY] as CryptoKeyPair;
+    expect(initialKeyPair).toBeTruthy();
+    expect(initialKeyPair.publicKey).toBeDefined();
+    expect(initialKeyPair.privateKey).toBeDefined();
+
+    // Simulate another tab overwriting the stored key
+    const overwrittenKeyPair = (await ECDSAKeyIdentity.generate()).getKeyPair();
+    fakeStore[KEY_STORAGE_KEY] = overwrittenKeyPair;
+
+    await new Promise<void>((resolve, reject) => {
+      client.login({ onSuccess: resolve, onError: reject });
+      idpMock.ready();
+    });
+
+    const restored = fakeStore[KEY_STORAGE_KEY] as CryptoKeyPair;
+    // Expect the same key references as initially stored
+    expect(restored.publicKey).toBe(initialKeyPair.publicKey);
+    expect(restored.privateKey).toBe(initialKeyPair.privateKey);
+    expect(restored.privateKey).not.toBe(overwrittenKeyPair.privateKey);
+    expect(restored.publicKey).not.toBe(overwrittenKeyPair.publicKey);
   });
 
   it('should use the loginOptions passed to the create method', async () => {
