@@ -1,5 +1,9 @@
 ## Unreleased
 
+### Fix
+
+- **client**: overwrite stored key on login to prevent key/delegation mismatch (#34)
+
 ## 4.0.1 (2025-09-26)
 
 ### Fix
