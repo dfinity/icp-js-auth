@@ -26,6 +26,8 @@ import {
   LocalStorage,
   type StoredKey,
 } from './storage.ts';
+import { PostMessageTransport } from '@slide-computer/signer-web';
+import { Signer } from '@slide-computer/signer';
 
 const NANOSECONDS_PER_SECOND = BigInt(1_000_000_000);
 const SECONDS_PER_HOUR = BigInt(3_600);
@@ -494,6 +496,59 @@ export class AuthClient {
       }
     };
     checkInterruption();
+  }
+
+  public async loginWithIcrc25(options?: AuthClientLoginOptions): Promise<void> {
+    // Merge the passed options with the options set during creation
+    const loginOptions = mergeLoginOptions(this._createOptions?.loginOptions, options);
+
+    // Set default maxTimeToLive to 8 hours
+    const maxTimeToLive = loginOptions?.maxTimeToLive ?? DEFAULT_MAX_TIME_TO_LIVE;
+
+    // Create the URL of the IDP. (e.g. https://XXXX/#authorize)
+    const identityProviderUrl = new URL(
+      loginOptions?.identityProvider?.toString() || IDENTITY_PROVIDER_DEFAULT,
+    );
+    // Set the correct hash if it isn't already set.
+    identityProviderUrl.hash = IDENTITY_PROVIDER_ENDPOINT;
+
+    // If `login` has been called previously, then close/remove any previous windows
+    // and event listeners.
+    this._idpWindow?.close();
+    this._removeEventListener();
+
+    const transport = new PostMessageTransport({ url: identityProviderUrl.toString() });
+    const signer = new Signer({ transport, derivationOrigin: loginOptions?.derivationOrigin?.toString() });
+    
+    const key = this._key;
+    if (!key) {
+      return;
+    }
+  
+    const delegation: DelegationChain = await signer.delegation({
+      maxTimeToLive,
+      publicKey: this._key?.getPublicKey().toDer(),
+    });
+
+    this._chain = delegation;
+
+    if ('toDer' in key) {
+      this._identity = PartialDelegationIdentity.fromDelegation(key, this._chain);
+    } else {
+      this._identity = DelegationIdentity.fromDelegation(key, this._chain);
+    }
+
+    if (this._chain) {
+      await this._storage.set(KEY_STORAGE_DELEGATION, JSON.stringify(this._chain.toJSON()));
+    }
+
+    // TODO: Pass the delegation chain to the onSuccess callback
+    options?.onSuccess?.({
+      kind: 'authorize-client-success',
+      delegations: [],
+      userPublicKey: this._key?.getPublicKey().toDer(),
+      authnMethod: 'passkey',
+    });
   }
 
   private _getEventHandler(identityProviderUrl: URL, options?: AuthClientLoginOptions) {
