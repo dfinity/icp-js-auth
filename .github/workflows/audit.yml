@@ -1,0 +1,19 @@
+name: audit
+
+on:
+  merge_group:
+  pull_request:
+
+jobs:
+  audit:
+    name: audit:required
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+
+      - name: Setup PNPM
+        uses: dfinity/ci-tools/actions/setup-pnpm@main
+
+      - name: Audit
+        run: pnpm audit
