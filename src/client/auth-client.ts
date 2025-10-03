@@ -512,7 +512,7 @@ export class AuthClient {
     // Set default maxTimeToLive to 8 hours
     const maxTimeToLive = loginOptions?.maxTimeToLive ?? DEFAULT_MAX_TIME_TO_LIVE;
 
-    // Create the URL of the IDP. (e.g. https://XXXX/#authorize)
+    // Create the URL of the IDP. (e.g. https://XXXX/authorize?openid=<selected-open-id>)
     const identityProviderUrl = new URL(
       loginOptions?.identityProvider?.toString() || IDENTITY_PROVIDER_DEFAULT,
     );
