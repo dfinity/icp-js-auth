@@ -16,6 +16,8 @@ import {
   type PartialIdentity,
 } from '@icp-sdk/core/identity';
 import type { Principal } from '@icp-sdk/core/principal';
+import { Signer } from '@slide-computer/signer';
+import { PostMessageTransport } from '@slide-computer/signer-web';
 import { IdleManager, type IdleManagerOptions } from './idle-manager.ts';
 import {
   type AuthClientStorage,
@@ -26,8 +28,6 @@ import {
   LocalStorage,
   type StoredKey,
 } from './storage.ts';
-import { PostMessageTransport } from '@slide-computer/signer-web';
-import { Signer } from '@slide-computer/signer';
 
 const NANOSECONDS_PER_SECOND = BigInt(1_000_000_000);
 const SECONDS_PER_HOUR = BigInt(3_600);
@@ -526,14 +526,20 @@ export class AuthClient {
     // If `login` has been called previously, then close previous channels.
     this._signer?.closeChannel();
 
-    const transport = new PostMessageTransport({ url: identityProviderUrl.toString(), windowOpenerFeatures: loginOptions?.windowOpenerFeatures });
-    this._signer = new Signer({ transport, derivationOrigin: loginOptions?.derivationOrigin?.toString() });
-    
+    const transport = new PostMessageTransport({
+      url: identityProviderUrl.toString(),
+      windowOpenerFeatures: loginOptions?.windowOpenerFeatures,
+    });
+    this._signer = new Signer({
+      transport,
+      derivationOrigin: loginOptions?.derivationOrigin?.toString(),
+    });
+
     const key = this._key;
     if (!key) {
       return;
     }
-  
+
     const delegation: DelegationChain = await this._signer.delegation({
       maxTimeToLive,
       publicKey: this._key?.getPublicKey().toDer(),
