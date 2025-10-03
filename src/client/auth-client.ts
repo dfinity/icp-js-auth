@@ -35,6 +35,7 @@ const NANOSECONDS_PER_HOUR = NANOSECONDS_PER_SECOND * SECONDS_PER_HOUR;
 
 const IDENTITY_PROVIDER_DEFAULT = 'https://identity.internetcomputer.org';
 const IDENTITY_PROVIDER_ENDPOINT = '#authorize';
+const IDENTITY_PROVIDER_ICRC29_PATH = '/authorize';
 
 const DEFAULT_MAX_TIME_TO_LIVE = BigInt(8) * NANOSECONDS_PER_HOUR;
 
@@ -140,6 +141,10 @@ export interface AuthClientLoginOptions {
   customValues?: Record<string, unknown>;
 }
 
+export interface AuthClientLoginIcrc29Options extends AuthClientLoginOptions {
+  openid?: string;
+}
+
 interface InternetIdentityAuthRequest {
   kind: 'authorize-client';
   sessionPublicKey: Uint8Array;
@@ -193,6 +198,8 @@ type AuthResponse = AuthResponseSuccess | AuthResponseFailure;
  * @see {@link AuthClient}
  */
 export class AuthClient {
+  private _signer: Signer<PostMessageTransport> | undefined = undefined;
+
   /**
    * Create an AuthClient to manage authentication and identity
    * @param {AuthClientCreateOptions} options - Options for creating an {@link AuthClient}
@@ -498,7 +505,7 @@ export class AuthClient {
     checkInterruption();
   }
 
-  public async loginWithIcrc25(options?: AuthClientLoginOptions): Promise<void> {
+  public async loginWithIcrc29(options?: AuthClientLoginIcrc29Options): Promise<void> {
     // Merge the passed options with the options set during creation
     const loginOptions = mergeLoginOptions(this._createOptions?.loginOptions, options);
 
@@ -509,23 +516,25 @@ export class AuthClient {
     const identityProviderUrl = new URL(
       loginOptions?.identityProvider?.toString() || IDENTITY_PROVIDER_DEFAULT,
     );
-    // Set the correct hash if it isn't already set.
-    identityProviderUrl.hash = IDENTITY_PROVIDER_ENDPOINT;
+    // Set the correct pathname
+    identityProviderUrl.pathname = IDENTITY_PROVIDER_ICRC29_PATH;
+    // Set the query params (if needed)
+    if (options?.openid) {
+      identityProviderUrl.searchParams.set('openid', options.openid);
+    }
 
-    // If `login` has been called previously, then close/remove any previous windows
-    // and event listeners.
-    this._idpWindow?.close();
-    this._removeEventListener();
+    // If `login` has been called previously, then close previous channels.
+    this._signer?.closeChannel();
 
-    const transport = new PostMessageTransport({ url: identityProviderUrl.toString() });
-    const signer = new Signer({ transport, derivationOrigin: loginOptions?.derivationOrigin?.toString() });
+    const transport = new PostMessageTransport({ url: identityProviderUrl.toString(), windowOpenerFeatures: loginOptions?.windowOpenerFeatures });
+    this._signer = new Signer({ transport, derivationOrigin: loginOptions?.derivationOrigin?.toString() });
     
     const key = this._key;
     if (!key) {
       return;
     }
   
-    const delegation: DelegationChain = await signer.delegation({
+    const delegation: DelegationChain = await this._signer.delegation({
       maxTimeToLive,
       publicKey: this._key?.getPublicKey().toDer(),
     });
