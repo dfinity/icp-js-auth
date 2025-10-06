@@ -16,7 +16,13 @@ import {
   type PartialIdentity,
 } from '@icp-sdk/core/identity';
 import { Principal } from '@icp-sdk/core/principal';
-import { DelegationRequest, DelegationResponse, fromBase64, toBase64, Signer } from '@slide-computer/signer';
+import {
+  type DelegationRequest,
+  type DelegationResponse,
+  fromBase64,
+  Signer,
+  toBase64,
+} from '@slide-computer/signer';
 import { PostMessageTransport } from '@slide-computer/signer-web';
 import { IdleManager, type IdleManagerOptions } from './idle-manager.ts';
 import {
@@ -533,13 +539,10 @@ export class AuthClient {
       return;
     }
 
-    const response = await this._signer.sendRequest<
-      DelegationRequest,
-      DelegationResponse
-    >({
+    const response = await this._signer.sendRequest<DelegationRequest, DelegationResponse>({
       id: window.crypto.randomUUID(),
-      jsonrpc: "2.0",
-      method: "icrc34_delegation",
+      jsonrpc: '2.0',
+      method: 'icrc34_delegation',
       params: {
         publicKey: toBase64(this._key?.getPublicKey().toDer()),
         maxTimeToLive: String(maxTimeToLive),
@@ -550,16 +553,11 @@ export class AuthClient {
       delegation: new Delegation(
         fromBase64(delegation.delegation.pubkey),
         BigInt(delegation.delegation.expiration),
-        delegation.delegation.targets?.map((principal) =>
-          Principal.fromText(principal),
-        ),
+        delegation.delegation.targets?.map((principal) => Principal.fromText(principal)),
       ),
       signature: fromBase64(delegation.signature) as Signature,
     }));
-    const delegation = DelegationChain.fromDelegations(
-      delegations,
-      fromBase64(result.publicKey),
-    );
+    const delegation = DelegationChain.fromDelegations(delegations, fromBase64(result.publicKey));
 
     this._chain = delegation;
 
