@@ -141,10 +141,6 @@ export interface AuthClientLoginOptions {
   customValues?: Record<string, unknown>;
 }
 
-export interface AuthClientLoginIcrc29Options extends AuthClientLoginOptions {
-  openid?: string;
-}
-
 interface InternetIdentityAuthRequest {
   kind: 'authorize-client';
   sessionPublicKey: Uint8Array;
@@ -505,7 +501,8 @@ export class AuthClient {
     checkInterruption();
   }
 
-  public async loginWithIcrc29(options?: AuthClientLoginIcrc29Options): Promise<void> {
+  public async loginWithIcrc29(options?: AuthClientLoginOptions): Promise<void> {
+    console.log('login 29')
     // Merge the passed options with the options set during creation
     const loginOptions = mergeLoginOptions(this._createOptions?.loginOptions, options);
 
@@ -518,10 +515,6 @@ export class AuthClient {
     );
     // Set the correct pathname
     identityProviderUrl.pathname = IDENTITY_PROVIDER_ICRC29_PATH;
-    // Set the query params (if needed)
-    if (options?.openid) {
-      identityProviderUrl.searchParams.set('openid', options.openid);
-    }
 
     // If `login` has been called previously, then close previous channels.
     this._signer?.closeChannel();
