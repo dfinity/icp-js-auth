@@ -15,14 +15,8 @@ import {
   PartialDelegationIdentity,
   type PartialIdentity,
 } from '@icp-sdk/core/identity';
-import { Principal } from '@icp-sdk/core/principal';
-import {
-  type DelegationRequest,
-  type DelegationResponse,
-  fromBase64,
-  Signer,
-  toBase64,
-} from '@slide-computer/signer';
+import type { Principal } from '@icp-sdk/core/principal';
+import { Signer } from '@slide-computer/signer';
 import { PostMessageTransport } from '@slide-computer/signer-web';
 import { IdleManager, type IdleManagerOptions } from './idle-manager.ts';
 import {
@@ -34,7 +28,6 @@ import {
   LocalStorage,
   type StoredKey,
 } from './storage.ts';
-import { unwrapResponse } from './utils.ts';
 
 const NANOSECONDS_PER_SECOND = BigInt(1_000_000_000);
 const SECONDS_PER_HOUR = BigInt(3_600);
