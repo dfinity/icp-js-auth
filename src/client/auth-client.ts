@@ -15,8 +15,8 @@ import {
   PartialDelegationIdentity,
   type PartialIdentity,
 } from '@icp-sdk/core/identity';
-import type { Principal } from '@icp-sdk/core/principal';
-import { Signer } from '@slide-computer/signer';
+import { Principal } from '@icp-sdk/core/principal';
+import { DelegationRequest, DelegationResponse, fromBase64, toBase64, Signer } from '@slide-computer/signer';
 import { PostMessageTransport } from '@slide-computer/signer-web';
 import { IdleManager, type IdleManagerOptions } from './idle-manager.ts';
 import {
@@ -28,6 +28,7 @@ import {
   LocalStorage,
   type StoredKey,
 } from './storage.ts';
+import { unwrapResponse } from './utils.ts';
 
 const NANOSECONDS_PER_SECOND = BigInt(1_000_000_000);
 const SECONDS_PER_HOUR = BigInt(3_600);
@@ -502,7 +503,6 @@ export class AuthClient {
   }
 
   public async loginWithIcrc29(options?: AuthClientLoginOptions): Promise<void> {
-    console.log('login 29')
     // Merge the passed options with the options set during creation
     const loginOptions = mergeLoginOptions(this._createOptions?.loginOptions, options);
 
@@ -533,10 +533,33 @@ export class AuthClient {
       return;
     }
 
-    const delegation: DelegationChain = await this._signer.delegation({
-      maxTimeToLive,
-      publicKey: this._key?.getPublicKey().toDer(),
+    const response = await this._signer.sendRequest<
+      DelegationRequest,
+      DelegationResponse
+    >({
+      id: window.crypto.randomUUID(),
+      jsonrpc: "2.0",
+      method: "icrc34_delegation",
+      params: {
+        publicKey: toBase64(this._key?.getPublicKey().toDer()),
+        maxTimeToLive: String(maxTimeToLive),
+      },
     });
+    const result = unwrapResponse(response);
+    const delegations = result.signerDelegation.map((delegation) => ({
+      delegation: new Delegation(
+        fromBase64(delegation.delegation.pubkey),
+        BigInt(delegation.delegation.expiration),
+        delegation.delegation.targets?.map((principal) =>
+          Principal.fromText(principal),
+        ),
+      ),
+      signature: fromBase64(delegation.signature) as Signature,
+    }));
+    const delegation = DelegationChain.fromDelegations(
+      delegations,
+      fromBase64(result.publicKey),
+    );
 
     this._chain = delegation;
 
@@ -550,10 +573,9 @@ export class AuthClient {
       await this._storage.set(KEY_STORAGE_DELEGATION, JSON.stringify(this._chain.toJSON()));
     }
 
-    // TODO: Pass the delegation chain to the onSuccess callback
     options?.onSuccess?.({
       kind: 'authorize-client-success',
-      delegations: [],
+      delegations,
       userPublicKey: this._key?.getPublicKey().toDer(),
       authnMethod: 'passkey',
     });
