@@ -539,25 +539,10 @@ export class AuthClient {
       return;
     }
 
-    const response = await this._signer.sendRequest<DelegationRequest, DelegationResponse>({
-      id: window.crypto.randomUUID(),
-      jsonrpc: '2.0',
-      method: 'icrc34_delegation',
-      params: {
-        publicKey: toBase64(this._key?.getPublicKey().toDer()),
-        maxTimeToLive: String(maxTimeToLive),
-      },
+    const delegation = await this._signer.delegation({
+      publicKey: this._key.getPublicKey().toDer(),
+      maxTimeToLive,
     });
-    const result = unwrapResponse(response);
-    const delegations = result.signerDelegation.map((delegation) => ({
-      delegation: new Delegation(
-        fromBase64(delegation.delegation.pubkey),
-        BigInt(delegation.delegation.expiration),
-        delegation.delegation.targets?.map((principal) => Principal.fromText(principal)),
-      ),
-      signature: fromBase64(delegation.signature) as Signature,
-    }));
-    const delegation = DelegationChain.fromDelegations(delegations, fromBase64(result.publicKey));
 
     this._chain = delegation;
 
@@ -573,7 +558,7 @@ export class AuthClient {
 
     options?.onSuccess?.({
       kind: 'authorize-client-success',
-      delegations,
+      delegations: delegation.delegations,
       userPublicKey: this._key?.getPublicKey().toDer(),
       authnMethod: 'passkey',
     });
