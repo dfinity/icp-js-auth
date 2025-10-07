@@ -35,7 +35,7 @@ const NANOSECONDS_PER_HOUR = NANOSECONDS_PER_SECOND * SECONDS_PER_HOUR;
 
 const IDENTITY_PROVIDER_DEFAULT = 'https://identity.internetcomputer.org';
 const IDENTITY_PROVIDER_ENDPOINT = '#authorize';
-const IDENTITY_PROVIDER_ICRC29_PATH = '/authorize';
+const IDENTITY_PROVIDER_ICRC29_DEFAULT = 'https://id.ai/authorize';
 
 const DEFAULT_MAX_TIME_TO_LIVE = BigInt(8) * NANOSECONDS_PER_HOUR;
 
@@ -510,10 +510,8 @@ export class AuthClient {
 
     // Create the URL of the IDP. (e.g. https://XXXX/authorize?openid=<selected-open-id>)
     const identityProviderUrl = new URL(
-      loginOptions?.identityProvider?.toString() || IDENTITY_PROVIDER_DEFAULT,
+      loginOptions?.identityProvider?.toString() || IDENTITY_PROVIDER_ICRC29_DEFAULT,
     );
-    // Set the correct pathname
-    identityProviderUrl.pathname = IDENTITY_PROVIDER_ICRC29_PATH;
 
     // If `login` has been called previously, then close previous channels.
     this._signer?.closeChannel();
