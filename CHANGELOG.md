@@ -1,5 +1,9 @@
 ## Unreleased
 
+### Feat
+
+- support requesting delegations using ICRC-29 (#39)
+
 ## 4.0.2 (2025-10-01)
 
 ### Fix
