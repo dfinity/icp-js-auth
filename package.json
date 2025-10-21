@@ -50,22 +50,22 @@
   },
   "packageManager": "pnpm@10.13.1",
   "devDependencies": {
-    "@biomejs/biome": "^2.2.4",
-    "@icp-sdk/core": "^4.0.4",
-    "@tanstack/config": "^0.20.2",
-    "fake-indexeddb": "^6.2.2",
-    "jsdom": "^27.0.0",
-    "publint": "^0.3.13",
-    "typescript": "^5.9.2",
-    "vite": "^7.1.7",
+    "@biomejs/biome": "^2.2.6",
+    "@icp-sdk/core": "^4.1.0",
+    "@tanstack/config": "^0.22.0",
+    "fake-indexeddb": "^6.2.4",
+    "jsdom": "^27.0.1",
+    "publint": "^0.3.15",
+    "typescript": "^5.9.3",
+    "vite": "^7.1.11",
     "vitest": "3.2.4"
   },
   "peerDependencies": {
-    "@icp-sdk/core": "^4.0.4"
+    "@icp-sdk/core": "^4"
   },
   "dependencies": {
-    "idb": "^7.1.1",
     "@slide-computer/signer": "^4.0.0",
-    "@slide-computer/signer-web": "^4.0.0"
+    "@slide-computer/signer-web": "^4.0.0",
+    "idb": "^7.1.1"
   }
 }
