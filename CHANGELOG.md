@@ -1,3 +1,9 @@
+## Unreleased
+
+### Fix
+
+- throw error if IndexedDB fails to open (#45)
+
 ## 4.1.0
 
 ### Feat
