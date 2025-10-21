@@ -82,7 +82,7 @@ export class IdbStorage implements AuthClientStorage {
   // Initializes a KeyVal on first request
   private initializedDb: IdbKeyVal | undefined;
   get _db(): Promise<IdbKeyVal> {
-    return new Promise((resolve) => {
+    return new Promise((resolve, reject) => {
       if (this.initializedDb) {
         resolve(this.initializedDb);
         return;
@@ -90,7 +90,7 @@ export class IdbStorage implements AuthClientStorage {
       IdbKeyVal.create(this.#options).then((db) => {
         this.initializedDb = db;
         resolve(db);
-      });
+      }).catch(reject);
     });
   }
 
