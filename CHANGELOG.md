@@ -1,3 +1,9 @@
+## Unreleased
+
+### Feat
+
+- revert support requesting delegations with ICRC-29 (#50)
+
 ## 4.1.1 (2025-10-21)
 
 ### Fix
