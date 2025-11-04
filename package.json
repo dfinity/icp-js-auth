@@ -64,8 +64,6 @@
     "@icp-sdk/core": "^4"
   },
   "dependencies": {
-    "@slide-computer/signer": "^4.0.0",
-    "@slide-computer/signer-web": "^4.0.0",
     "idb": "^7.1.1"
   }
 }
