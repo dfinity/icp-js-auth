@@ -1,6 +1,6 @@
 {
   "name": "@icp-sdk/auth",
-  "version": "4.1.1",
+  "version": "4.2.0",
   "author": "DFINITY Stiftung <sdk@dfinity.org>",
   "license": "Apache-2.0",
   "description": "Authentication library for Internet Computer web apps",
