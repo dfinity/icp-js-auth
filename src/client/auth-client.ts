@@ -16,8 +16,6 @@ import {
   type PartialIdentity,
 } from '@icp-sdk/core/identity';
 import type { Principal } from '@icp-sdk/core/principal';
-import { Signer } from '@slide-computer/signer';
-import { PostMessageTransport } from '@slide-computer/signer-web';
 import { IdleManager, type IdleManagerOptions } from './idle-manager.ts';
 import {
   type AuthClientStorage,
@@ -35,7 +33,6 @@ const NANOSECONDS_PER_HOUR = NANOSECONDS_PER_SECOND * SECONDS_PER_HOUR;
 
 const IDENTITY_PROVIDER_DEFAULT = 'https://identity.internetcomputer.org';
 const IDENTITY_PROVIDER_ENDPOINT = '#authorize';
-const IDENTITY_PROVIDER_ICRC29_DEFAULT = 'https://id.ai/authorize';
 
 const DEFAULT_MAX_TIME_TO_LIVE = BigInt(8) * NANOSECONDS_PER_HOUR;
 
@@ -194,8 +191,6 @@ type AuthResponse = AuthResponseSuccess | AuthResponseFailure;
  * @see {@link AuthClient}
  */
 export class AuthClient {
-  private _signer: Signer<PostMessageTransport> | undefined = undefined;
-
   /**
    * Create an AuthClient to manage authentication and identity
    * @param {AuthClientCreateOptions} options - Options for creating an {@link AuthClient}
@@ -499,60 +494,6 @@ export class AuthClient {
       }
     };
     checkInterruption();
-  }
-
-  public async loginWithIcrc29(options?: AuthClientLoginOptions): Promise<void> {
-    // Merge the passed options with the options set during creation
-    const loginOptions = mergeLoginOptions(this._createOptions?.loginOptions, options);
-
-    // Set default maxTimeToLive to 8 hours
-    const maxTimeToLive = loginOptions?.maxTimeToLive ?? DEFAULT_MAX_TIME_TO_LIVE;
-
-    // Create the URL of the IDP. (e.g. https://XXXX/authorize?openid=<selected-open-id>)
-    const identityProviderUrl = new URL(
-      loginOptions?.identityProvider?.toString() || IDENTITY_PROVIDER_ICRC29_DEFAULT,
-    );
-
-    // If `login` has been called previously, then close previous channels.
-    this._signer?.closeChannel();
-
-    const transport = new PostMessageTransport({
-      url: identityProviderUrl.toString(),
-      windowOpenerFeatures: loginOptions?.windowOpenerFeatures,
-    });
-    this._signer = new Signer({
-      transport,
-      derivationOrigin: loginOptions?.derivationOrigin?.toString(),
-    });
-
-    const key = this._key;
-    if (!key) {
-      return;
-    }
-
-    const delegation = await this._signer.delegation({
-      publicKey: this._key.getPublicKey().toDer(),
-      maxTimeToLive,
-    });
-
-    this._chain = delegation;
-
-    if ('toDer' in key) {
-      this._identity = PartialDelegationIdentity.fromDelegation(key, this._chain);
-    } else {
-      this._identity = DelegationIdentity.fromDelegation(key, this._chain);
-    }
-
-    if (this._chain) {
-      await this._storage.set(KEY_STORAGE_DELEGATION, JSON.stringify(this._chain.toJSON()));
-    }
-
-    options?.onSuccess?.({
-      kind: 'authorize-client-success',
-      delegations: delegation.delegations,
-      userPublicKey: this._key?.getPublicKey().toDer(),
-      authnMethod: 'passkey',
-    });
   }
 
   private _getEventHandler(identityProviderUrl: URL, options?: AuthClientLoginOptions) {
