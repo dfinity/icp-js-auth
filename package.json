@@ -51,7 +51,7 @@
   "packageManager": "pnpm@10.13.1",
   "devDependencies": {
     "@biomejs/biome": "^2.3.7",
-    "@icp-sdk/core": "^4.1.0",
+    "@icp-sdk/core": "5.0.0-beta.0",
     "@tanstack/config": "^0.22.1",
     "fake-indexeddb": "^6.2.5",
     "jsdom": "^27.2.0",
@@ -61,7 +61,7 @@
     "vitest": "4.0.14"
   },
   "peerDependencies": {
-    "@icp-sdk/core": "^4"
+    "@icp-sdk/core": "5.0.0-beta.0"
   },
   "dependencies": {
     "idb": "^7.1.1"
