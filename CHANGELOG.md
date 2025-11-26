@@ -1,3 +1,9 @@
+## Unreleased
+
+## 5.0.0-beta.0 (2025-11-26)
+
+- build: bump core to 5.0.0-beta.0 (#55)
+
 ## 4.2.0 (2025-11-04)
 
 ### Feat
