@@ -16,8 +16,8 @@ importers:
         specifier: ^2.3.7
         version: 2.3.7
       '@icp-sdk/core':
-        specifier: 5.0.0-beta.0
-        version: 5.0.0-beta.0
+        specifier: 5.0.0-beta.1
+        version: 5.0.0-beta.1
       '@tanstack/config':
         specifier: ^0.22.1
         version: 0.22.1(@types/node@24.5.2)(@typescript-eslint/utils@8.48.0(eslint@9.36.0)(typescript@5.9.3))(eslint@9.36.0)(rollup@4.52.0)(typescript@5.9.3)(vite@7.2.4(@types/node@24.5.2)(yaml@2.8.1))
@@ -422,8 +422,8 @@ packages:
     resolution: {integrity: sha512-bV0Tgo9K4hfPCek+aMAn81RppFKv2ySDQeMoSZuvTASywNTnVJCArCZE2FWqpvIatKu7VMRLWlR1EazvVhDyhQ==}
     engines: {node: '>=18.18'}
 
-  '@icp-sdk/core@5.0.0-beta.0':
-    resolution: {integrity: sha512-+hQjeInIWPiXHdnwO2Troi8ds/Lk8MXZ+TmBv3eS+WBWYfaWP3uBrrIuiO0Ev1bDqpBtUhXgIiJQhh42sdYD+w==}
+  '@icp-sdk/core@5.0.0-beta.1':
+    resolution: {integrity: sha512-50P74+ofmJcbBM+V2WcpaH41nZ2Vk/mlT8pQe+uynjq/Wm4wADYckbMg3cbfJfa1bPl4/hWmXKM+ZnLK3fmWoQ==}
 
   '@isaacs/balanced-match@4.0.1':
     resolution: {integrity: sha512-yzMTt9lEb8Gv7zRioUilSglI0c0smZ9k5D65677DLWLtWJaXIS3CqcGyUFByYKlnUj6TkjLVs54fBl6+TiGQDQ==}
@@ -2247,7 +2247,7 @@ snapshots:
 
   '@humanwhocodes/retry@0.4.3': {}
 
-  '@icp-sdk/core@5.0.0-beta.0':
+  '@icp-sdk/core@5.0.0-beta.1':
     dependencies:
       '@dfinity/cbor': 0.2.2
       '@noble/curves': 1.9.7
