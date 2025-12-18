@@ -63,6 +63,25 @@ await authClient.logout();
 
 Additional documentation can be found [here](https://js.icp.build/auth/latest/).
 
+## Direct Google authentication example (ICRC-29)
+
+There is now a way to integrate your dapp with id.ai so that the Google sign in button appears directly on your dapp's page (as opposed to having that button under the id.ai domain). This works by skipping the choice of authentication methods and auto-selecting Google OpenID.
+
+High-level overview:
+
+1. Specify AuthClient version 4.1.1 in your package.json file.
+2. Add a "Sign in with Google" button whose click handler calls `authClient.loginWithIcrc29` (rather than `authClient.login`).
+3. Specify `https://id.ai/authorize?openid=google` as the `identityProvider` field.
+
+Example code:
+
+```typescript
+await authClient.loginWithIcrc29({
+  identityProvider: 'https://id.ai/authorize?openid=google',
+  // ...
+});
+```
+
 ## Contributing
 
 Contributions are welcome! Please see the [contribution guide](./.github/CONTRIBUTING.md) for more information.
