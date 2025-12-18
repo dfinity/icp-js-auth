@@ -1,4 +1,8 @@
+## Unreleased
+
 ## 5.0.0 (2025-12-18)
+
+- build: bump `@icp-sdk/core` to 5.0.0 (#66)
 
 ## 5.0.0-beta.2 (2025-12-17)
 
