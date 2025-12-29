@@ -52,7 +52,7 @@
   "devDependencies": {
     "@biomejs/biome": "^2.3.7",
     "@icp-sdk/core": "^5.0.0",
-    "@tanstack/config": "^0.22.1",
+    "@tanstack/vite-config": "^0.4.3",
     "fake-indexeddb": "^6.2.5",
     "jsdom": "^27.2.0",
     "publint": "^0.3.15",
