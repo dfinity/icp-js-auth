@@ -424,6 +424,28 @@ export class AuthClient {
   }
 
   /**
+   * Generates a new session key, clears the existing delegation, and resets the identity to anonymous.
+   * After calling this, the user must log in again to obtain a delegation for the new key.
+   * @example
+   * const principalBefore = client.getIdentity().getPrincipal().toString();
+   * await client.generateNewKey();
+   * const principalAfter = client.getIdentity().getPrincipal().toString();
+   * log('principal before: ' + principalBefore);
+   * log('principal after:  ' + principalAfter);
+   */
+  public async generateNewKey(): Promise<void> {
+    const keyType = this._createOptions?.keyType ?? ECDSA_KEY_LABEL;
+    const key: SignIdentity = keyType === ED25519_KEY_LABEL ? Ed25519KeyIdentity.generate() : await ECDSAKeyIdentity.generate();
+
+    await persistKey(this._storage, key);
+    await this._storage.remove(KEY_STORAGE_DELEGATION);
+
+    this._key = key;
+    this._chain = null;
+    this._identity = new AnonymousIdentity();
+  }
+
+  /**
    * AuthClient Login - Opens up a new window to authenticate with Internet Identity
    * @param {AuthClientLoginOptions} options - Options for logging in, merged with the options set during creation if any. Note: we only perform a shallow merge for the `customValues` property.
    * @param options.identityProvider Identity provider

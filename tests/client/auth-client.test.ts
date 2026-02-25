@@ -9,6 +9,7 @@ import {
   IdbStorage,
   KEY_STORAGE_DELEGATION,
   KEY_STORAGE_KEY,
+  KEY_VECTOR,
   LocalStorage,
   type StoredKey,
 } from '../../src/client/storage.ts';
@@ -61,12 +62,28 @@ describe('Auth Client', () => {
   });
 
   it('should log users out', async () => {
-    const test = await AuthClient.create();
+    const fakeStore: Record<string, any> = {};
+    const storage: AuthClientStorage = {
+      remove: vi.fn(async x => {
+        delete fakeStore[x];
+      }),
+      get: vi.fn(async x => fakeStore[x] ?? null),
+      set: vi.fn(async (x, y) => {
+        fakeStore[x] = y;
+      }),
+    };
+
+    const test = await AuthClient.create({ storage });
     await test.logout();
+
     expect(await test.isAuthenticated()).toBe(false);
     expect(test.getIdentity().getPrincipal().isAnonymous()).toBe(true);
+    expect(storage.remove).toHaveBeenCalledWith(KEY_STORAGE_KEY);
+    expect(storage.remove).toHaveBeenCalledWith(KEY_STORAGE_DELEGATION);
+    expect(storage.remove).toHaveBeenCalledWith(KEY_VECTOR);
+    expect(fakeStore[KEY_STORAGE_KEY]).toBeUndefined();
+    expect(fakeStore[KEY_STORAGE_DELEGATION]).toBeUndefined();
   });
-
   it('should not initialize an idleManager if the user is not logged in', async () => {
     const test = await AuthClient.create();
     expect(test.idleManager).not.toBeDefined();
@@ -344,6 +361,105 @@ describe('Auth Client', () => {
   });
 });
 
+describe('generateNewKey', () => {
+  it('should generate and store a new ECDSA key by default', async () => {
+    const fakeStore: Record<string, any> = {};
+    const storage: AuthClientStorage = {
+      remove: vi.fn(async x => {
+        delete fakeStore[x];
+      }),
+      get: vi.fn(async x => fakeStore[x] ?? null),
+      set: vi.fn(async (x, y) => {
+        fakeStore[x] = y;
+      }),
+    };
+
+    const client = await AuthClient.create({ storage });
+    const oldKey = fakeStore[KEY_STORAGE_KEY];
+
+    await client.generateNewKey();
+
+    const newKey = fakeStore[KEY_STORAGE_KEY];
+    expect(newKey).not.toBe(oldKey);
+    expect(Object.keys(newKey)).toMatchInlineSnapshot(`
+      [
+        "publicKey",
+        "privateKey",
+      ]
+    `);
+  });
+
+  it('should generate and store a new Ed25519 key when keyType is Ed25519', async () => {
+    const fakeStore: Record<string, any> = {};
+    const storage: AuthClientStorage = {
+      remove: vi.fn(async x => {
+        delete fakeStore[x];
+      }),
+      get: vi.fn(async x => fakeStore[x] ?? null),
+      set: vi.fn(async (x, y) => {
+        fakeStore[x] = y;
+      }),
+    };
+
+    const client = await AuthClient.create({ storage, keyType: 'Ed25519' });
+    const oldKey = fakeStore[KEY_STORAGE_KEY];
+
+    await client.generateNewKey();
+
+    const newKey = fakeStore[KEY_STORAGE_KEY];
+    expect(typeof newKey).toBe('string');
+    expect(JSON.parse(newKey)).toHaveLength(2);
+    expect(newKey).not.toBe(oldKey);
+  });
+
+  it('should remove the delegation from storage', async () => {
+    const fakeStore: Record<string, any> = {};
+    const storage: AuthClientStorage = {
+      remove: vi.fn(async x => {
+        delete fakeStore[x];
+      }),
+      get: vi.fn(async x => fakeStore[x] ?? null),
+      set: vi.fn(async (x, y) => {
+        fakeStore[x] = y;
+      }),
+    };
+
+    const client = await AuthClient.create({ storage });
+    fakeStore[KEY_STORAGE_DELEGATION] = 'some-delegation';
+
+    await client.generateNewKey();
+
+    expect(fakeStore[KEY_STORAGE_DELEGATION]).toBeUndefined();
+    expect(storage.remove).toHaveBeenCalledWith(KEY_STORAGE_DELEGATION);
+  });
+
+  it('should reset identity to anonymous and isAuthenticated to false', async () => {
+    const client = await AuthClient.create({
+      identity: Ed25519KeyIdentity.generate(),
+    });
+
+    expect(client.getIdentity().getPrincipal().isAnonymous()).toBe(false);
+
+    await client.generateNewKey();
+
+    expect(client.getIdentity().getPrincipal().isAnonymous()).toBe(true);
+    expect(await client.isAuthenticated()).toBe(false);
+  });
+
+  it('should replace the session key with a new distinct key', async () => {
+    const client = await AuthClient.create();
+    const keyBefore = (client as any)._key;
+
+    await client.generateNewKey();
+
+    const keyAfter = (client as any)._key;
+    expect(keyAfter).not.toBe(keyBefore);
+    expect(new Uint8Array(keyAfter.getPublicKey().toDer())).not.toEqual(
+      new Uint8Array(keyBefore.getPublicKey().toDer()),
+    );
+  });
+});
+
 describe('IdbStorage', () => {
   it('should handle get and set', async () => {
     const storage = new IdbStorage();
@@ -364,7 +480,7 @@ let idpWindow: IdpWindow;
 let idpMock: IdpMock;
 function setup(options?: { onAuthRequest?: () => void }) {
   // Set the event handler.
-  global.addEventListener = vi.fn((_, callback) => {
+  globalThis.addEventListener = vi.fn((_, callback) => {
     idpMock = new IdpMock(callback, 'https://identity.internetcomputer.org');
   });
 
@@ -781,7 +897,7 @@ describe('Migration from Ed25519Key', () => {
   ];
 
   it('should continue using an existing Ed25519Key and delegation', async () => {
-    // set the jest timer to a fixed value
+    // set the vitest timer to a fixed value
     vi.setSystemTime(new Date('2020-01-01T00:00:00.000Z'));
 
     // two days from now
@@ -806,7 +922,7 @@ describe('Migration from Ed25519Key', () => {
   });
 
   it('should continue using an existing Ed25519Key with no delegation', async () => {
-    // set the jest timer to a fixed value
+    // set the vitest timer to a fixed value
     vi.setSystemTime(new Date('2020-01-01T00:00:00.000Z'));
 
     const storage: AuthClientStorage = {
@@ -825,7 +941,7 @@ describe('Migration from Ed25519Key', () => {
   });
 
   it('should continue using an existing Ed25519Key with an expired delegation', async () => {
-    // set the jest timer to a fixed value
+    // set the vitest timer to a fixed value
     vi.setSystemTime(new Date('2020-01-01T00:00:00.000Z'));
 
     // two days ago
@@ -857,6 +973,7 @@ describe('Migration from Ed25519Key', () => {
     expect(storage.remove).toHaveBeenCalledTimes(3);
     expect(fakeStore).toMatchInlineSnapshot(`{}`);
   });
+
   it('should generate and store a ECDSAKey if no key is stored', async () => {
     const fakeStore: Record<string, string> = {};
     const storage: AuthClientStorage = {

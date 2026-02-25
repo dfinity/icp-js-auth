@@ -51,6 +51,20 @@ await authClient.login({
 await authClient.logout();
 ```
 
+## Rotating the Session Key
+
+You can generate a new session key at any time with `generateNewKey()`. This clears the current delegation and resets the identity to anonymous, so the user must log in again afterward:
+
+```typescript
+await authClient.generateNewKey();
+
+console.log(authClient.isAuthenticated()); // false
+console.log(authClient.getIdentity().getPrincipal().isAnonymous()); // true
+
+// the user must log in again to get a delegation for the new key
+await authClient.login({ identityProvider, onSuccess });
+```
+
 ## Next Steps
 
 Check out the [Integrating Internet Identity](https://internetcomputer.org/docs/building-apps/authentication/integrate-internet-identity) guide for a more detailed guide on how to integrate Internet Identity into your web app.
