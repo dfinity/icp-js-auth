@@ -1,5 +1,9 @@
 ## Unreleased
 
+### Feat
+
+- add `generateNewKey` method to `AuthClient` for session key rotation
+
 ## 5.0.0 (2025-12-18)
 
 - build: bump `@icp-sdk/core` to 5.0.0 (#65)
