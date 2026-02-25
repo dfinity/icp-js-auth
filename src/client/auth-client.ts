@@ -434,6 +434,12 @@ export class AuthClient {
    * log('principal after:  ' + principalAfter);
    */
   public async generateNewKey(): Promise<void> {
+    // If `login` has been called previously, then close/remove any previous windows
+    // and event listeners.
+    this._idpWindow?.close();
+    this._removeEventListener();
+    delete this._idpWindow;
+
     const keyType = this._createOptions?.keyType ?? ECDSA_KEY_LABEL;
     const key: SignIdentity =
       keyType === ED25519_KEY_LABEL
