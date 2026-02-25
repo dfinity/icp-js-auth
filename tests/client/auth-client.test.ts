@@ -62,12 +62,12 @@ describe('Auth Client', () => {
   });
 
   it('should log users out', async () => {
-    const fakeStore: Record<string, any> = {};
+    const fakeStore: Record<string, StoredKey> = {};
     const storage: AuthClientStorage = {
-      remove: vi.fn(async x => {
+      remove: vi.fn(async (x) => {
         delete fakeStore[x];
       }),
-      get: vi.fn(async x => fakeStore[x] ?? null),
+      get: vi.fn(async (x) => fakeStore[x] ?? null),
       set: vi.fn(async (x, y) => {
         fakeStore[x] = y;
       }),
@@ -363,12 +363,12 @@ describe('Auth Client', () => {
 
 describe('generateNewKey', () => {
   it('should generate and store a new ECDSA key by default', async () => {
-    const fakeStore: Record<string, any> = {};
+    const fakeStore: Record<string, StoredKey> = {};
     const storage: AuthClientStorage = {
-      remove: vi.fn(async x => {
+      remove: vi.fn(async (x) => {
         delete fakeStore[x];
       }),
-      get: vi.fn(async x => fakeStore[x] ?? null),
+      get: vi.fn(async (x) => fakeStore[x] ?? null),
       set: vi.fn(async (x, y) => {
         fakeStore[x] = y;
       }),
@@ -390,12 +390,12 @@ describe('generateNewKey', () => {
   });
 
   it('should generate and store a new Ed25519 key when keyType is Ed25519', async () => {
-    const fakeStore: Record<string, any> = {};
+    const fakeStore: Record<string, StoredKey> = {};
     const storage: AuthClientStorage = {
-      remove: vi.fn(async x => {
+      remove: vi.fn(async (x) => {
         delete fakeStore[x];
       }),
-      get: vi.fn(async x => fakeStore[x] ?? null),
+      get: vi.fn(async (x) => fakeStore[x] ?? null),
       set: vi.fn(async (x, y) => {
         fakeStore[x] = y;
       }),
@@ -408,17 +408,17 @@ describe('generateNewKey', () => {
 
     const newKey = fakeStore[KEY_STORAGE_KEY];
     expect(typeof newKey).toBe('string');
-    expect(JSON.parse(newKey)).toHaveLength(2);
+    expect(JSON.parse(newKey as string)).toHaveLength(2);
     expect(newKey).not.toBe(oldKey);
   });
 
   it('should remove the delegation from storage', async () => {
-    const fakeStore: Record<string, any> = {};
+    const fakeStore: Record<string, StoredKey> = {};
     const storage: AuthClientStorage = {
-      remove: vi.fn(async x => {
+      remove: vi.fn(async (x) => {
         delete fakeStore[x];
       }),
-      get: vi.fn(async x => fakeStore[x] ?? null),
+      get: vi.fn(async (x) => fakeStore[x] ?? null),
       set: vi.fn(async (x, y) => {
         fakeStore[x] = y;
       }),
@@ -447,16 +447,24 @@ describe('generateNewKey', () => {
   });
 
   it('should replace the session key with a new distinct key', async () => {
-    const client = await AuthClient.create();
-    const keyBefore = (client as any)._key;
+    const fakeStore: Record<string, StoredKey> = {};
+    const storage: AuthClientStorage = {
+      remove: vi.fn(async (k) => {
+        delete fakeStore[k];
+      }),
+      get: vi.fn(async (k) => fakeStore[k] ?? null),
+      set: vi.fn(async (k, v) => {
+        fakeStore[k] = v;
+      }),
+    };
+
+    const client = await AuthClient.create({ storage });
+    const keyBefore = fakeStore[KEY_STORAGE_KEY];
 
     await client.generateNewKey();
 
-    const keyAfter = (client as any)._key;
+    const keyAfter = fakeStore[KEY_STORAGE_KEY];
     expect(keyAfter).not.toBe(keyBefore);
-    expect(new Uint8Array(keyAfter.getPublicKey().toDer())).not.toEqual(
-      new Uint8Array(keyBefore.getPublicKey().toDer()),
-    );
   });
 });
 

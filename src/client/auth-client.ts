@@ -435,7 +435,10 @@ export class AuthClient {
    */
   public async generateNewKey(): Promise<void> {
     const keyType = this._createOptions?.keyType ?? ECDSA_KEY_LABEL;
-    const key: SignIdentity = keyType === ED25519_KEY_LABEL ? Ed25519KeyIdentity.generate() : await ECDSAKeyIdentity.generate();
+    const key: SignIdentity =
+      keyType === ED25519_KEY_LABEL
+        ? Ed25519KeyIdentity.generate()
+        : await ECDSAKeyIdentity.generate();
 
     await persistKey(this._storage, key);
     await this._storage.remove(KEY_STORAGE_DELEGATION);
