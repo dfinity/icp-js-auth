@@ -50,20 +50,20 @@
   },
   "packageManager": "pnpm@10.13.1",
   "devDependencies": {
-    "@biomejs/biome": "^2.3.7",
+    "@biomejs/biome": "^2.4.4",
     "@icp-sdk/core": "^5.0.0",
     "@tanstack/vite-config": "^0.4.3",
     "fake-indexeddb": "^6.2.5",
-    "jsdom": "^27.2.0",
-    "publint": "^0.3.15",
+    "jsdom": "^28.1.0",
+    "publint": "^0.3.17",
     "typescript": "^5.9.3",
-    "vite": "^7.2.4",
-    "vitest": "4.0.14"
+    "vite": "^7.3.1",
+    "vitest": "4.0.18"
   },
   "peerDependencies": {
     "@icp-sdk/core": "^5"
   },
   "dependencies": {
-    "idb": "^7.1.1"
+    "idb": "^8.0.3"
   }
 }
