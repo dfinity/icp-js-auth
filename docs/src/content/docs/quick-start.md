@@ -21,7 +21,7 @@ const identityProvider =
 
 const authClient = await AuthClient.create();
 const identity = authClient.getIdentity(); // At this point, you'll get a Principal.anonymous()
-console.log(authClient.isAuthenticated()); // false
+console.log(await authClient.isAuthenticated()); // false
 
 const canisterId = Principal.fromText('uqqxf-5h777-77774-qaaaa-cai');
 const agent = await HttpAgent.create({
@@ -32,7 +32,7 @@ async function onSuccess() {
   console.log('Login successful');
 
   const identity = authClient.getIdentity(); // At this point, you'll get an authenticated identity
-  console.log(authClient.isAuthenticated()); // true
+  console.log(await authClient.isAuthenticated()); // true
   agent.replaceIdentity(identity);
 
   // this call will be authenticated
@@ -58,7 +58,7 @@ You can generate a new session key at any time with `generateNewKey()`. This cle
 ```typescript
 await authClient.generateNewKey();
 
-console.log(authClient.isAuthenticated()); // false
+console.log(await authClient.isAuthenticated()); // false
 console.log(authClient.getIdentity().getPrincipal().isAnonymous()); // true
 
 // the user must log in again to get a delegation for the new key

@@ -440,8 +440,8 @@ export class AuthClient {
         ? Ed25519KeyIdentity.generate()
         : await ECDSAKeyIdentity.generate();
 
+    await _deleteStorage(this._storage);
     await persistKey(this._storage, key);
-    await this._storage.remove(KEY_STORAGE_DELEGATION);
 
     this._key = key;
     this._chain = null;

@@ -49,7 +49,7 @@ async function onSuccess() {
   console.log('Login successful');
 
   const identity = authClient.getIdentity(); // At this point, you'll get an authenticated identity
-  console.log(authClient.isAuthenticated()); // true
+  console.log(await authClient.isAuthenticated()); // true
 }
 
 await authClient.login({
