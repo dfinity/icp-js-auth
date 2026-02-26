@@ -53,17 +53,19 @@ await authClient.logout();
 
 ## Rotating the Session Key
 
-You can generate a new session key at any time with `generateNewKey()`. This clears the current delegation and resets the identity to anonymous, so the user must log in again afterward:
+When a user initiates a new sign-in (e.g. clicks "sign in" or "switch account"), call `generateNewKey()` right before `login()`. This generates a fresh session key and clears any existing delegation, ensuring the new login uses a key that was never exposed in storage:
 
 ```typescript
+// User clicks "sign in" or "switch account"
 await authClient.generateNewKey();
-
-console.log(await authClient.isAuthenticated()); // false
-console.log(authClient.getIdentity().getPrincipal().isAnonymous()); // true
-
-// the user must log in again to get a delegation for the new key
 await authClient.login({ identityProvider, onSuccess });
 ```
+
+This replaces the pattern of calling `logout()` followed by a page reload, which can leave a pre-generated key in storage between sign-out and sign-in.
+
+:::caution
+Do not call `generateNewKey()` on every page load, existing sessions are preserved as normal through `AuthClient.create()` and `isAuthenticated()`.
+:::
 
 ## Next Steps
 

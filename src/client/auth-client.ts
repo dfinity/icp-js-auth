@@ -426,12 +426,14 @@ export class AuthClient {
   /**
    * Generates a new session key, clears the existing delegation, and resets the identity to anonymous.
    * After calling this, the user must log in again to obtain a delegation for the new key.
+   * Use this when the user initiates a new sign-in — call it right before {@link login}.
+   * This avoids leaving a pre-generated key in storage between sign-out and sign-in.
+   *
+   * Do **not** call this on every page load — doing so would destroy existing sessions.
    * @example
-   * const principalBefore = client.getIdentity().getPrincipal().toString();
+   * // User clicks "sign in" or "switch account"
    * await client.generateNewKey();
-   * const principalAfter = client.getIdentity().getPrincipal().toString();
-   * log('principal before: ' + principalBefore);
-   * log('principal after:  ' + principalAfter);
+   * await client.login({ ... });
    */
   public async generateNewKey(): Promise<void> {
     // If `login` has been called previously, then close/remove any previous windows
