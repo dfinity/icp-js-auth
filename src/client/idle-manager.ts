@@ -7,7 +7,7 @@ export type IdleManagerOptions = {
   onIdle?: IdleCB;
   /**
    * timeout in ms
-   * @default 30 minutes [600_000]
+   * @default 10 minutes [600_000]
    */
   idleTimeout?: number;
   /**
