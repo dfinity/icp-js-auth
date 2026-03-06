@@ -48,7 +48,7 @@ beforeEach(() => {
 describe('Auth Client', () => {
   it('should initialize with an AnonymousIdentity', async () => {
     const test = await AuthClient.create();
-    expect(await test.isAuthenticated()).toBe(false);
+    expect(test.isAuthenticated()).toBe(false);
     expect(test.getIdentity().getPrincipal().isAnonymous()).toBe(true);
   });
 
@@ -76,7 +76,7 @@ describe('Auth Client', () => {
     const test = await AuthClient.create({ storage });
     await test.logout();
 
-    expect(await test.isAuthenticated()).toBe(false);
+    expect(test.isAuthenticated()).toBe(false);
     expect(test.getIdentity().getPrincipal().isAnonymous()).toBe(true);
     expect(storage.remove).toHaveBeenCalledWith(KEY_STORAGE_KEY);
     expect(storage.remove).toHaveBeenCalledWith(KEY_STORAGE_DELEGATION);
@@ -141,7 +141,7 @@ describe('Auth Client', () => {
     try {
       await actor.greet('hello');
     } catch (error) {
-      expect(await test.isAuthenticated()).toBe(false);
+      expect(test.isAuthenticated()).toBe(false);
       expect((error as AgentError).message).toBe(expectedError);
     }
   });
@@ -443,28 +443,19 @@ describe('generateNewKey', () => {
     await client.generateNewKey();
 
     expect(client.getIdentity().getPrincipal().isAnonymous()).toBe(true);
-    expect(await client.isAuthenticated()).toBe(false);
+    expect(client.isAuthenticated()).toBe(false);
   });
 
-  it('should replace the session key with a new distinct key', async () => {
-    const fakeStore: Record<string, StoredKey> = {};
-    const storage: AuthClientStorage = {
-      remove: vi.fn(async (k) => {
-        delete fakeStore[k];
-      }),
-      get: vi.fn(async (k) => fakeStore[k] ?? null),
-      set: vi.fn(async (k, v) => {
-        fakeStore[k] = v;
-      }),
-    };
+  it('should close an in-flight login window and remove its event listener', async () => {
+    setup();
+    const client = await AuthClient.create();
 
-    const client = await AuthClient.create({ storage });
-    const keyBefore = fakeStore[KEY_STORAGE_KEY];
+    await client.login();
+    expect(idpWindow.closed).toBe(false);
 
     await client.generateNewKey();
-
-    const keyAfter = fakeStore[KEY_STORAGE_KEY];
-    expect(keyAfter).not.toBe(keyBefore);
+    expect(idpWindow.close).toHaveBeenCalled();
+    expect(idpWindow.closed).toBe(true);
   });
 });
 

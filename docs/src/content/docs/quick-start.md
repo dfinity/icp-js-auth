@@ -21,7 +21,7 @@ const identityProvider =
 
 const authClient = await AuthClient.create();
 const identity = authClient.getIdentity(); // At this point, you'll get a Principal.anonymous()
-console.log(await authClient.isAuthenticated()); // false
+console.log(authClient.isAuthenticated()); // false
 
 const canisterId = Principal.fromText('uqqxf-5h777-77774-qaaaa-cai');
 const agent = await HttpAgent.create({
@@ -32,7 +32,7 @@ async function onSuccess() {
   console.log('Login successful');
 
   const identity = authClient.getIdentity(); // At this point, you'll get an authenticated identity
-  console.log(await authClient.isAuthenticated()); // true
+  console.log(authClient.isAuthenticated()); // true
   agent.replaceIdentity(identity);
 
   // this call will be authenticated
