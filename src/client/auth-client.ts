@@ -35,6 +35,12 @@ type BaseKeyType = typeof ECDSA_KEY_LABEL | typeof ED25519_KEY_LABEL;
 
 const KEY_STORAGE_EXPIRATION = 'ic-delegation_expiration';
 
+const OPENID_PROVIDER_URLS: Record<OpenIdProvider, string> = {
+  google: 'https://accounts.google.com',
+  apple: 'https://appleid.apple.com',
+  microsoft: 'https://login.microsoftonline.com/{tid}/v2.0',
+};
+
 export const ERROR_USER_INTERRUPT = 'UserInterrupt';
 
 /**
@@ -83,7 +89,16 @@ export interface AuthClientCreateOptions {
    * @example "toolbar=0,location=0,menubar=0,width=500,height=500,left=100,top=100"
    */
   windowOpenerFeatures?: string;
+
+  /**
+   * OpenID provider for one-click sign-in. When set, the identity provider
+   * URL includes an `openid` search param so the user authenticates via
+   * the chosen provider (e.g. Google) instead of seeing Internet Identity directly.
+   */
+  openIdProvider?: OpenIdProvider;
 }
+
+export type OpenIdProvider = 'google' | 'apple' | 'microsoft';
 
 export interface IdleOptions extends IdleManagerOptions {
   /**
@@ -157,10 +172,13 @@ export class AuthClient {
     this.#options = options;
     this.#storage = options.storage ?? new IdbStorage();
 
-    const identityProviderUrl = options.identityProvider?.toString() || IDENTITY_PROVIDER_DEFAULT;
+    const identityProviderUrl = new URL(options.identityProvider?.toString() || IDENTITY_PROVIDER_DEFAULT);
+    if (options.openIdProvider) {
+      identityProviderUrl.searchParams.set('openid', OPENID_PROVIDER_URLS[options.openIdProvider]);
+    }
 
     const transport = new PostMessageTransport({
-      url: identityProviderUrl,
+      url: identityProviderUrl.toString(),
       windowOpenerFeatures: options.windowOpenerFeatures,
     });
 
