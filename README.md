@@ -61,6 +61,18 @@ try {
 await authClient.logout();
 ```
 
+### One-Click OpenID Sign-In
+
+Skip the Internet Identity authentication method screen and offer sign-in options like Google directly in your app:
+
+```typescript
+const authClient = new AuthClient({
+  openIdProvider: 'google', // or 'apple' or 'microsoft'
+});
+
+await authClient.login();
+```
+
 Additional documentation can be found [here](https://js.icp.build/auth/latest/).
 
 ## Contributing
