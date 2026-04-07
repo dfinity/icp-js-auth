@@ -68,9 +68,22 @@ export interface AuthClientCreateOptions {
   idleOptions?: IdleOptions;
 
   /**
-   * Options to handle login, passed to the login method
+   * Identity provider
+   * @default "https://id.ai/authorize"
    */
-  loginOptions?: AuthClientLoginOptions;
+  identityProvider?: string | URL;
+
+  /**
+   * Origin for Identity Provider to use while generating the delegated identity. For II, the derivation origin must authorize this origin by setting a record at `<derivation-origin>/.well-known/ii-alternative-origins`.
+   * @see https://github.com/dfinity/internet-identity/blob/main/docs/internet-identity-spec.adoc
+   */
+  derivationOrigin?: string | URL;
+
+  /**
+   * Auth Window feature config string
+   * @example "toolbar=0,location=0,menubar=0,width=500,height=500,left=100,top=100"
+   */
+  windowOpenerFeatures?: string;
 }
 
 export interface IdleOptions extends IdleManagerOptions {
@@ -93,37 +106,35 @@ export type OnErrorFunc = (error?: string) => void | Promise<void>;
 
 export interface AuthClientLoginOptions {
   /**
-   * Identity provider
-   * @default "https://id.ai/authorize"
-   */
-  identityProvider?: string | URL;
-  /**
    * Expiration of the authentication in nanoseconds
    * @default  BigInt(8) hours * BigInt(3_600_000_000_000) nanoseconds
    */
   maxTimeToLive?: bigint;
   /**
-   * Origin for Identity Provider to use while generating the delegated identity. For II, the derivation origin must authorize this origin by setting a record at `<derivation-origin>/.well-known/ii-alternative-origins`.
-   * @see https://github.com/dfinity/internet-identity/blob/main/docs/internet-identity-spec.adoc
+   * Optional canister targets for the delegation.
    */
-  derivationOrigin?: string | URL;
-  /**
-   * Auth Window feature config string
-   * @example "toolbar=0,location=0,menubar=0,width=500,height=500,left=100,top=100"
-   */
-  windowOpenerFeatures?: string;
+  targets?: Principal[];
   /**
    * Callback once login has completed
    */
   onSuccess?: OnSuccessFunc;
   /**
-   * Callback in case authentication fails
+   * Callback in case authentication fails.
+   * When provided, errors are passed to this callback instead of being thrown.
    */
   onError?: OnErrorFunc;
-  /**
-   * Optional canister targets for the delegation.
-   */
-  targets?: Principal[];
+}
+
+/**
+ * Generates a fresh session key of the given type.
+ */
+async function generateKey(
+  keyType: BaseKeyType,
+): Promise<SignIdentity> {
+  if (keyType === ED25519_KEY_LABEL) {
+    return Ed25519KeyIdentity.generate();
+  }
+  return await ECDSAKeyIdentity.generate();
 }
 
 /**
@@ -260,7 +271,21 @@ export class AuthClient {
       await persistKey(storage, key);
     }
 
-    return new AuthClient(identity, key, chain, storage, idleManager, options);
+    // Create transport and signer from create-time options so they are reusable across logins.
+    const identityProviderUrl =
+      options.identityProvider?.toString() || IDENTITY_PROVIDER_DEFAULT;
+
+    const transport = new PostMessageTransport({
+      url: identityProviderUrl,
+      windowOpenerFeatures: options.windowOpenerFeatures,
+    });
+
+    const signer = new Signer({
+      transport,
+      derivationOrigin: options.derivationOrigin?.toString(),
+    });
+
+    return new AuthClient(identity, key, chain, storage, idleManager, options, signer);
   }
 
   protected constructor(
@@ -270,6 +295,7 @@ export class AuthClient {
     private _storage: AuthClientStorage,
     public idleManager: IdleManager | undefined,
     private _createOptions: AuthClientCreateOptions | undefined,
+    private _signer: Signer,
   ) {
     this._registerDefaultIdleCallback();
   }
@@ -289,14 +315,15 @@ export class AuthClient {
   }
 
   private async _handleSuccess(
+    key: SignIdentity | PartialIdentity,
     delegationChain: DelegationChain,
     onSuccess?: OnSuccessFunc,
   ) {
-    const key = this._key;
     if (!key) {
       return;
     }
 
+    this._key = key;
     this._chain = delegationChain;
 
     if ('toDer' in key) {
@@ -317,9 +344,7 @@ export class AuthClient {
       await this._storage.set(KEY_STORAGE_DELEGATION, JSON.stringify(this._chain.toJSON()));
     }
 
-    // Ensure the stored key in persistent storage matches the in-memory key that
-    // was used to obtain the delegation. This avoids key/delegation mismatches
-    // across multiple tabs overwriting each other's cached keys.
+    // Persist the fresh key that was used for this login.
     await persistKey(this._storage, this._key);
 
     // onSuccess should be the last thing to do to avoid consumers
@@ -341,19 +366,21 @@ export class AuthClient {
 
   /**
    * AuthClient Login - Opens up a new window to authenticate with Internet Identity
-   * @param {AuthClientLoginOptions} options - Options for logging in, merged with the options set during creation if any.
-   * @param options.identityProvider Identity provider
+   *
+   * Generates a fresh session key for every login attempt. If `onError` is provided,
+   * errors are routed to that callback; otherwise login() throws on failure.
+   *
+   * @param {AuthClientLoginOptions} options - Per-login options (maxTimeToLive, targets, callbacks).
    * @param options.maxTimeToLive Expiration of the authentication in nanoseconds
-   * @param options.derivationOrigin Origin for Identity Provider to use while generating the delegated identity
-   * @param options.windowOpenerFeatures Configures the opened authentication window
    * @param options.onSuccess Callback once login has completed
    * @param options.onError Callback in case authentication fails
    * @example
-   * const authClient = await AuthClient.create();
-   * authClient.login({
+   * const authClient = await AuthClient.create({
    *  identityProvider: 'http://<canisterID>.127.0.0.1:8000',
-   *  maxTimeToLive: BigInt (7) * BigInt(24) * BigInt(3_600_000_000_000), // 1 week
    *  windowOpenerFeatures: "toolbar=0,location=0,menubar=0,width=500,height=500,left=100,top=100",
+   * });
+   * authClient.login({
+   *  maxTimeToLive: BigInt (7) * BigInt(24) * BigInt(3_600_000_000_000), // 1 week
    *  onSuccess: () => {
    *    console.log('Login Successful!');
    *  },
@@ -363,37 +390,31 @@ export class AuthClient {
    * });
    */
   public async login(options?: AuthClientLoginOptions): Promise<void> {
-    // Merge the passed options with the options set during creation
-    const loginOptions = mergeLoginOptions(this._createOptions?.loginOptions, options);
-
     // Set default maxTimeToLive to 8 hours
-    const maxTimeToLive = loginOptions?.maxTimeToLive ?? DEFAULT_MAX_TIME_TO_LIVE;
-
-    const identityProviderUrl =
-      loginOptions?.identityProvider?.toString() || IDENTITY_PROVIDER_DEFAULT;
-
-    const transport = new PostMessageTransport({
-      url: identityProviderUrl,
-      windowOpenerFeatures: loginOptions?.windowOpenerFeatures,
-    });
-
-    const signer = new Signer({
-      transport,
-      derivationOrigin: loginOptions?.derivationOrigin?.toString(),
-    });
+    const maxTimeToLive = options?.maxTimeToLive ?? DEFAULT_MAX_TIME_TO_LIVE;
 
     try {
-      const delegationChain = await signer.requestDelegation({
-        publicKey: this._key.getPublicKey(),
-        targets: loginOptions?.targets,
+      // Generate a fresh session key for every login attempt instead of reusing the stored one.
+      const key = this._createOptions?.identity
+        ?? await generateKey(this._createOptions?.keyType ?? ECDSA_KEY_LABEL);
+
+      const delegationChain = await this._signer.requestDelegation({
+        publicKey: key.getPublicKey(),
+        targets: options?.targets,
         maxTimeToLive,
       });
 
-      await this._handleSuccess(delegationChain, loginOptions?.onSuccess);
+      await this._handleSuccess(key, delegationChain, options?.onSuccess);
     } catch (err) {
-      loginOptions?.onError?.((err as Error).message);
+      // If an onError callback is provided, route the error there (callback-style).
+      // Otherwise, re-throw so callers can use try/catch or .catch().
+      if (options?.onError) {
+        await options.onError((err as Error).message);
+      } else {
+        throw err;
+      }
     } finally {
-      await signer.closeChannel();
+      await this._signer.closeChannel();
     }
   }
 
@@ -418,20 +439,6 @@ async function _deleteStorage(storage: AuthClientStorage) {
   await storage.remove(KEY_STORAGE_KEY);
   await storage.remove(KEY_STORAGE_DELEGATION);
   await storage.remove(KEY_VECTOR);
-}
-
-function mergeLoginOptions(
-  loginOptions: AuthClientLoginOptions | undefined,
-  otherLoginOptions: AuthClientLoginOptions | undefined,
-): AuthClientLoginOptions | undefined {
-  if (!loginOptions && !otherLoginOptions) {
-    return undefined;
-  }
-
-  return {
-    ...loginOptions,
-    ...otherLoginOptions,
-  };
 }
 
 function toStoredKey(key: SignIdentity | PartialIdentity): StoredKey {
