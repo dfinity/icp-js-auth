@@ -40,24 +40,24 @@ Here's a simple example of how to use the `@icp-sdk/auth` package to authenticat
 ```typescript
 import { AuthClient } from '@icp-sdk/auth/client';
 
-const identityProvider = 'https://id.ai/';
+const authClient = new AuthClient();
 
-const authClient = await AuthClient.create();
-const identity = authClient.getIdentity(); // At this point, you'll get a Principal.anonymous()
-
-async function onSuccess() {
-  console.log('Login successful');
-
-  const identity = authClient.getIdentity(); // At this point, you'll get an authenticated identity
-  console.log(authClient.isAuthenticated()); // true
+// Check for an existing session (synchronous)
+if (authClient.isAuthenticated()) {
+  const identity = await authClient.getIdentity();
+  console.log('Restored session:', identity.getPrincipal().toString());
 }
 
-await authClient.login({
-  identityProvider,
-  onSuccess,
-});
+// Log in
+try {
+  await authClient.login();
+  const identity = await authClient.getIdentity();
+  console.log('Logged in:', identity.getPrincipal().toString());
+} catch (error) {
+  console.error('Login failed:', error);
+}
 
-// later in your app
+// Log out
 await authClient.logout();
 ```
 

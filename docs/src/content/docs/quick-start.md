@@ -16,35 +16,35 @@ import { HttpAgent } from '@icp-sdk/core/agent';
 const network = 'ic'; // typically, this value is read from the environment (e.g. process.env.DFX_NETWORK)
 const identityProvider =
   network === 'ic'
-    ? 'https://id.ai/' // Mainnet
+    ? 'https://id.ai/authorize' // Mainnet
     : 'http://rdmx6-jaaaa-aaaaa-aaadq-cai.localhost:4943'; // Local
 
-const authClient = await AuthClient.create();
-const identity = authClient.getIdentity(); // At this point, you'll get a Principal.anonymous()
-console.log(authClient.isAuthenticated()); // false
+const authClient = new AuthClient({ identityProvider });
+
+// Check for an existing session (synchronous)
+if (authClient.isAuthenticated()) {
+  const identity = await authClient.getIdentity();
+  console.log('Restored session:', identity.getPrincipal().toString());
+}
 
 const canisterId = Principal.fromText('uqqxf-5h777-77774-qaaaa-cai');
 const agent = await HttpAgent.create({
   host: 'https://icp-api.io',
 });
 
-async function onSuccess() {
-  console.log('Login successful');
-
-  const identity = authClient.getIdentity(); // At this point, you'll get an authenticated identity
-  console.log(authClient.isAuthenticated()); // true
-  agent.replaceIdentity(identity);
-
-  // this call will be authenticated
-  await agent.call(canisterId, {
-    methodName: 'greet',
-    arg: IDL.encode([IDL.Text], ['world']),
-  });
+try {
+  await authClient.login();
+} catch (error) {
+  console.error('Login failed:', error);
 }
 
-await authClient.login({
-  identityProvider,
-  onSuccess,
+const identity = await authClient.getIdentity();
+agent.replaceIdentity(identity);
+
+// this call will be authenticated
+await agent.call(canisterId, {
+  methodName: 'greet',
+  arg: IDL.encode([IDL.Text], ['world']),
 });
 
 // later in your app
