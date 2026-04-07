@@ -1,4 +1,4 @@
-import { beforeAll, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 import { IdleManager } from '../../src/client/idle-manager.ts';
 
 const MILLISECONDS_PER_SECOND = 1000;
@@ -13,15 +13,43 @@ beforeAll(() => {
   });
 });
 
+afterEach(() => {
+  // Tear down the singleton so each test starts fresh.
+  IdleManager.create().exit();
+});
+
 describe('IdleManager', () => {
   it('should call its callback after time spent inactive', () => {
     const cb = vi.fn();
-    const manager = IdleManager.create({ onIdle: cb, captureScroll: true });
+    IdleManager.create({ onIdle: cb, captureScroll: true });
     expect(cb).not.toHaveBeenCalled();
     // simulate user being inactive for 10 minutes
     vi.advanceTimersByTime(10 * MILLISECONDS_PER_MINUTE);
     expect(cb).toHaveBeenCalled();
-    manager.exit();
+  });
+
+  it('should return the same instance on subsequent create calls', () => {
+    const a = IdleManager.create();
+    const b = IdleManager.create();
+    expect(a).toBe(b);
+  });
+
+  it('should register additional callbacks from subsequent create calls', () => {
+    const cb1 = vi.fn();
+    const cb2 = vi.fn();
+    IdleManager.create({ onIdle: cb1 });
+    IdleManager.create({ onIdle: cb2 });
+
+    vi.advanceTimersByTime(10 * MILLISECONDS_PER_MINUTE);
+    expect(cb1).toHaveBeenCalled();
+    expect(cb2).toHaveBeenCalled();
+  });
+
+  it('should allow a fresh instance after exit', () => {
+    const a = IdleManager.create();
+    a.exit();
+    const b = IdleManager.create();
+    expect(a).not.toBe(b);
   });
 
   it('should replace the default callback if a callback is passed during creation', () => {
@@ -46,7 +74,7 @@ describe('IdleManager', () => {
     expect(window.location.reload).not.toHaveBeenCalled();
   });
 
-  it('should delay allow configuration of the timeout', () => {
+  it('should allow configuration of the timeout', () => {
     const cb = vi.fn();
     const extraDelay = 100;
     IdleManager.create({ onIdle: cb, idleTimeout: 10 * MILLISECONDS_PER_MINUTE + extraDelay });

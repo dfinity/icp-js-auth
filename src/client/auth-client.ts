@@ -11,7 +11,7 @@ import {
 import type { Principal } from '@icp-sdk/core/principal';
 import { Signer } from '@icp-sdk/signer';
 import { PostMessageTransport } from '@icp-sdk/signer/web';
-import { IdleManager, type IdleManagerOptions } from './idle-manager.ts';
+import { IdleManager, type IdleManagerOptions } from './idle-manager.js';
 import {
   type AuthClientStorage,
   IdbStorage,
@@ -20,7 +20,7 @@ import {
   KEY_VECTOR,
   LocalStorage,
   type StoredKey,
-} from './storage.ts';
+} from './storage.js';
 
 const NANOSECONDS_PER_SECOND = BigInt(1_000_000_000);
 const SECONDS_PER_HOUR = BigInt(3_600);
@@ -34,7 +34,6 @@ const ED25519_KEY_LABEL = 'Ed25519';
 type BaseKeyType = typeof ECDSA_KEY_LABEL | typeof ED25519_KEY_LABEL;
 
 const KEY_STORAGE_EXPIRATION = 'ic-delegation_expiration';
-
 
 export const ERROR_USER_INTERRUPT = 'UserInterrupt';
 
@@ -84,7 +83,6 @@ export interface AuthClientCreateOptions {
    * @example "toolbar=0,location=0,menubar=0,width=500,height=500,left=100,top=100"
    */
   windowOpenerFeatures?: string;
-
 }
 
 export interface IdleOptions extends IdleManagerOptions {
