@@ -42,7 +42,7 @@
     "internet identity"
   ],
   "scripts": {
-    "build": "vite build && pnpm lint:package",
+    "build": "tsc -p tsconfig.build.json && pnpm lint:package",
     "test": "vitest",
     "codestyle:check": "biome check",
     "codestyle:fix": "biome check --write",
@@ -52,12 +52,10 @@
   "devDependencies": {
     "@biomejs/biome": "^2.3.7",
     "@icp-sdk/core": "^5.0.0",
-    "@tanstack/vite-config": "^0.4.3",
     "fake-indexeddb": "^6.2.5",
     "jsdom": "^27.2.0",
     "publint": "^0.3.15",
     "typescript": "^5.9.3",
-    "vite": "^7.2.4",
     "vitest": "4.0.14"
   },
   "peerDependencies": {
