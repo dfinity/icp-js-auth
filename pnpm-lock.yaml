@@ -18,6 +18,9 @@ importers:
       '@icp-sdk/core':
         specifier: ^5.0.0
         version: 5.0.0
+      '@icp-sdk/signer':
+        specifier: ^5.0.0
+        version: 5.2.0(@icp-sdk/core@5.0.0)
       '@tanstack/vite-config':
         specifier: ^0.4.3
         version: 0.4.3(@types/node@24.5.2)(rollup@4.52.0)(typescript@5.9.3)(vite@7.2.4(@types/node@24.5.2)(yaml@2.8.1))
@@ -345,6 +348,11 @@ packages:
 
   '@icp-sdk/core@5.0.0':
     resolution: {integrity: sha512-t6iRbdylHG57MicWRpR1uMTFXRW7GCzec6KAg55CBwDHbHLQDKikQ252lmlcEa80DrKa3LPvMKYZEUYjEq5XUQ==}
+
+  '@icp-sdk/signer@5.2.0':
+    resolution: {integrity: sha512-yJB/ZnqOksD57tmKZS2Bnf6i4nJ64tv4teAMofttd4ZNzErrr3mWwqxT3wIBC+Y8ri7PbI3LOTN/GD86vi8XlA==}
+    peerDependencies:
+      '@icp-sdk/core': ^5
 
   '@jridgewell/sourcemap-codec@1.5.5':
     resolution: {integrity: sha512-cYQ9310grqxueWbl+WuIUIaiUaDcj7WOq5fVhEljNVgRfOUhY9fy2zTvfoqWsnebh8Sl70VScFbICvJnLKB0Og==}
@@ -1474,6 +1482,10 @@ snapshots:
       '@scure/bip32': 1.7.0
       '@scure/bip39': 1.6.0
       asn1js: 3.0.6
+
+  '@icp-sdk/signer@5.2.0(@icp-sdk/core@5.0.0)':
+    dependencies:
+      '@icp-sdk/core': 5.0.0
 
   '@jridgewell/sourcemap-codec@1.5.5': {}
 
