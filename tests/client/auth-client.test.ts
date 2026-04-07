@@ -213,7 +213,7 @@ describe('AuthClient login', () => {
 
   it('should set the localStorage expiration flag after login', async () => {
     await mockSignerForLogin();
-    const client = new AuthClient();
+    const client = new AuthClient({ idleOptions: { disableIdle: true } });
     expect(client.isAuthenticated()).toBe(false);
     await client.login();
     expect(client.isAuthenticated()).toBe(true);
@@ -221,7 +221,7 @@ describe('AuthClient login', () => {
 
   it('should clear the localStorage expiration flag on logout', async () => {
     await mockSignerForLogin();
-    const client = new AuthClient();
+    const client = new AuthClient({ idleOptions: { disableIdle: true } });
     await client.login();
     expect(client.isAuthenticated()).toBe(true);
     await client.logout();
