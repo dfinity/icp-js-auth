@@ -1,12 +1,9 @@
 import {
   AnonymousIdentity,
-  type DerEncodedPublicKey,
   type Identity,
-  type Signature,
   type SignIdentity,
 } from '@icp-sdk/core/agent';
 import {
-  Delegation,
   DelegationChain,
   DelegationIdentity,
   ECDSAKeyIdentity,
@@ -16,6 +13,8 @@ import {
   type PartialIdentity,
 } from '@icp-sdk/core/identity';
 import type { Principal } from '@icp-sdk/core/principal';
+import { Signer } from '@icp-sdk/signer';
+import { PostMessageTransport } from '@icp-sdk/signer/web';
 import { IdleManager, type IdleManagerOptions } from './idle-manager.js';
 import {
   type AuthClientStorage,
@@ -31,18 +30,13 @@ const NANOSECONDS_PER_SECOND = BigInt(1_000_000_000);
 const SECONDS_PER_HOUR = BigInt(3_600);
 const NANOSECONDS_PER_HOUR = NANOSECONDS_PER_SECOND * SECONDS_PER_HOUR;
 
-const IDENTITY_PROVIDER_DEFAULT = 'https://identity.internetcomputer.org';
-const IDENTITY_PROVIDER_ENDPOINT = '#authorize';
+const IDENTITY_PROVIDER_DEFAULT = 'https://id.ai/authorize';
 
 const DEFAULT_MAX_TIME_TO_LIVE = BigInt(8) * NANOSECONDS_PER_HOUR;
 
 const ECDSA_KEY_LABEL = 'ECDSA';
 const ED25519_KEY_LABEL = 'Ed25519';
 type BaseKeyType = typeof ECDSA_KEY_LABEL | typeof ED25519_KEY_LABEL;
-
-const INTERRUPT_CHECK_INTERVAL = 500;
-
-export const ERROR_USER_INTERRUPT = 'UserInterrupt';
 
 /**
  * List of options for creating an {@link AuthClient}.
@@ -93,16 +87,14 @@ export interface IdleOptions extends IdleManagerOptions {
   disableDefaultIdleCallback?: boolean;
 }
 
-export type OnSuccessFunc =
-  | (() => void | Promise<void>)
-  | ((message: InternetIdentityAuthResponseSuccess) => void | Promise<void>);
+export type OnSuccessFunc = () => void | Promise<void>;
 
 export type OnErrorFunc = (error?: string) => void | Promise<void>;
 
 export interface AuthClientLoginOptions {
   /**
    * Identity provider
-   * @default "https://identity.internetcomputer.org"
+   * @default "https://id.ai/authorize"
    */
   identityProvider?: string | URL;
   /**
@@ -110,10 +102,6 @@ export interface AuthClientLoginOptions {
    * @default  BigInt(8) hours * BigInt(3_600_000_000_000) nanoseconds
    */
   maxTimeToLive?: bigint;
-  /**
-   * If present, indicates whether or not the Identity Provider should allow the user to authenticate and/or register using a temporary key/PIN identity. Authenticating dapps may want to prevent users from using Temporary keys/PIN identities because Temporary keys/PIN identities are less secure than Passkeys (webauthn credentials) and because Temporary keys/PIN identities generally only live in a browser database (which may get cleared by the browser/OS).
-   */
-  allowPinAuthentication?: boolean;
   /**
    * Origin for Identity Provider to use while generating the delegated identity. For II, the derivation origin must authorize this origin by setting a record at `<derivation-origin>/.well-known/ii-alternative-origins`.
    * @see https://github.com/dfinity/internet-identity/blob/main/docs/internet-identity-spec.adoc
@@ -133,58 +121,10 @@ export interface AuthClientLoginOptions {
    */
   onError?: OnErrorFunc;
   /**
-   * Extra values to be passed in the login request during the authorize-ready phase
+   * Optional canister targets for the delegation.
    */
-  customValues?: Record<string, unknown>;
+  targets?: Principal[];
 }
-
-interface InternetIdentityAuthRequest {
-  kind: 'authorize-client';
-  sessionPublicKey: Uint8Array;
-  maxTimeToLive?: bigint;
-  allowPinAuthentication?: boolean;
-  derivationOrigin?: string;
-}
-
-export interface InternetIdentityAuthResponseSuccess {
-  kind: 'authorize-client-success';
-  delegations: {
-    delegation: {
-      pubkey: Uint8Array;
-      expiration: bigint;
-      targets?: Principal[];
-    };
-    signature: Uint8Array;
-  }[];
-  userPublicKey: Uint8Array;
-  authnMethod: 'passkey' | 'pin' | 'recovery';
-}
-
-interface AuthReadyMessage {
-  kind: 'authorize-ready';
-}
-
-interface AuthResponseSuccess {
-  kind: 'authorize-client-success';
-  delegations: {
-    delegation: {
-      pubkey: Uint8Array;
-      expiration: bigint;
-      targets?: Principal[];
-    };
-    signature: Uint8Array;
-  }[];
-  userPublicKey: Uint8Array;
-  authnMethod: 'passkey' | 'pin' | 'recovery';
-}
-
-interface AuthResponseFailure {
-  kind: 'authorize-client-failure';
-  text: string;
-}
-
-type IdentityServiceResponseMessage = AuthReadyMessage | AuthResponse;
-type AuthResponse = AuthResponseSuccess | AuthResponseFailure;
 
 /**
  * Tool to manage authentication and identity
@@ -330,10 +270,6 @@ export class AuthClient {
     private _storage: AuthClientStorage,
     public idleManager: IdleManager | undefined,
     private _createOptions: AuthClientCreateOptions | undefined,
-    // A handle on the IdP window.
-    private _idpWindow?: Window,
-    // The event handler for processing events from the IdP.
-    private _eventHandler?: (event: MessageEvent) => void,
   ) {
     this._registerDefaultIdleCallback();
   }
@@ -353,25 +289,9 @@ export class AuthClient {
   }
 
   private async _handleSuccess(
-    message: InternetIdentityAuthResponseSuccess,
+    delegationChain: DelegationChain,
     onSuccess?: OnSuccessFunc,
   ) {
-    const delegations = message.delegations.map((signedDelegation) => {
-      return {
-        delegation: new Delegation(
-          signedDelegation.delegation.pubkey,
-          signedDelegation.delegation.expiration,
-          signedDelegation.delegation.targets,
-        ),
-        signature: signedDelegation.signature as Signature,
-      };
-    });
-
-    const delegationChain = DelegationChain.fromDelegations(
-      delegations,
-      message.userPublicKey as DerEncodedPublicKey,
-    );
-
     const key = this._key;
     if (!key) {
       return;
@@ -385,7 +305,6 @@ export class AuthClient {
       this._identity = DelegationIdentity.fromDelegation(key, this._chain);
     }
 
-    this._idpWindow?.close();
     const idleOptions = this._createOptions?.idleOptions;
     // create the idle manager on a successful login if we haven't disabled it
     // and it doesn't already exist.
@@ -393,9 +312,6 @@ export class AuthClient {
       this.idleManager = IdleManager.create(idleOptions);
       this._registerDefaultIdleCallback();
     }
-
-    this._removeEventListener();
-    delete this._idpWindow;
 
     if (this._chain) {
       await this._storage.set(KEY_STORAGE_DELEGATION, JSON.stringify(this._chain.toJSON()));
@@ -408,7 +324,7 @@ export class AuthClient {
 
     // onSuccess should be the last thing to do to avoid consumers
     // interfering by navigating or refreshing the page
-    onSuccess?.(message);
+    await onSuccess?.();
   }
 
   public getIdentity(): Identity {
@@ -425,15 +341,13 @@ export class AuthClient {
 
   /**
    * AuthClient Login - Opens up a new window to authenticate with Internet Identity
-   * @param {AuthClientLoginOptions} options - Options for logging in, merged with the options set during creation if any. Note: we only perform a shallow merge for the `customValues` property.
+   * @param {AuthClientLoginOptions} options - Options for logging in, merged with the options set during creation if any.
    * @param options.identityProvider Identity provider
    * @param options.maxTimeToLive Expiration of the authentication in nanoseconds
-   * @param options.allowPinAuthentication If present, indicates whether or not the Identity Provider should allow the user to authenticate and/or register using a temporary key/PIN identity. Authenticating dapps may want to prevent users from using Temporary keys/PIN identities because Temporary keys/PIN identities are less secure than Passkeys (webauthn credentials) and because Temporary keys/PIN identities generally only live in a browser database (which may get cleared by the browser/OS).
    * @param options.derivationOrigin Origin for Identity Provider to use while generating the delegated identity
    * @param options.windowOpenerFeatures Configures the opened authentication window
    * @param options.onSuccess Callback once login has completed
    * @param options.onError Callback in case authentication fails
-   * @param options.customValues Extra values to be passed in the login request during the authorize-ready phase. Note: we only perform a shallow merge for the `customValues` property.
    * @example
    * const authClient = await AuthClient.create();
    * authClient.login({
@@ -455,100 +369,32 @@ export class AuthClient {
     // Set default maxTimeToLive to 8 hours
     const maxTimeToLive = loginOptions?.maxTimeToLive ?? DEFAULT_MAX_TIME_TO_LIVE;
 
-    // Create the URL of the IDP. (e.g. https://XXXX/#authorize)
-    const identityProviderUrl = new URL(
-      loginOptions?.identityProvider?.toString() || IDENTITY_PROVIDER_DEFAULT,
-    );
-    // Set the correct hash if it isn't already set.
-    identityProviderUrl.hash = IDENTITY_PROVIDER_ENDPOINT;
+    const identityProviderUrl =
+      loginOptions?.identityProvider?.toString() || IDENTITY_PROVIDER_DEFAULT;
 
-    // If `login` has been called previously, then close/remove any previous windows
-    // and event listeners.
-    this._idpWindow?.close();
-    this._removeEventListener();
-
-    // Add an event listener to handle responses.
-    this._eventHandler = this._getEventHandler(identityProviderUrl, {
-      maxTimeToLive,
-      ...loginOptions,
+    const transport = new PostMessageTransport({
+      url: identityProviderUrl,
+      windowOpenerFeatures: loginOptions?.windowOpenerFeatures,
     });
-    window.addEventListener('message', this._eventHandler);
 
-    // Open a new window with the IDP provider.
-    this._idpWindow =
-      window.open(
-        identityProviderUrl.toString(),
-        'idpWindow',
-        loginOptions?.windowOpenerFeatures,
-      ) ?? undefined;
+    const signer = new Signer({
+      transport,
+      derivationOrigin: loginOptions?.derivationOrigin?.toString(),
+    });
 
-    // Check if the _idpWindow is closed by user.
-    const checkInterruption = (): void => {
-      // The _idpWindow is opened and not yet closed by the client
-      if (this._idpWindow) {
-        if (this._idpWindow.closed) {
-          this._handleFailure(ERROR_USER_INTERRUPT, loginOptions?.onError);
-        } else {
-          setTimeout(checkInterruption, INTERRUPT_CHECK_INTERVAL);
-        }
-      }
-    };
-    checkInterruption();
-  }
+    try {
+      const delegationChain = await signer.requestDelegation({
+        publicKey: this._key.getPublicKey(),
+        targets: loginOptions?.targets,
+        maxTimeToLive,
+      });
 
-  private _getEventHandler(identityProviderUrl: URL, options?: AuthClientLoginOptions) {
-    return async (event: MessageEvent) => {
-      if (event.origin !== identityProviderUrl.origin) {
-        // Ignore any event that is not from the identity provider
-        return;
-      }
-
-      const message = event.data as IdentityServiceResponseMessage;
-
-      switch (message.kind) {
-        case 'authorize-ready': {
-          // IDP is ready. Send a message to request authorization.
-          const request: InternetIdentityAuthRequest = {
-            kind: 'authorize-client',
-            sessionPublicKey: new Uint8Array(this._key?.getPublicKey().toDer()),
-            maxTimeToLive: options?.maxTimeToLive,
-            allowPinAuthentication: options?.allowPinAuthentication,
-            derivationOrigin: options?.derivationOrigin?.toString(),
-            // Pass any custom values to the IDP.
-            ...options?.customValues,
-          };
-          this._idpWindow?.postMessage(request, identityProviderUrl.origin);
-          break;
-        }
-        case 'authorize-client-success':
-          // Create the delegation chain and store it.
-          try {
-            await this._handleSuccess(message, options?.onSuccess);
-          } catch (err) {
-            this._handleFailure((err as Error).message, options?.onError);
-          }
-          break;
-        case 'authorize-client-failure':
-          this._handleFailure(message.text, options?.onError);
-          break;
-        default:
-          break;
-      }
-    };
-  }
-
-  private _handleFailure(errorMessage?: string, onError?: (error?: string) => void): void {
-    this._idpWindow?.close();
-    onError?.(errorMessage);
-    this._removeEventListener();
-    delete this._idpWindow;
-  }
-
-  private _removeEventListener() {
-    if (this._eventHandler) {
-      window.removeEventListener('message', this._eventHandler);
+      await this._handleSuccess(delegationChain, loginOptions?.onSuccess);
+    } catch (err) {
+      loginOptions?.onError?.((err as Error).message);
+    } finally {
+      await signer.closeChannel();
     }
-    this._eventHandler = undefined;
   }
 
   public async logout(options: { returnTo?: string } = {}): Promise<void> {
@@ -582,18 +428,9 @@ function mergeLoginOptions(
     return undefined;
   }
 
-  const customValues =
-    loginOptions?.customValues || otherLoginOptions?.customValues
-      ? {
-          ...loginOptions?.customValues,
-          ...otherLoginOptions?.customValues,
-        }
-      : undefined;
-
   return {
     ...loginOptions,
     ...otherLoginOptions,
-    customValues,
   };
 }
 
