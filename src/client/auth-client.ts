@@ -172,7 +172,9 @@ export class AuthClient {
     this.#options = options;
     this.#storage = options.storage ?? new IdbStorage();
 
-    const identityProviderUrl = new URL(options.identityProvider?.toString() || IDENTITY_PROVIDER_DEFAULT);
+    const identityProviderUrl = new URL(
+      options.identityProvider?.toString() || IDENTITY_PROVIDER_DEFAULT,
+    );
     if (options.openIdProvider) {
       identityProviderUrl.searchParams.set('openid', OPENID_PROVIDER_URLS[options.openIdProvider]);
     }
