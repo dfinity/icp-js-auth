@@ -8,6 +8,9 @@ importers:
 
   .:
     dependencies:
+      '@icp-sdk/signer':
+        specifier: ^5.2.0
+        version: 5.2.0(@icp-sdk/core@5.2.1)
       idb:
         specifier: ^7.1.1
         version: 7.1.1
@@ -333,6 +336,11 @@ packages:
 
   '@icp-sdk/core@5.2.1':
     resolution: {integrity: sha512-FImRjnayCarov7vfr52QU3BO8tPAprbyl4O+0KWz4v7h8ZbKq15fhtdb53M6+ltUsCbWkP/lEgrQ4t1WhIAHjQ==}
+
+  '@icp-sdk/signer@5.2.0':
+    resolution: {integrity: sha512-yJB/ZnqOksD57tmKZS2Bnf6i4nJ64tv4teAMofttd4ZNzErrr3mWwqxT3wIBC+Y8ri7PbI3LOTN/GD86vi8XlA==}
+    peerDependencies:
+      '@icp-sdk/core': ^5
 
   '@jridgewell/sourcemap-codec@1.5.5':
     resolution: {integrity: sha512-cYQ9310grqxueWbl+WuIUIaiUaDcj7WOq5fVhEljNVgRfOUhY9fy2zTvfoqWsnebh8Sl70VScFbICvJnLKB0Og==}
@@ -1161,6 +1169,10 @@ snapshots:
       '@scure/bip32': 1.7.0
       '@scure/bip39': 1.6.0
       asn1js: 3.0.7
+
+  '@icp-sdk/signer@5.2.0(@icp-sdk/core@5.2.1)':
+    dependencies:
+      '@icp-sdk/core': 5.2.1
 
   '@jridgewell/sourcemap-codec@1.5.5': {}
 
