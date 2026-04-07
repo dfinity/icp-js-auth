@@ -167,6 +167,26 @@ describe('Auth Client', () => {
   });
 });
 
+describe('OpenID provider', () => {
+  it.each([
+    ['google', 'https://accounts.google.com'],
+    ['apple', 'https://appleid.apple.com'],
+    ['microsoft', 'https://login.microsoftonline.com/{tid}/v2.0'],
+  ] as const)('should pass openid=%s search param to the transport', (provider, expectedUrl) => {
+    mockPostMessageTransport.mockClear();
+    new AuthClient({ openIdProvider: provider, idleOptions: { disableIdle: true } });
+    const url = new URL(mockPostMessageTransport.mock.calls[0][0].url);
+    expect(url.searchParams.get('openid')).toBe(expectedUrl);
+  });
+
+  it('should not include openid search param when openIdProvider is not set', () => {
+    mockPostMessageTransport.mockClear();
+    new AuthClient({ idleOptions: { disableIdle: true } });
+    const url = new URL(mockPostMessageTransport.mock.calls[0][0].url);
+    expect(url.searchParams.has('openid')).toBe(false);
+  });
+});
+
 describe('Auth Client login', () => {
   function setupMockDelegation() {
     const key = Ed25519KeyIdentity.generate();
@@ -254,7 +274,7 @@ describe('Auth Client login', () => {
     await client.login();
 
     expect(mockPostMessageTransport).toHaveBeenCalledWith({
-      url: 'http://127.0.0.1',
+      url: 'http://127.0.0.1/',
       windowOpenerFeatures: 'toolbar=0,location=0,menubar=0',
     });
   });
@@ -377,7 +397,7 @@ describe('Auth Client login', () => {
     await client.login({ maxTimeToLive: BigInt(1000) });
 
     expect(mockPostMessageTransport).toHaveBeenCalledWith({
-      url: 'http://my-local-website.localhost:8080',
+      url: 'http://my-local-website.localhost:8080/',
       windowOpenerFeatures: undefined,
     });
 
