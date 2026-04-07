@@ -11,11 +11,14 @@ import {
 } from '../../src/client/storage.ts';
 
 // Mock @icp-sdk/signer so login() doesn't open real windows.
-const mockSignerInstance = {
-  openChannel: vi.fn(),
-  closeChannel: vi.fn(),
-  requestDelegation: vi.fn(),
-};
+const { mockSignerInstance, mockPostMessageTransport } = vi.hoisted(() => ({
+  mockSignerInstance: {
+    openChannel: vi.fn(),
+    closeChannel: vi.fn(),
+    requestDelegation: vi.fn(),
+  },
+  mockPostMessageTransport: vi.fn(),
+}));
 
 vi.mock('@icp-sdk/signer', () => ({
   Signer: class {
@@ -26,7 +29,7 @@ vi.mock('@icp-sdk/signer', () => ({
 }));
 
 vi.mock('@icp-sdk/signer/web', () => ({
-  PostMessageTransport: vi.fn(),
+  PostMessageTransport: mockPostMessageTransport,
 }));
 
 /**
@@ -106,6 +109,24 @@ describe('AuthClient', () => {
     const client = new AuthClient();
     await client.getIdentity(); // wait for hydration
     expect(client.idleManager).toBeUndefined();
+  });
+
+  it.each([
+    ['google', 'https://accounts.google.com'],
+    ['apple', 'https://appleid.apple.com'],
+    ['microsoft', 'https://login.microsoftonline.com/{tid}/v2.0'],
+  ] as const)('should pass openid=%s search param to the transport', (provider, expectedUrl) => {
+    mockPostMessageTransport.mockClear();
+    new AuthClient({ openIdProvider: provider });
+    const url = new URL(mockPostMessageTransport.mock.calls[0][0].url);
+    expect(url.searchParams.get('openid')).toBe(expectedUrl);
+  });
+
+  it('should not include openid search param when openIdProvider is not set', () => {
+    mockPostMessageTransport.mockClear();
+    new AuthClient();
+    const url = new URL(mockPostMessageTransport.mock.calls[0][0].url);
+    expect(url.searchParams.has('openid')).toBe(false);
   });
 
   it('should not set up an idle timer if the disable option is set', () => {

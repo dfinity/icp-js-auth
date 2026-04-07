@@ -35,6 +35,8 @@ type BaseKeyType = typeof ECDSA_KEY_LABEL | typeof ED25519_KEY_LABEL;
 
 const KEY_STORAGE_EXPIRATION = 'ic-delegation_expiration';
 
+export type OpenIdProvider = 'google' | 'apple' | 'microsoft';
+
 const OPENID_PROVIDER_URLS: Record<OpenIdProvider, string> = {
   google: 'https://accounts.google.com',
   apple: 'https://appleid.apple.com',
@@ -97,8 +99,6 @@ export interface AuthClientCreateOptions {
    */
   openIdProvider?: OpenIdProvider;
 }
-
-export type OpenIdProvider = 'google' | 'apple' | 'microsoft';
 
 export interface IdleOptions extends IdleManagerOptions {
   /**
