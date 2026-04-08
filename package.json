@@ -52,6 +52,7 @@
   "devDependencies": {
     "@biomejs/biome": "^2.4.10",
     "@icp-sdk/core": "^5.2.1",
+    "@icp-sdk/signer": "^5.2.0",
     "fake-indexeddb": "^6.2.5",
     "jsdom": "^27.4.0",
     "publint": "^0.3.18",
@@ -62,7 +63,6 @@
     "@icp-sdk/core": "^5"
   },
   "dependencies": {
-    "@icp-sdk/signer": "^5.2.0",
     "idb": "^7.1.1"
   }
 }
