@@ -16,6 +16,7 @@ const { mockSignerInstance, mockPostMessageTransport } = vi.hoisted(() => ({
     openChannel: vi.fn(),
     closeChannel: vi.fn(),
     requestDelegation: vi.fn(),
+    sendRequest: vi.fn(),
   },
   mockPostMessageTransport: vi.fn(),
 }));
@@ -25,6 +26,7 @@ vi.mock('@icp-sdk/signer', () => ({
     openChannel = mockSignerInstance.openChannel;
     closeChannel = mockSignerInstance.closeChannel;
     requestDelegation = mockSignerInstance.requestDelegation;
+    sendRequest = mockSignerInstance.sendRequest;
   },
 }));
 
@@ -59,6 +61,7 @@ beforeEach(() => {
   mockSignerInstance.openChannel.mockReset();
   mockSignerInstance.closeChannel.mockReset();
   mockSignerInstance.requestDelegation.mockReset();
+  mockSignerInstance.sendRequest.mockReset();
 });
 
 afterEach(async () => {
@@ -404,5 +407,82 @@ describe('Migration from localStorage', () => {
 
     expect(storage.set).toHaveBeenCalledWith(KEY_STORAGE_DELEGATION, 'test');
     expect(storage.set).toHaveBeenCalledWith(KEY_STORAGE_KEY, 'key');
+  });
+});
+
+describe('AuthClient requestAttributes', () => {
+  it('should send a JSON-RPC request and return decoded data and signature', async () => {
+    const data = btoa('hello');
+    const signature = btoa('sig');
+    mockSignerInstance.sendRequest.mockResolvedValue({
+      jsonrpc: '2.0',
+      id: null,
+      result: { data, signature },
+    });
+
+    const client = new AuthClient();
+    const result = await client.requestAttributes({ keys: ['email', 'name'] });
+
+    const callArgs = mockSignerInstance.sendRequest.mock.calls[0][0];
+    expect(callArgs.method).toBe('ii-icrc3-attributes');
+    expect(callArgs.params.keys).toEqual(['email', 'name']);
+    expect(typeof callArgs.params.nonce).toBe('string');
+    expect(Array.from(result.data)).toEqual(Array.from(new TextEncoder().encode('hello')));
+    expect(Array.from(result.signature)).toEqual(Array.from(new TextEncoder().encode('sig')));
+  });
+
+  it('should use a provided nonce', async () => {
+    mockSignerInstance.sendRequest.mockResolvedValue({
+      jsonrpc: '2.0',
+      id: null,
+      result: { data: btoa('hello'), signature: btoa('sig') },
+    });
+
+    const nonce = new Uint8Array(32).fill(42);
+    const client = new AuthClient();
+    await client.requestAttributes({ keys: ['email'], nonce });
+
+    const callArgs = mockSignerInstance.sendRequest.mock.calls[0][0];
+    expect(callArgs.params.nonce).toBe(btoa(String.fromCharCode(...nonce)));
+  });
+
+  it('should generate a random nonce when omitted', async () => {
+    mockSignerInstance.sendRequest.mockResolvedValue({
+      jsonrpc: '2.0',
+      id: null,
+      result: { data: btoa('a'), signature: btoa('b') },
+    });
+
+    const client = new AuthClient();
+    await client.requestAttributes({ keys: ['email'] });
+    await client.requestAttributes({ keys: ['email'] });
+
+    const nonce1 = mockSignerInstance.sendRequest.mock.calls[0][0].params.nonce;
+    const nonce2 = mockSignerInstance.sendRequest.mock.calls[1][0].params.nonce;
+    expect(nonce1).not.toBe(nonce2);
+  });
+
+  it('should throw when the response contains an error', async () => {
+    mockSignerInstance.sendRequest.mockResolvedValue({
+      jsonrpc: '2.0',
+      id: null,
+      error: { code: -1, message: 'not supported' },
+    });
+
+    const client = new AuthClient();
+    await expect(client.requestAttributes({ keys: ['email'] })).rejects.toThrow('not supported');
+  });
+
+  it('should throw when the response is missing data or signature', async () => {
+    mockSignerInstance.sendRequest.mockResolvedValue({
+      jsonrpc: '2.0',
+      id: null,
+      result: { data: btoa('hello') },
+    });
+
+    const client = new AuthClient();
+    await expect(client.requestAttributes({ keys: ['email'] })).rejects.toThrow(
+      'Invalid response: missing data or signature',
+    );
   });
 });

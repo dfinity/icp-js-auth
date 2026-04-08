@@ -73,6 +73,73 @@ const authClient = new AuthClient({
 await authClient.login();
 ```
 
+### Requesting User Attributes
+
+You can request signed user attributes at any time — during login or later when a specific feature needs them. Use `AttributesIdentity` to include the attributes in canister calls:
+
+```typescript
+import { AuthClient } from '@icp-sdk/auth/client';
+import { AttributesIdentity } from '@icp-sdk/core/identity';
+import { HttpAgent, Actor } from '@icp-sdk/core/agent';
+
+const authClient = new AuthClient();
+
+// request attributes during login
+const loginPromise = authClient.login();
+const attributesPromise = authClient.requestAttributes({ keys: ['email', 'name'] });
+
+await loginPromise;
+const { data, signature } = await attributesPromise;
+
+// create an agent that includes the attributes in every call
+const identity = await authClient.getIdentity();
+const identityWithAttributes = new AttributesIdentity({
+  inner: identity,
+  attributes: { data, signature },
+  signer: { canisterId: Principal.fromText('rdmx6-jaaaa-aaaaa-aaadq-cai') }, // Internet Identity canister ID
+});
+const agent = await HttpAgent.create({ identity: identityWithAttributes });
+
+// the register call will include the signed email and name as attributes
+const app = Actor.createActor(appIdl, { agent, canisterId });
+await app.register();
+```
+
+Attributes can also be requested later, e.g. when the user accesses a feature that needs their email:
+
+```typescript
+const { data, signature } = await authClient.requestAttributes({ keys: ['email'] });
+
+const identityWithAttributes = new AttributesIdentity({
+  inner: await authClient.getIdentity(),
+  attributes: { data, signature },
+  signer: { canisterId: Principal.fromText('rdmx6-jaaaa-aaaaa-aaadq-cai') }, // Internet Identity canister ID
+});
+const agent = await HttpAgent.create({ identity: identityWithAttributes });
+
+// the registerEmail call will include the signed email as an attribute
+const app = Actor.createActor(appIdl, { agent, canisterId });
+await app.registerEmail();
+```
+
+Attributes can also be scoped to a specific OpenID provider. When using one-click sign-in, scoped attributes have implicit consent — no additional user prompt is needed:
+
+```typescript
+import { AuthClient, OPENID_PROVIDER_URLS } from '@icp-sdk/auth/client';
+
+const authClient = new AuthClient({
+  openIdProvider: 'google',
+});
+
+const loginPromise = authClient.login();
+const attributesPromise = authClient.requestAttributes({
+  keys: [`openid:${OPENID_PROVIDER_URLS.google}:email`],
+});
+
+await loginPromise;
+const { data, signature } = await attributesPromise;
+```
+
 Additional documentation can be found [here](https://js.icp.build/auth/latest/).
 
 ## Contributing

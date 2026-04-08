@@ -39,7 +39,7 @@ const KEY_STORAGE_EXPIRATION = 'ic-delegation_expiration';
 
 export type OpenIdProvider = 'google' | 'apple' | 'microsoft';
 
-const OPENID_PROVIDER_URLS: Record<OpenIdProvider, string> = {
+export const OPENID_PROVIDER_URLS: Record<OpenIdProvider, string> = {
   google: 'https://accounts.google.com',
   apple: 'https://appleid.apple.com',
   microsoft: 'https://login.microsoftonline.com/{tid}/v2.0',
@@ -143,6 +143,11 @@ export interface AuthClientLoginOptions {
    * allowing the caller to handle it via this callback instead.
    */
   onError?: OnErrorFunc;
+}
+
+export interface SignedAttributes {
+  data: Uint8Array;
+  signature: Uint8Array;
 }
 
 /**
@@ -279,6 +284,46 @@ export class AuthClient {
   }
 
   /**
+   * Requests signed user attributes from the identity provider.
+   *
+   * @param params - Request parameters.
+   * @param params.keys - Attribute keys to request (e.g. `['email', 'name']`).
+   * @param params.nonce - Optional 32-byte nonce. A random one is generated when omitted.
+   * @returns Signed attribute data and signature.
+   * @throws When the identity provider returns an error or an invalid response.
+   */
+  async requestAttributes(params: {
+    keys: string[];
+    nonce?: Uint8Array;
+  }): Promise<SignedAttributes> {
+    const nonceBytes = params.nonce ?? globalThis.crypto.getRandomValues(new Uint8Array(32));
+
+    const response = await this.#signer.sendRequest({
+      jsonrpc: '2.0',
+      method: 'ii-icrc3-attributes',
+      params: { keys: params.keys, nonce: toBase64(nonceBytes) },
+    });
+
+    if ('error' in response) {
+      throw new Error(response.error.message);
+    }
+
+    const result = response.result as Record<string, unknown> | undefined;
+    if (typeof result?.data !== 'string' || typeof result?.signature !== 'string') {
+      throw new Error('Invalid response: missing data or signature');
+    }
+
+    try {
+      return {
+        data: fromBase64(result.data),
+        signature: fromBase64(result.signature),
+      };
+    } catch (cause) {
+      throw new Error('Invalid response: data or signature is not valid base64', { cause });
+    }
+  }
+
+  /**
    * Clears the stored session and resets the client to an anonymous state.
    *
    * @param options - Logout options.
@@ -341,6 +386,37 @@ export class AuthClient {
       });
     }
   }
+}
+
+/**
+ * Encodes a Uint8Array to a base64 string.
+ * @param bytes - The bytes to encode.
+ */
+function toBase64(bytes: Uint8Array): string {
+  if ('toBase64' in bytes && typeof bytes.toBase64 === 'function') {
+    return bytes.toBase64();
+  }
+  let binary = '';
+  for (let i = 0; i < bytes.byteLength; i++) {
+    binary += String.fromCharCode(bytes[i]);
+  }
+  return globalThis.btoa(binary);
+}
+
+/**
+ * Decodes a base64 string to a Uint8Array.
+ * @param str - The base64-encoded string.
+ */
+function fromBase64(str: string): Uint8Array {
+  if ('fromBase64' in Uint8Array && typeof Uint8Array.fromBase64 === 'function') {
+    return Uint8Array.fromBase64(str);
+  }
+  const binary = globalThis.atob(str);
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) {
+    bytes[i] = binary.charCodeAt(i);
+  }
+  return bytes;
 }
 
 /**
