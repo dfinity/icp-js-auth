@@ -125,6 +125,10 @@ export interface AuthClientLoginOptions {
   onError?: OnErrorFunc;
 }
 
+// ---------------------------------------------------------------------------
+// Free functions – persistence helpers
+// ---------------------------------------------------------------------------
+
 /**
  * Generates a fresh session key of the given type.
  */
@@ -256,6 +260,10 @@ async function migrateFromLocalStorage(
     console.error(`error while attempting to recover localstorage: ${error}`);
   }
 }
+
+// ---------------------------------------------------------------------------
+// AuthClient
+// ---------------------------------------------------------------------------
 
 /**
  * Tool to manage authentication and identity
