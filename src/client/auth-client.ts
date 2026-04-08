@@ -27,7 +27,6 @@ const SECONDS_PER_HOUR = BigInt(3_600);
 const NANOSECONDS_PER_HOUR = NANOSECONDS_PER_SECOND * SECONDS_PER_HOUR;
 
 const IDENTITY_PROVIDER_DEFAULT = 'https://id.ai/authorize';
-
 const DEFAULT_MAX_TIME_TO_LIVE = BigInt(8) * NANOSECONDS_PER_HOUR;
 
 const ECDSA_KEY_LABEL = 'ECDSA';
@@ -47,48 +46,48 @@ const OPENID_PROVIDER_URLS: Record<OpenIdProvider, string> = {
 };
 
 /**
- * List of options for creating an {@link AuthClient}.
+ * Options for creating an {@link AuthClient}.
  */
 export interface AuthClientCreateOptions {
   /**
-   * An {@link SignIdentity} or {@link PartialIdentity} to authenticate via delegation.
+   * An identity to authenticate via delegation.
    */
   identity?: SignIdentity | PartialIdentity;
+
   /**
-   * Optional storage with get, set, and remove. Uses {@link IdbStorage} by default.
-   * @see {@link AuthClientStorage}
+   * Persistent storage backend. Defaults to IndexedDB.
+   * @default IdbStorage
    */
   storage?: AuthClientStorage;
 
   /**
-   * Type to use for the base key.
+   * Type of session key to generate on each login.
    *
-   * If you are using a custom storage provider that does not support CryptoKey storage,
-   * you should use `Ed25519` as the key type, as it can serialize to a string.
+   * Use `'Ed25519'` when your storage provider does not support `CryptoKey`.
    * @default 'ECDSA'
    */
   keyType?: BaseKeyType;
 
   /**
-   * Options to handle idle timeouts
+   * Idle timeout configuration.
    * @default after 10 minutes, invalidates the identity
    */
   idleOptions?: IdleOptions;
 
   /**
-   * Identity provider
+   * Identity provider URL.
    * @default "https://id.ai/authorize"
    */
   identityProvider?: string | URL;
 
   /**
-   * Origin for Identity Provider to use while generating the delegated identity. For II, the derivation origin must authorize this origin by setting a record at `<derivation-origin>/.well-known/ii-alternative-origins`.
+   * Derivation origin for the identity provider.
    * @see https://github.com/dfinity/internet-identity/blob/main/docs/internet-identity-spec.adoc
    */
   derivationOrigin?: string | URL;
 
   /**
-   * Auth Window feature config string
+   * Window features string for the authentication popup.
    * @example "toolbar=0,location=0,menubar=0,width=500,height=500,left=100,top=100"
    */
   windowOpenerFeatures?: string;
@@ -103,13 +102,13 @@ export interface AuthClientCreateOptions {
 
 export interface IdleOptions extends IdleManagerOptions {
   /**
-   * Disables idle functionality for {@link IdleManager}
+   * Disables idle functionality entirely.
    * @default false
    */
   disableIdle?: boolean;
 
   /**
-   * Disables default idle behavior - call logout & reload window
+   * Disables the default idle callback (logout & reload).
    * @default false
    */
   disableDefaultIdleCallback?: boolean;
@@ -119,202 +118,60 @@ export type OnSuccessFunc = () => void | Promise<void>;
 
 export type OnErrorFunc = (error?: string) => void | Promise<void>;
 
+/**
+ * Options for {@link AuthClient.login}.
+ */
 export interface AuthClientLoginOptions {
   /**
-   * Expiration of the authentication in nanoseconds
-   * @default  BigInt(8) hours * BigInt(3_600_000_000_000) nanoseconds
+   * Maximum lifetime of the delegation in nanoseconds.
+   * @default 8 hours
    */
   maxTimeToLive?: bigint;
+
   /**
-   * Optional canister targets for the delegation.
+   * Restrict the delegation to specific canisters.
    */
   targets?: Principal[];
+
   /**
-   * Callback once login has completed
+   * Called after a successful login.
    */
   onSuccess?: OnSuccessFunc;
+
   /**
-   * Callback in case authentication fails.
-   * When provided, errors are passed to this callback instead of being thrown.
+   * Called when login fails. When provided the error is **not** re-thrown,
+   * allowing the caller to handle it via this callback instead.
    */
   onError?: OnErrorFunc;
 }
 
 /**
- * Generates a fresh session key of the given type.
- */
-async function generateKey(keyType: BaseKeyType): Promise<SignIdentity> {
-  if (keyType === ED25519_KEY_LABEL) {
-    return Ed25519KeyIdentity.generate();
-  }
-  return await ECDSAKeyIdentity.generate();
-}
-
-function serializeKey(key: SignIdentity | PartialIdentity): StoredKey {
-  if (key instanceof ECDSAKeyIdentity) {
-    return key.getKeyPair();
-  }
-  if (key instanceof Ed25519KeyIdentity) {
-    return JSON.stringify(key.toJSON());
-  }
-  throw new Error('Unsupported key type');
-}
-
-/** Serializes and persists a session key to storage. */
-async function persistKey(
-  storage: AuthClientStorage,
-  key: SignIdentity | PartialIdentity,
-): Promise<void> {
-  const serialized = serializeKey(key);
-  await storage.set(KEY_STORAGE_KEY, serialized);
-}
-
-/** Loads a session key from storage. Returns `null` when nothing is stored or the value is corrupt. */
-async function restoreKey(
-  storage: AuthClientStorage,
-): Promise<SignIdentity | PartialIdentity | null> {
-  const maybeIdentityStorage = await storage.get(KEY_STORAGE_KEY);
-  if (!maybeIdentityStorage) return null;
-
-  try {
-    // CryptoKeyPair (object) → ECDSA, JSON string → Ed25519
-    if (typeof maybeIdentityStorage === 'object') {
-      return await ECDSAKeyIdentity.fromKeyPair(maybeIdentityStorage);
-    }
-    if (typeof maybeIdentityStorage === 'string') {
-      return Ed25519KeyIdentity.fromJSON(maybeIdentityStorage);
-    }
-  } catch {
-    // The stored value may be corrupt or from an incompatible version.
-    // Returning null lets the caller fall through to key generation,
-    // which is safer than crashing on startup.
-  }
-  return null;
-}
-
-async function restoreChain(storage: AuthClientStorage): Promise<DelegationChain | null> {
-  const chainStorage = await storage.get(KEY_STORAGE_DELEGATION);
-  if (chainStorage === null || chainStorage === undefined) return null;
-
-  if (typeof chainStorage === 'object' && chainStorage !== null) {
-    throw new Error(
-      'Delegation chain is incorrectly stored. A delegation chain should be stored as a string.',
-    );
-  }
-
-  return DelegationChain.fromJSON(chainStorage as string);
-}
-
-/** Reads the cached delegation expiration from localStorage for synchronous auth checks. */
-function getExpirationFlag(): bigint | null {
-  try {
-    const raw = localStorage.getItem(KEY_STORAGE_EXPIRATION);
-    if (!raw) return null;
-    return BigInt(raw);
-  } catch {
-    return null;
-  }
-}
-
-async function persistChain(storage: AuthClientStorage, chain: DelegationChain): Promise<void> {
-  await storage.set(KEY_STORAGE_DELEGATION, JSON.stringify(chain.toJSON()));
-
-  // Write the earliest delegation expiration into localStorage for sync reads.
-  const expirations = chain.delegations
-    .map((d) => d.delegation.expiration)
-    .filter((e): e is bigint => e !== undefined);
-
-  if (expirations.length > 0) {
-    const earliest = expirations.reduce((a, b) => (a < b ? a : b));
-    try {
-      localStorage.setItem(KEY_STORAGE_EXPIRATION, earliest.toString());
-    } catch {
-      // localStorage may be unavailable – ignore.
-    }
-  }
-}
-
-async function deleteStorage(storage: AuthClientStorage): Promise<void> {
-  await storage.remove(KEY_STORAGE_KEY);
-  await storage.remove(KEY_STORAGE_DELEGATION);
-  await storage.remove(KEY_VECTOR);
-  try {
-    localStorage.removeItem(KEY_STORAGE_EXPIRATION);
-  } catch {
-    // localStorage may be unavailable – ignore.
-  }
-}
-
-/**
- * Migrates a legacy session from localStorage to the primary (IndexedDB) storage.
- * Only applies to ECDSA keys — Ed25519 keys were never stored in localStorage.
- */
-async function migrateFromLocalStorage(
-  storage: AuthClientStorage,
-  keyType: BaseKeyType,
-): Promise<void> {
-  try {
-    const fallbackLocalStorage = new LocalStorage();
-    const localChain = await fallbackLocalStorage.get(KEY_STORAGE_DELEGATION);
-    const localKey = await fallbackLocalStorage.get(KEY_STORAGE_KEY);
-    // not relevant for Ed25519
-    if (localChain && localKey && keyType === ECDSA_KEY_LABEL) {
-      console.log('Discovered an identity stored in localstorage. Migrating to IndexedDB');
-      await storage.set(KEY_STORAGE_DELEGATION, localChain);
-      await storage.set(KEY_STORAGE_KEY, localKey);
-
-      // clean up
-      await fallbackLocalStorage.remove(KEY_STORAGE_DELEGATION);
-      await fallbackLocalStorage.remove(KEY_STORAGE_KEY);
-    }
-  } catch (error) {
-    console.error(`error while attempting to recover localstorage: ${error}`);
-  }
-}
-
-// ---------------------------------------------------------------------------
-// AuthClient
-// ---------------------------------------------------------------------------
-
-/**
- * Tool to manage authentication and identity
- * @see {@link AuthClient}
+ * Manages authentication and identity for Internet Computer web apps.
+ *
+ * @example
+ * const authClient = new AuthClient();
+ *
+ * if (authClient.isAuthenticated()) {
+ *   const identity = await authClient.getIdentity();
+ * }
+ *
+ * await authClient.login({
+ *   onSuccess: () => console.log('Logged in!'),
+ * });
  */
 export class AuthClient {
   #identity: Identity | PartialIdentity = new AnonymousIdentity();
-  #key: SignIdentity | PartialIdentity | null = null;
   #chain: DelegationChain | null = null;
   #storage: AuthClientStorage;
-  #createOptions: AuthClientCreateOptions | undefined;
   #signer: Signer;
-  #initPromise: Promise<void>;
-
+  #options: AuthClientCreateOptions;
+  #initPromise: Promise<void> | null = null;
   idleManager: IdleManager | undefined;
 
-  /**
-   * Create an AuthClient to manage authentication and identity
-   * @param {AuthClientCreateOptions} options - Options for creating an {@link AuthClient}
-   * @see {@link AuthClientCreateOptions}
-   * @param options.identity Optional Identity to use as the base
-   * @see {@link SignIdentity}
-   * @param options.storage Storage mechanism for delegation credentials
-   * @see {@link AuthClientStorage}
-   * @param options.keyType Type of key to use for the base key
-   * @param {IdleOptions} options.idleOptions Configures an {@link IdleManager}
-   * @see {@link IdleOptions}
-   * Default behavior is to clear stored identity and reload the page when a user goes idle, unless you set the disableDefaultIdleCallback flag or pass in a custom idle callback.
-   * @example
-   * const authClient = new AuthClient({
-   *   idleOptions: {
-   *     disableIdle: true
-   *   }
-   * })
-   */
   constructor(options: AuthClientCreateOptions = {}) {
+    this.#options = options;
     this.#storage = options.storage ?? new IdbStorage();
-    this.#createOptions = options;
 
-    // Create transport and signer from create-time options so they are reusable across logins.
     const identityProviderUrl = new URL(
       options.identityProvider?.toString() || IDENTITY_PROVIDER_DEFAULT,
     );
@@ -332,147 +189,57 @@ export class AuthClient {
       derivationOrigin: options.derivationOrigin?.toString(),
     });
 
-    this.#initPromise = this.#hydrate();
-  }
-
-  #init(): Promise<void> {
-    return this.#initPromise;
-  }
-
-  async #hydrate(): Promise<void> {
-    const options = this.#createOptions ?? {};
-    const storage = this.#storage;
-    const keyType = options.keyType ?? ECDSA_KEY_LABEL;
-
-    let key: SignIdentity | PartialIdentity | null = null;
-
-    if (options.identity) {
-      key = options.identity;
-    } else {
-      key = await restoreKey(storage);
-
-      if (!key) {
-        // Attempt to migrate from localstorage
-        await migrateFromLocalStorage(storage, keyType);
-        key = await restoreKey(storage);
-      }
-    }
-
-    let chain: DelegationChain | null = null;
-
-    if (key) {
-      try {
-        if (options.identity) {
-          this.#identity = options.identity;
-        } else {
-          chain = await restoreChain(storage);
-          if (chain) {
-            if (!isDelegationValid(chain)) {
-              await deleteStorage(storage);
-              key = null;
-            } else {
-              if ('toDer' in key) {
-                this.#identity = PartialDelegationIdentity.fromDelegation(key, chain);
-              } else {
-                this.#identity = DelegationIdentity.fromDelegation(key, chain);
-              }
-            }
-          }
-        }
-      } catch (e) {
-        console.error(e);
-        await deleteStorage(storage);
-        key = null;
-      }
-    }
-
-    // Idle manager setup
-    if (options.idleOptions?.disableIdle) {
-      this.idleManager = undefined;
-    } else if (chain || options.identity) {
-      this.idleManager = IdleManager.create(options.idleOptions);
-    }
-
-    if (!key) {
-      if (keyType === ED25519_KEY_LABEL) {
-        key = Ed25519KeyIdentity.generate();
-      } else {
-        if (options.storage && keyType === ECDSA_KEY_LABEL) {
-          console.warn(
-            `You are using a custom storage provider that may not support CryptoKey storage. If you are using a custom storage provider that does not support CryptoKey storage, you should use '${ED25519_KEY_LABEL}' as the key type, as it can serialize to a string`,
-          );
-        }
-        key = await ECDSAKeyIdentity.generate();
-      }
-      await persistKey(storage, key);
-    }
-
-    this.#key = key;
-    this.#chain = chain;
-
     this.#registerDefaultIdleCallback();
+
+    // Eagerly start restoring a previous session from storage.
+    // The result is awaited in getIdentity() before returning.
+    this.#init();
   }
 
-  #registerDefaultIdleCallback() {
-    const idleOptions = this.#createOptions?.idleOptions;
-    /**
-     * Default behavior is to clear stored identity and reload the page.
-     * By either setting the disableDefaultIdleCallback flag or passing in a custom idle callback, we will ignore this config
-     */
-    if (!idleOptions?.onIdle && !idleOptions?.disableDefaultIdleCallback) {
-      this.idleManager?.registerCallback(() => {
-        this.logout();
-        location.reload();
-      });
-    }
-  }
-
+  /**
+   * Returns the current identity, restoring a previous session if available.
+   */
   async getIdentity(): Promise<Identity> {
     await this.#init();
     return this.#identity;
   }
 
+  /**
+   * Checks whether the user has an active, non-expired session.
+   */
   isAuthenticated(): boolean {
+    // Uses a cached expiration in localStorage to avoid an async IndexedDB read.
     const expiration = getExpirationFlag();
     if (expiration === null) return false;
-    const nowNanos = BigInt(Date.now()) * BigInt(1_000_000);
-    return expiration > nowNanos;
+    const nowNs = BigInt(Date.now()) * BigInt(1_000_000);
+    return nowNs < expiration;
   }
 
   /**
-   * AuthClient Login - Opens up a new window to authenticate with Internet Identity
+   * Opens the identity provider and requests a delegation.
    *
-   * Generates a fresh session key for every login attempt. If `onError` is provided,
-   * errors are routed to that callback; otherwise login() throws on failure.
+   * @param options - Login options.
+   * @param options.maxTimeToLive - Maximum lifetime of the delegation in nanoseconds.
+   * @param options.targets - Restrict the delegation to specific canisters.
+   * @param options.onSuccess - Called after a successful login.
+   * @param options.onError - Called when login fails. When provided the error is not re-thrown.
+   * @throws When authentication fails and no `onError` callback is provided.
    *
-   * @param {AuthClientLoginOptions} options - Per-login options (maxTimeToLive, targets, callbacks).
-   * @param options.maxTimeToLive Expiration of the authentication in nanoseconds
-   * @param options.onSuccess Callback once login has completed
-   * @param options.onError Callback in case authentication fails
    * @example
-   * const authClient = new AuthClient({
-   *  identityProvider: 'http://<canisterID>.127.0.0.1:8000',
-   *  windowOpenerFeatures: "toolbar=0,location=0,menubar=0,width=500,height=500,left=100,top=100",
-   * });
-   * authClient.login({
-   *  maxTimeToLive: BigInt (7) * BigInt(24) * BigInt(3_600_000_000_000), // 1 week
-   *  onSuccess: () => {
-   *    console.log('Login Successful!');
-   *  },
-   *  onError: (error) => {
-   *    console.error('Login Failed: ', error);
-   *  }
+   * await authClient.login({
+   *   onSuccess: () => console.log('Logged in!'),
+   *   onError: (err) => console.error(err),
    * });
    */
   async login(options?: AuthClientLoginOptions): Promise<void> {
-    // Set default maxTimeToLive to 8 hours
-    const maxTimeToLive = options?.maxTimeToLive ?? DEFAULT_MAX_TIME_TO_LIVE;
-
     try {
-      // Generate a fresh session key for every login attempt instead of reusing the stored one.
+      await this.#signer.openChannel();
+
+      const maxTimeToLive = options?.maxTimeToLive ?? DEFAULT_MAX_TIME_TO_LIVE;
+
+      // Fresh key per login so each session has its own cryptographic identity.
       const key =
-        this.#createOptions?.identity ??
-        (await generateKey(this.#createOptions?.keyType ?? ECDSA_KEY_LABEL));
+        this.#options.identity ?? (await generateKey(this.#options.keyType ?? ECDSA_KEY_LABEL));
 
       const delegationChain = await this.#signer.requestDelegation({
         publicKey: key.getPublicKey(),
@@ -480,49 +247,46 @@ export class AuthClient {
         maxTimeToLive,
       });
 
-      // Store the new session state and set up idle tracking.
-      this.#key = key;
       this.#chain = delegationChain;
 
+      // PartialIdentity only has the public key — no signing capability.
       if ('toDer' in key) {
         this.#identity = PartialDelegationIdentity.fromDelegation(key, this.#chain);
       } else {
         this.#identity = DelegationIdentity.fromDelegation(key, this.#chain);
       }
 
-      const idleOptions = this.#createOptions?.idleOptions;
+      const idleOptions = this.#options?.idleOptions;
       if (!this.idleManager && !idleOptions?.disableIdle) {
         this.idleManager = IdleManager.create(idleOptions);
         this.#registerDefaultIdleCallback();
       }
 
-      if (this.#chain) {
-        await persistChain(this.#storage, this.#chain);
-      }
+      // Persist so the session survives page reloads.
+      await persistChain(this.#storage, this.#chain);
+      await persistKey(this.#storage, key);
 
-      // Persist the fresh key that was used for this login.
-      await persistKey(this.#storage, this.#key);
-
-      // Call onSuccess last: the callback may navigate away or reload the
-      // page, so all session state must be persisted before it runs.
       await options?.onSuccess?.();
-    } catch (err) {
-      // If an onError callback is provided, route the error there (callback-style).
-      // Otherwise, re-throw so callers can use try/catch or .catch().
+    } catch (error) {
+      // If an onError callback is provided, delegate error handling to the caller.
+      // Otherwise, re-throw so the error can be caught with try/catch or .catch().
       if (options?.onError) {
-        await options.onError((err as Error).message);
+        await options.onError(error instanceof Error ? error.message : String(error));
       } else {
-        throw err;
+        throw error;
       }
-    } finally {
-      await this.#signer.closeChannel();
     }
   }
 
+  /**
+   * Clears the stored session and resets the client to an anonymous state.
+   *
+   * @param options - Logout options.
+   * @param options.returnTo - URL to navigate to after logout.
+   */
   async logout(options: { returnTo?: string } = {}): Promise<void> {
     await deleteStorage(this.#storage);
 
-    // Reset this auth client to a non-authenticated state.
     this.#identity = new AnonymousIdentity();
     this.#chain = null;
 
@@ -533,5 +297,202 @@ export class AuthClient {
         window.location.href = options.returnTo;
       }
     }
+  }
+
+  // Memoized — only runs #hydrate once, returns the same promise on repeat calls.
+  #init(): Promise<void> {
+    if (!this.#initPromise) {
+      this.#initPromise = this.#hydrate();
+    }
+    return this.#initPromise;
+  }
+
+  // Attempts to restore a previous session (key + delegation chain) from
+  // storage. If found and still valid, sets #identity and #chain so the
+  // client is ready to use without a new login().
+  async #hydrate(): Promise<void> {
+    const key =
+      this.#options.identity ??
+      (await restoreKey(this.#storage, this.#options.keyType ?? ECDSA_KEY_LABEL));
+    if (!key) return;
+
+    const chain = await restoreChain(this.#storage);
+    if (!chain) return;
+
+    this.#chain = chain;
+    if ('toDer' in key) {
+      this.#identity = PartialDelegationIdentity.fromDelegation(key, chain);
+    } else {
+      this.#identity = DelegationIdentity.fromDelegation(key, chain);
+    }
+
+    if (!this.#options.idleOptions?.disableIdle && !this.idleManager) {
+      this.idleManager = IdleManager.create(this.#options.idleOptions);
+      this.#registerDefaultIdleCallback();
+    }
+  }
+
+  #registerDefaultIdleCallback() {
+    const idleOptions = this.#options?.idleOptions;
+    if (!idleOptions?.onIdle && !idleOptions?.disableDefaultIdleCallback) {
+      this.idleManager?.registerCallback(() => {
+        this.logout();
+        location.reload();
+      });
+    }
+  }
+}
+
+/**
+ * Generates a new session key.
+ * @param keyType - The key algorithm to use.
+ */
+async function generateKey(keyType: BaseKeyType): Promise<SignIdentity> {
+  if (keyType === ED25519_KEY_LABEL) {
+    return Ed25519KeyIdentity.generate();
+  }
+  return await ECDSAKeyIdentity.generate();
+}
+
+/**
+ * Saves a session key to storage.
+ * @param storage - The storage backend.
+ * @param key - The key to persist.
+ */
+async function persistKey(
+  storage: AuthClientStorage,
+  key: SignIdentity | PartialIdentity,
+): Promise<void> {
+  await storage.set(KEY_STORAGE_KEY, serializeKey(key));
+}
+
+/**
+ * Loads a session key from storage. Falls back to migrating a legacy
+ * key from localStorage if nothing is found in the primary store.
+ * @param storage - The storage backend.
+ * @param keyType - The expected key algorithm (determines deserialization).
+ */
+async function restoreKey(
+  storage: AuthClientStorage,
+  keyType: BaseKeyType,
+): Promise<SignIdentity | PartialIdentity | null> {
+  let stored = await storage.get(KEY_STORAGE_KEY);
+  if (!stored) {
+    stored = await migrateFromLocalStorage(storage, keyType);
+  }
+  if (!stored) return null;
+
+  try {
+    // CryptoKeyPair (object) → ECDSA, JSON string → Ed25519
+    if (typeof stored === 'object') {
+      return await ECDSAKeyIdentity.fromKeyPair(stored);
+    }
+    return Ed25519KeyIdentity.fromJSON(stored);
+  } catch {
+    // The stored value may be corrupt or from an incompatible version.
+    // Returning null lets the caller fall through to key generation,
+    // which is safer than crashing on startup.
+    return null;
+  }
+}
+
+/**
+ * Converts a key into a format suitable for storage.
+ * @param key - The key to serialize.
+ */
+function serializeKey(key: SignIdentity | PartialIdentity): StoredKey {
+  if (key instanceof ECDSAKeyIdentity) return key.getKeyPair();
+  if (key instanceof Ed25519KeyIdentity) return JSON.stringify(key.toJSON());
+  throw new Error('Unsupported key type');
+}
+
+/**
+ * Saves the delegation chain and caches its earliest expiration
+ * in localStorage so {@link AuthClient.isAuthenticated} can check it synchronously.
+ * @param storage - The storage backend.
+ * @param chain - The delegation chain to persist.
+ */
+async function persistChain(storage: AuthClientStorage, chain: DelegationChain): Promise<void> {
+  await storage.set(KEY_STORAGE_DELEGATION, JSON.stringify(chain.toJSON()));
+
+  let earliest: bigint | null = null;
+  for (const { delegation } of chain.delegations) {
+    if (earliest === null || delegation.expiration < earliest) {
+      earliest = delegation.expiration;
+    }
+  }
+  if (earliest !== null) {
+    localStorage.setItem(KEY_STORAGE_EXPIRATION, earliest.toString());
+  }
+}
+
+/**
+ * Loads the delegation chain from storage. Returns `null` and wipes
+ * storage if the chain is expired or corrupted.
+ * @param storage - The storage backend.
+ */
+async function restoreChain(storage: AuthClientStorage): Promise<DelegationChain | null> {
+  try {
+    const raw = await storage.get(KEY_STORAGE_DELEGATION);
+    if (!raw || typeof raw !== 'string') return null;
+
+    const chain = DelegationChain.fromJSON(raw);
+    if (!isDelegationValid(chain)) {
+      await deleteStorage(storage);
+      return null;
+    }
+    return chain;
+  } catch (e) {
+    console.error(e);
+    await deleteStorage(storage);
+    return null;
+  }
+}
+
+/**
+ * Clears all session data from storage.
+ * @param storage - The storage backend.
+ */
+async function deleteStorage(storage: AuthClientStorage): Promise<void> {
+  await storage.remove(KEY_STORAGE_KEY);
+  await storage.remove(KEY_STORAGE_DELEGATION);
+  await storage.remove(KEY_VECTOR);
+  localStorage.removeItem(KEY_STORAGE_EXPIRATION);
+}
+
+/** Reads the cached delegation expiration from localStorage (nanoseconds). */
+function getExpirationFlag(): bigint | null {
+  const value = localStorage.getItem(KEY_STORAGE_EXPIRATION);
+  if (value === null) return null;
+  return BigInt(value);
+}
+
+/**
+ * One-time migration: moves a legacy session stored in localStorage
+ * into the primary storage, then cleans up the old entries.
+ * @param storage - The target storage backend.
+ * @param keyType - The expected key algorithm (only ECDSA keys are migrated).
+ */
+async function migrateFromLocalStorage(
+  storage: AuthClientStorage,
+  keyType: BaseKeyType,
+): Promise<StoredKey | null> {
+  try {
+    const fallback = new LocalStorage();
+    const localChain = await fallback.get(KEY_STORAGE_DELEGATION);
+    const localKey = await fallback.get(KEY_STORAGE_KEY);
+
+    if (!localChain || !localKey || keyType !== ECDSA_KEY_LABEL) return null;
+
+    console.log('Discovered an identity stored in localstorage. Migrating to IndexedDB');
+    await storage.set(KEY_STORAGE_DELEGATION, localChain);
+    await storage.set(KEY_STORAGE_KEY, localKey);
+    await fallback.remove(KEY_STORAGE_DELEGATION);
+    await fallback.remove(KEY_STORAGE_KEY);
+
+    return localKey;
+  } catch (error) {
+    console.error(`error while attempting to recover localstorage: ${error}`);
+    return null;
   }
 }

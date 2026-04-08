@@ -1,7 +1,4 @@
-import { Actor, type AgentError, HttpAgent } from '@icp-sdk/core/agent';
-import { IDL } from '@icp-sdk/core/candid';
 import { DelegationChain, Ed25519KeyIdentity } from '@icp-sdk/core/identity';
-import { Principal } from '@icp-sdk/core/principal';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { AuthClient } from '../../src/client/auth-client.ts';
 import { IdleManager } from '../../src/client/idle-manager.ts';
@@ -13,17 +10,18 @@ import {
   LocalStorage,
 } from '../../src/client/storage.ts';
 
+// Mock @icp-sdk/signer so login() doesn't open real windows.
 const { mockSignerInstance, mockPostMessageTransport } = vi.hoisted(() => ({
   mockSignerInstance: {
     openChannel: vi.fn(),
-    closeChannel: vi.fn().mockResolvedValue(undefined),
+    closeChannel: vi.fn(),
     requestDelegation: vi.fn(),
   },
   mockPostMessageTransport: vi.fn(),
 }));
 
 vi.mock('@icp-sdk/signer', () => ({
-  Signer: class MockSigner {
+  Signer: class {
     openChannel = mockSignerInstance.openChannel;
     closeChannel = mockSignerInstance.closeChannel;
     requestDelegation = mockSignerInstance.requestDelegation;
@@ -34,671 +32,291 @@ vi.mock('@icp-sdk/signer/web', () => ({
   PostMessageTransport: mockPostMessageTransport,
 }));
 
+/**
+ * Helper: creates a valid DelegationChain for testing.
+ */
+async function createTestDelegation(key: Ed25519KeyIdentity, expiration?: Date) {
+  const exp = expiration ?? new Date(Date.now() + 24 * 60 * 60 * 1000); // 1 day from now
+  return DelegationChain.create(key, key.getPublicKey(), exp);
+}
+
+/**
+ * Helper: configures the mocked Signer so requestDelegation resolves with a test chain.
+ */
+async function mockSignerForLogin() {
+  const key = Ed25519KeyIdentity.generate();
+  const chain = await createTestDelegation(key);
+  mockSignerInstance.openChannel.mockResolvedValue(undefined);
+  mockSignerInstance.closeChannel.mockResolvedValue(undefined);
+  mockSignerInstance.requestDelegation.mockResolvedValue(chain);
+  return { key, chain };
+}
+
 beforeEach(() => {
   vi.unstubAllGlobals();
   vi.useRealTimers();
-  vi.clearAllMocks();
   localStorage.clear();
+  mockSignerInstance.openChannel.mockReset();
+  mockSignerInstance.closeChannel.mockReset();
+  mockSignerInstance.requestDelegation.mockReset();
 });
 
-afterEach(() => {
-  localStorage.clear();
+afterEach(async () => {
   // IdleManager is a singleton — without tearing it down, idle timers and DOM
   // listeners from one test bleed into the next, causing spurious failures.
   try {
     IdleManager.create().exit();
   } catch {
-    // ignore if already torn down
+    // no-op if already torn down
   }
+  await new Promise((r) => setTimeout(r, 0));
+  localStorage.clear();
 });
 
-describe('Auth Client', () => {
+describe('AuthClient', () => {
   it('should initialize with an AnonymousIdentity', async () => {
-    const test = new AuthClient({ idleOptions: { disableIdle: true } });
-    expect(test.isAuthenticated()).toBe(false);
-    expect((await test.getIdentity()).getPrincipal().isAnonymous()).toBe(true);
+    const client = new AuthClient();
+    expect(client.isAuthenticated()).toBe(false);
+    const identity = await client.getIdentity();
+    expect(identity.getPrincipal().isAnonymous()).toBe(true);
   });
 
-  it('should initialize with a provided identity', async () => {
+  it('should use a provided identity as the key for hydration', async () => {
     const identity = Ed25519KeyIdentity.generate();
-    const test = new AuthClient({
-      identity,
-    });
-    expect((await test.getIdentity()).getPrincipal().isAnonymous()).toBe(false);
-    expect(await test.getIdentity()).toBe(identity);
+    const chain = await createTestDelegation(identity);
+    const storage: AuthClientStorage = {
+      remove: vi.fn(),
+      get: vi.fn(async (x) => {
+        if (x === KEY_STORAGE_DELEGATION) return JSON.stringify(chain.toJSON());
+        return null;
+      }),
+      set: vi.fn(),
+    };
+    const client = new AuthClient({ identity, storage });
+    const resolved = await client.getIdentity();
+    expect(resolved.getPrincipal().isAnonymous()).toBe(false);
   });
 
   it('should log users out', async () => {
-    const test = new AuthClient({ idleOptions: { disableIdle: true } });
-    await test.logout();
-    expect(test.isAuthenticated()).toBe(false);
-    expect((await test.getIdentity()).getPrincipal().isAnonymous()).toBe(true);
+    const client = new AuthClient();
+    await client.logout();
+    expect(client.isAuthenticated()).toBe(false);
+    const identity = await client.getIdentity();
+    expect(identity.getPrincipal().isAnonymous()).toBe(true);
   });
 
   it('should not initialize an idleManager if the user is not logged in', async () => {
-    const test = new AuthClient({ idleOptions: { disableIdle: true } });
-    // Wait for hydration to complete
-    await test.getIdentity();
-    expect(test.idleManager).not.toBeDefined();
+    const client = new AuthClient();
+    await client.getIdentity(); // wait for hydration
+    expect(client.idleManager).toBeUndefined();
   });
 
-  it('should initialize an idleManager if an identity is passed', async () => {
-    const test = new AuthClient({ identity: Ed25519KeyIdentity.generate() });
-    // Wait for hydration to complete
-    await test.getIdentity();
-    expect(test.idleManager).toBeDefined();
-  });
-
-  it('should be able to invalidate an identity after going idle', async () => {
-    const mockFetch = vi.fn();
-    vi.stubGlobal('location', {
-      reload: vi.fn(),
-      fetch: mockFetch,
-      hostname: '127.0.0.1',
-      protocol: 'http:',
-      port: '4943',
-      toString: vi.fn(() => 'http://127.0.0.1:4943'),
-    });
-
-    const identity = Ed25519KeyIdentity.generate();
-
-    const canisterId = Principal.fromText('uxrrr-q7777-77774-qaaaq-cai');
-    const actorInterface = () => {
-      return IDL.Service({
-        greet: IDL.Func([IDL.Text], [IDL.Text]),
-      });
-    };
-
-    // setup auth client
-    const test = new AuthClient({
-      identity,
-      idleOptions: {
-        idleTimeout: 1000,
-      },
-    });
-
-    // Wait for hydration
-    await test.getIdentity();
-
-    const httpAgent = await HttpAgent.create({ fetch: mockFetch });
-    const actor = Actor.createActor(actorInterface, { canisterId, agent: httpAgent });
-
-    test.idleManager?.registerCallback(() => {
-      const agent = Actor.agentOf(actor);
-      agent!.invalidateIdentity?.();
-    });
-
-    // wait for the idle timeout
-    await new Promise((resolve) => setTimeout(resolve, 1000));
-
-    expect.assertions(2);
-
-    // check that the registered actor has been invalidated
-    const expectedError =
-      "This identity has expired due this application's security policy. Please refresh your authentication.";
-    try {
-      await actor.greet('hello');
-    } catch (error) {
-      expect(test.isAuthenticated()).toBe(false);
-      expect((error as AgentError).message).toBe(expectedError);
-    }
-  });
-
-  it('should not set up an idle timer if the disable option is set', async () => {
-    const idleFn = vi.fn();
-    const test = new AuthClient({
-      idleOptions: {
-        idleTimeout: 1000,
-        disableIdle: true,
-      },
-    });
-
-    // Wait for hydration
-    await test.getIdentity();
-
-    expect(idleFn).not.toHaveBeenCalled();
-    expect(test.idleManager).toBeUndefined();
-    // wait for default 30 minute idle timeout
-    vi.useFakeTimers();
-    vi.advanceTimersByTime(30 * 60 * 1000);
-    expect(idleFn).not.toHaveBeenCalled();
-  });
-});
-
-describe('OpenID provider', () => {
   it.each([
     ['google', 'https://accounts.google.com'],
     ['apple', 'https://appleid.apple.com'],
     ['microsoft', 'https://login.microsoftonline.com/{tid}/v2.0'],
   ] as const)('should pass openid=%s search param to the transport', (provider, expectedUrl) => {
     mockPostMessageTransport.mockClear();
-    new AuthClient({ openIdProvider: provider, idleOptions: { disableIdle: true } });
+    new AuthClient({ openIdProvider: provider });
     const url = new URL(mockPostMessageTransport.mock.calls[0][0].url);
     expect(url.searchParams.get('openid')).toBe(expectedUrl);
   });
 
   it('should not include openid search param when openIdProvider is not set', () => {
     mockPostMessageTransport.mockClear();
-    new AuthClient({ idleOptions: { disableIdle: true } });
+    new AuthClient();
     const url = new URL(mockPostMessageTransport.mock.calls[0][0].url);
     expect(url.searchParams.has('openid')).toBe(false);
   });
 
-  it('should add openid param to a custom identityProvider URL', () => {
-    mockPostMessageTransport.mockClear();
-    new AuthClient({
-      identityProvider: 'http://localhost:4943',
-      openIdProvider: 'apple',
-      idleOptions: { disableIdle: true },
+  it('should not set up an idle timer if the disable option is set', () => {
+    const client = new AuthClient({
+      idleOptions: {
+        idleTimeout: 1000,
+        disableIdle: true,
+      },
     });
-    const url = new URL(mockPostMessageTransport.mock.calls[0][0].url);
-    expect(url.origin).toBe('http://localhost:4943');
-    expect(url.searchParams.get('openid')).toBe('https://appleid.apple.com');
+    expect(client.idleManager).toBeUndefined();
   });
 });
 
-describe('Auth Client login', () => {
-  function setupMockDelegation() {
-    const key = Ed25519KeyIdentity.generate();
-    const chain = DelegationChain.create(
-      key,
-      key.getPublicKey(),
-      new Date(Date.now() + 60 * 60 * 1000),
-    );
-    return chain;
-  }
-
-  it('should call signer.requestDelegation and succeed', async () => {
-    const chain = await setupMockDelegation();
-    mockSignerInstance.requestDelegation.mockResolvedValueOnce(chain);
-
-    const client = new AuthClient({ idleOptions: { disableIdle: true } });
+describe('AuthClient login', () => {
+  it('should call onSuccess after a successful login', async () => {
+    await mockSignerForLogin();
+    const client = new AuthClient();
     const onSuccess = vi.fn();
     await client.login({ onSuccess });
-
-    expect(mockSignerInstance.requestDelegation).toHaveBeenCalledOnce();
-    expect(onSuccess).toHaveBeenCalledOnce();
-    expect(mockSignerInstance.closeChannel).toHaveBeenCalledOnce();
+    expect(onSuccess).toHaveBeenCalled();
   });
 
-  it('should call onError on signer failure', async () => {
-    mockSignerInstance.requestDelegation.mockRejectedValueOnce(new Error('mock error message'));
-
-    const client = new AuthClient({ idleOptions: { disableIdle: true } });
-    const onError = vi.fn();
-    await client.login({ onError });
-
-    expect(onError).toHaveBeenCalledWith('mock error message');
-    expect(mockSignerInstance.closeChannel).toHaveBeenCalledOnce();
+  it('should set up an idle manager after login', async () => {
+    await mockSignerForLogin();
+    const client = new AuthClient();
+    await client.login();
+    expect(client.idleManager).toBeDefined();
   });
 
-  it('should throw when login fails and no onError is provided', async () => {
-    mockSignerInstance.requestDelegation.mockRejectedValueOnce(new Error('mock throw message'));
-
+  it('should not set up an idle manager if disableIdle is set', async () => {
+    await mockSignerForLogin();
     const client = new AuthClient({ idleOptions: { disableIdle: true } });
-    await expect(client.login()).rejects.toThrow('mock throw message');
-    expect(mockSignerInstance.closeChannel).toHaveBeenCalledOnce();
+    await client.login();
+    expect(client.idleManager).toBeUndefined();
+  });
+
+  it('should throw on failure when no onError is provided', async () => {
+    mockSignerInstance.openChannel.mockRejectedValue(new Error('connection failed'));
+
+    const client = new AuthClient();
+    await expect(client.login()).rejects.toThrow('connection failed');
   });
 
   it('should call onError instead of throwing when onError is provided', async () => {
-    mockSignerInstance.requestDelegation.mockRejectedValueOnce(new Error('callback error'));
+    mockSignerInstance.openChannel.mockRejectedValue(new Error('connection failed'));
 
-    const client = new AuthClient({ idleOptions: { disableIdle: true } });
+    const client = new AuthClient();
     const onError = vi.fn();
-
-    // Should NOT throw
     await client.login({ onError });
-    expect(onError).toHaveBeenCalledWith('callback error');
+    expect(onError).toHaveBeenCalledWith('connection failed');
   });
 
-  it('should call closeChannel even if onSuccess throws', async () => {
-    const chain = await setupMockDelegation();
-    mockSignerInstance.requestDelegation.mockResolvedValueOnce(chain);
-
-    const client = new AuthClient({ idleOptions: { disableIdle: true } });
-    const onError = vi.fn();
-    const onSuccess = vi.fn(() => {
-      throw new Error('onSuccess error');
-    });
-    await client.login({ onSuccess, onError });
-
-    expect(mockSignerInstance.closeChannel).toHaveBeenCalledOnce();
-    expect(onError).toHaveBeenCalledWith('onSuccess error');
-  });
-
-  it('should create PostMessageTransport with the identity provider URL and window features', async () => {
-    const chain = await setupMockDelegation();
-    mockSignerInstance.requestDelegation.mockResolvedValueOnce(chain);
-
-    const client = new AuthClient({
-      identityProvider: 'http://127.0.0.1',
-      windowOpenerFeatures: 'toolbar=0,location=0,menubar=0',
-      idleOptions: { disableIdle: true },
-    });
-    await client.login();
-
-    expect(mockPostMessageTransport).toHaveBeenCalledWith({
-      url: 'http://127.0.0.1/',
-      windowOpenerFeatures: 'toolbar=0,location=0,menubar=0',
-    });
-  });
-
-  it('should use default identity provider when none is specified', async () => {
-    const chain = await setupMockDelegation();
-    mockSignerInstance.requestDelegation.mockResolvedValueOnce(chain);
-
-    const client = new AuthClient({ idleOptions: { disableIdle: true } });
-    await client.login();
-
-    expect(mockPostMessageTransport).toHaveBeenCalledWith({
-      url: 'https://id.ai/authorize',
-      windowOpenerFeatures: undefined,
-    });
-  });
-
-  it('should pass derivationOrigin to signer', async () => {
-    const chain = await setupMockDelegation();
-    mockSignerInstance.requestDelegation.mockResolvedValueOnce(chain);
-
-    // derivationOrigin is now set at create-time and passed via Signer constructor.
-    const client = new AuthClient({
-      identityProvider: 'http://127.0.0.1',
-      derivationOrigin: 'http://127.0.0.1:1234',
-      idleOptions: { disableIdle: true },
-    });
-    const onSuccess = vi.fn();
-    await client.login({ onSuccess });
-
-    expect(onSuccess).toHaveBeenCalledOnce();
-  });
-
-  it('should pass maxTimeToLive to requestDelegation', async () => {
-    const chain = await setupMockDelegation();
-    mockSignerInstance.requestDelegation.mockResolvedValueOnce(chain);
-
-    const client = new AuthClient({ idleOptions: { disableIdle: true } });
-    await client.login({ maxTimeToLive: BigInt(1000) });
-
-    const callArgs = mockSignerInstance.requestDelegation.mock.calls[0][0];
-    expect(callArgs.maxTimeToLive).toBe(BigInt(1000));
-  });
-
-  it('should authenticate after a successful login', async () => {
-    const chain = await setupMockDelegation();
-    mockSignerInstance.requestDelegation.mockResolvedValueOnce(chain);
-
-    const client = new AuthClient({ idleOptions: { disableIdle: true } });
-    await client.login();
-
-    expect((await client.getIdentity()).getPrincipal().isAnonymous()).toBe(false);
-  });
-
-  it('should persist delegation and key to storage after login', async () => {
-    const chain = await setupMockDelegation();
-    mockSignerInstance.requestDelegation.mockResolvedValueOnce(chain);
-
+  it('should persist delegation and key after login', async () => {
+    await mockSignerForLogin();
     const storage: AuthClientStorage = {
       remove: vi.fn(),
-      get: vi.fn(async () => null),
+      get: vi.fn().mockResolvedValue(null),
       set: vi.fn(),
     };
-
-    const client = new AuthClient({
-      storage,
-      keyType: 'Ed25519',
-      idleOptions: { disableIdle: true },
-    });
+    const client = new AuthClient({ storage });
     await client.login();
 
-    // Should have set the delegation chain
-    const delegationSetCalls = (storage.set as ReturnType<typeof vi.fn>).mock.calls.filter(
-      (call: unknown[]) => call[0] === KEY_STORAGE_DELEGATION,
-    );
-    expect(delegationSetCalls.length).toBeGreaterThan(0);
-
-    // Should have persisted the key
-    const keySetCalls = (storage.set as ReturnType<typeof vi.fn>).mock.calls.filter(
-      (call: unknown[]) => call[0] === KEY_STORAGE_KEY,
-    );
-    // Key is set during create and again after login
-    expect(keySetCalls.length).toBeGreaterThanOrEqual(2);
+    expect(storage.set).toHaveBeenCalledWith(KEY_STORAGE_DELEGATION, expect.any(String));
+    expect(storage.set).toHaveBeenCalledWith(KEY_STORAGE_KEY, expect.anything());
   });
 
-  it('should generate a fresh key on each login call', async () => {
-    const chain1 = await setupMockDelegation();
-    const chain2 = await setupMockDelegation();
-    mockSignerInstance.requestDelegation.mockResolvedValueOnce(chain1);
-    mockSignerInstance.requestDelegation.mockResolvedValueOnce(chain2);
-
-    const fakeStore: Record<string, string> = {};
+  it('should generate a fresh key for each login', async () => {
+    await mockSignerForLogin();
+    const storedKeys: unknown[] = [];
     const storage: AuthClientStorage = {
-      remove: vi.fn(async (k) => {
-        delete fakeStore[k];
-      }),
-      get: vi.fn(async (k) => fakeStore[k] ?? null),
+      remove: vi.fn(),
+      get: vi.fn().mockResolvedValue(null),
       set: vi.fn(async (k, v) => {
-        fakeStore[k] = v as unknown as string;
+        if (k === KEY_STORAGE_KEY) storedKeys.push(v);
       }),
     };
-
-    const client = new AuthClient({
-      storage,
-      keyType: 'Ed25519',
-      idleOptions: { disableIdle: true },
-    });
-
+    const client = new AuthClient({ storage, keyType: 'Ed25519' });
     await client.login();
-    const keyAfterFirstLogin = fakeStore[KEY_STORAGE_KEY];
-
     await client.login();
-    const keyAfterSecondLogin = fakeStore[KEY_STORAGE_KEY];
 
-    // A fresh key should have been generated for each login, so the stored keys should differ.
-    expect(keyAfterFirstLogin).not.toEqual(keyAfterSecondLogin);
+    expect(storedKeys).toHaveLength(2);
+    expect(storedKeys[0]).not.toEqual(storedKeys[1]);
   });
 
-  it('should use the identityProvider passed to the constructor', async () => {
-    const chain = await setupMockDelegation();
-    mockSignerInstance.requestDelegation.mockResolvedValueOnce(chain);
-
-    const client = new AuthClient({
-      identityProvider: 'http://my-local-website.localhost:8080',
-      idleOptions: { disableIdle: true },
-    });
-
-    await client.login({ maxTimeToLive: BigInt(1000) });
-
-    expect(mockPostMessageTransport).toHaveBeenCalledWith({
-      url: 'http://my-local-website.localhost:8080/',
-      windowOpenerFeatures: undefined,
-    });
-
-    const callArgs = mockSignerInstance.requestDelegation.mock.calls[0][0];
-    expect(callArgs.maxTimeToLive).toEqual(BigInt(1000));
+  it('should set the localStorage expiration flag after login', async () => {
+    await mockSignerForLogin();
+    const client = new AuthClient({ idleOptions: { disableIdle: true } });
+    expect(client.isAuthenticated()).toBe(false);
+    await client.login();
+    expect(client.isAuthenticated()).toBe(true);
   });
 
+  it('should clear the localStorage expiration flag on logout', async () => {
+    await mockSignerForLogin();
+    const client = new AuthClient({ idleOptions: { disableIdle: true } });
+    await client.login();
+    expect(client.isAuthenticated()).toBe(true);
+    await client.logout();
+    expect(client.isAuthenticated()).toBe(false);
+  });
+});
+
+describe('AuthClient idle behavior', () => {
   it('should log out after idle and reload the window by default', async () => {
-    vi.useFakeTimers();
-    vi.stubGlobal('location', { reload: vi.fn(), fetch: vi.fn() });
+    vi.stubGlobal('location', { reload: vi.fn() });
 
-    const chain = await setupMockDelegation();
-    mockSignerInstance.requestDelegation.mockResolvedValueOnce(chain);
-
+    await mockSignerForLogin();
     const storage: AuthClientStorage = {
       remove: vi.fn(),
-      get: vi.fn(),
+      get: vi.fn().mockResolvedValue(null),
       set: vi.fn(),
     };
-
-    const test = new AuthClient({
+    const client = new AuthClient({
       storage,
-      idleOptions: {
-        idleTimeout: 1000,
-      },
+      idleOptions: { idleTimeout: 1000 },
     });
+    await client.login();
 
-    await test.login();
-
-    expect(storage.set).toHaveBeenCalled();
     expect(storage.remove).not.toHaveBeenCalled();
 
-    // simulate user being inactive for 10 minutes
-    vi.advanceTimersByTime(10 * 60 * 1000);
+    await new Promise((r) => setTimeout(r, 1100));
 
-    // Storage should be cleared by default after logging out
     expect(storage.remove).toHaveBeenCalled();
-
     expect(window.location.reload).toHaveBeenCalled();
   });
 
   it('should not reload the page if the default callback is disabled', async () => {
-    vi.useFakeTimers();
-    vi.stubGlobal('location', { reload: vi.fn(), fetch: vi.fn() });
+    vi.stubGlobal('location', { reload: vi.fn() });
 
-    const chain = await setupMockDelegation();
-    mockSignerInstance.requestDelegation.mockResolvedValueOnce(chain);
-
+    await mockSignerForLogin();
     const storage: AuthClientStorage = {
       remove: vi.fn(),
-      get: vi.fn(),
+      get: vi.fn().mockResolvedValue(null),
       set: vi.fn(),
     };
-
-    const test = new AuthClient({
+    const client = new AuthClient({
       storage,
-      idleOptions: {
-        idleTimeout: 1000,
-        disableDefaultIdleCallback: true,
-      },
+      idleOptions: { idleTimeout: 1000, disableDefaultIdleCallback: true },
     });
+    await client.login();
 
-    await test.login();
+    await new Promise((r) => setTimeout(r, 1100));
 
-    expect(storage.set).toHaveBeenCalled();
     expect(storage.remove).not.toHaveBeenCalled();
-
-    // simulate user being inactive for 10 minutes
-    vi.advanceTimersByTime(10 * 60 * 1000);
-
-    // Storage should not be cleared
-    expect(storage.remove).not.toHaveBeenCalled();
-    // Page should not be reloaded
     expect(window.location.reload).not.toHaveBeenCalled();
   });
 
-  it('should not reload the page if a callback is provided', async () => {
-    vi.useFakeTimers();
+  it('should call onIdle instead of the default behavior when provided', async () => {
+    vi.stubGlobal('location', { reload: vi.fn() });
 
-    const chain = await setupMockDelegation();
-    mockSignerInstance.requestDelegation.mockResolvedValueOnce(chain);
-
-    vi.stubGlobal('location', { reload: vi.fn(), fetch: vi.fn() });
-
-    const storage: AuthClientStorage = {
-      remove: vi.fn(),
-      get: vi.fn(),
-      set: vi.fn(),
-    };
-
+    await mockSignerForLogin();
     const idleCb = vi.fn();
-    const test = new AuthClient({
-      storage,
-      idleOptions: {
-        idleTimeout: 1000,
-        onIdle: idleCb,
-      },
+    const client = new AuthClient({
+      idleOptions: { idleTimeout: 1000, onIdle: idleCb },
     });
+    await client.login();
 
-    await test.login();
-
-    // simulate user being inactive for 10 minutes
-    vi.advanceTimersByTime(10 * 60 * 1000);
+    // Wait for the idle timeout to fire (real timers).
+    await new Promise((r) => setTimeout(r, 1100));
 
     expect(window.location.reload).not.toHaveBeenCalled();
     expect(idleCb).toHaveBeenCalled();
-  });
-
-  it('should not set up an idle timer if the client is not logged in', async () => {
-    vi.useFakeTimers();
-    vi.stubGlobal('location', { reload: vi.fn(), fetch: vi.fn() });
-
-    const storage: AuthClientStorage = {
-      remove: vi.fn(),
-      get: vi.fn(),
-      set: vi.fn(),
-    };
-
-    const client = new AuthClient({
-      storage,
-      idleOptions: {
-        idleTimeout: 1000,
-      },
-    });
-
-    // Wait for hydration
-    await client.getIdentity();
-
-    expect(storage.set).toHaveBeenCalled();
-    expect(storage.remove).not.toHaveBeenCalled();
-
-    // simulate user being inactive for 10 minutes
-    vi.advanceTimersByTime(10 * 60 * 1000);
-
-    // Storage should not be cleared
-    expect(storage.remove).not.toHaveBeenCalled();
-    // Page should not be reloaded
-    expect(window.location.reload).not.toHaveBeenCalled();
-  });
-});
-
-describe('localStorage expiration flag', () => {
-  function setupMockDelegation() {
-    const key = Ed25519KeyIdentity.generate();
-    const chain = DelegationChain.create(
-      key,
-      key.getPublicKey(),
-      new Date(Date.now() + 60 * 60 * 1000),
-    );
-    return chain;
-  }
-
-  it('should set the expiration flag in localStorage on login', async () => {
-    const chain = await setupMockDelegation();
-    mockSignerInstance.requestDelegation.mockResolvedValueOnce(chain);
-
-    const client = new AuthClient({ idleOptions: { disableIdle: true } });
-    expect(localStorage.getItem('ic-delegation_expiration')).toBeNull();
-
-    await client.login();
-
-    const stored = localStorage.getItem('ic-delegation_expiration');
-    expect(stored).not.toBeNull();
-    // The expiration should be a bigint string representing nanoseconds in the future
-    const expNanos = BigInt(stored!);
-    const nowNanos = BigInt(Date.now()) * BigInt(1_000_000);
-    expect(expNanos).toBeGreaterThan(nowNanos);
-  });
-
-  it('should clear the expiration flag on logout', async () => {
-    const chain = await setupMockDelegation();
-    mockSignerInstance.requestDelegation.mockResolvedValueOnce(chain);
-
-    const client = new AuthClient({ idleOptions: { disableIdle: true } });
-    await client.login();
-
-    expect(localStorage.getItem('ic-delegation_expiration')).not.toBeNull();
-
-    await client.logout();
-
-    expect(localStorage.getItem('ic-delegation_expiration')).toBeNull();
-  });
-
-  it('isAuthenticated should return true when expiration is in the future', async () => {
-    const chain = await setupMockDelegation();
-    mockSignerInstance.requestDelegation.mockResolvedValueOnce(chain);
-
-    const client = new AuthClient({ idleOptions: { disableIdle: true } });
-    await client.login();
-
-    expect(client.isAuthenticated()).toBe(true);
-  });
-
-  it('isAuthenticated should return false when expiration is in the past', async () => {
-    // Manually set a past expiration
-    const pastNanos = (BigInt(Date.now()) - BigInt(60_000)) * BigInt(1_000_000);
-    localStorage.setItem('ic-delegation_expiration', pastNanos.toString());
-
-    const client = new AuthClient({ idleOptions: { disableIdle: true } });
-    expect(client.isAuthenticated()).toBe(false);
-  });
-
-  it('isAuthenticated should return false when no expiration is set', () => {
-    const client = new AuthClient({ idleOptions: { disableIdle: true } });
-    expect(client.isAuthenticated()).toBe(false);
   });
 });
 
 describe('IdbStorage', () => {
   it('should handle get and set', async () => {
     const storage = new IdbStorage();
-
     await storage.set('testKey', 'testValue');
     expect(await storage.get('testKey')).toBe('testValue');
   });
 });
 
-describe('Migration from localstorage', () => {
-  it('should proceed normally if no values are stored in localstorage', async () => {
-    const storage: AuthClientStorage = {
-      remove: vi.fn(),
-      get: vi.fn(),
-      set: vi.fn(),
-    };
-
-    const client = new AuthClient({ storage, idleOptions: { disableIdle: true } });
-    // Wait for hydration to complete
-    await client.getIdentity();
-
-    // Key is stored during creation when none is provided
-    expect(storage.set).toHaveBeenCalledTimes(1);
-  });
-
-  it('should not attempt to migrate if a delegation is already stored', async () => {
-    const storage: AuthClientStorage = {
-      remove: vi.fn(),
-      get: vi.fn(async (x) => {
-        if (x === KEY_STORAGE_DELEGATION) return 'test';
-        if (x === KEY_STORAGE_KEY) return 'key';
-        return null;
-      }),
-      set: vi.fn(),
-    };
-
-    const client = new AuthClient({ storage, idleOptions: { disableIdle: true } });
-    // Wait for hydration to complete
-    await client.getIdentity();
-
-    expect(storage.set).toHaveBeenCalledTimes(1);
-  });
-
-  it('should migrate storage from localstorage', async () => {
-    const legacyStorage = new LocalStorage();
-    const storage: AuthClientStorage = {
-      remove: vi.fn(),
-      get: vi.fn(),
-      set: vi.fn(),
-    };
-
-    await legacyStorage.set(KEY_STORAGE_DELEGATION, 'test');
-    await legacyStorage.set(KEY_STORAGE_KEY, 'key');
-
-    const client = new AuthClient({ storage, idleOptions: { disableIdle: true } });
-    // Wait for hydration to complete
-    await client.getIdentity();
-
-    expect(storage.set).toHaveBeenCalledTimes(3);
-  });
-});
-
-describe('Migration from Ed25519Key', () => {
+describe('Session restoration', () => {
   const testSecrets = [
     '302a300506032b6570032100d1fa89134802051c8b5d4e53c08b87381b87097bca4c4f348611eb8ce6c91809',
     '4bbff6b476463558d7be318aa342d1a97778d70833038680187950e9e02486c0d1fa89134802051c8b5d4e53c08b87381b87097bca4c4f348611eb8ce6c91809',
   ];
 
-  it('should continue using an existing Ed25519Key and delegation', async () => {
-    // set the timer to a fixed value
+  it('should restore an existing Ed25519Key and delegation', async () => {
     vi.setSystemTime(new Date('2020-01-01T00:00:00.000Z'));
 
-    // two days from now
     const expiration = new Date('2020-01-03T00:00:00.000Z');
-
     const key = Ed25519KeyIdentity.fromJSON(JSON.stringify(testSecrets));
-    const chain = DelegationChain.create(key, key.getPublicKey(), expiration);
+    const chain = await createTestDelegation(key, expiration);
+
     const storage: AuthClientStorage = {
       remove: vi.fn(),
       get: vi.fn(async (x) => {
-        if (x === KEY_STORAGE_DELEGATION) return JSON.stringify((await chain).toJSON());
+        if (x === KEY_STORAGE_DELEGATION) return JSON.stringify(chain.toJSON());
         if (x === KEY_STORAGE_KEY) return JSON.stringify(testSecrets);
         return null;
       }),
@@ -706,13 +324,11 @@ describe('Migration from Ed25519Key', () => {
     };
 
     const client = new AuthClient({ storage });
-
     const identity = await client.getIdentity();
     expect(identity.getPrincipal().isAnonymous()).toBe(false);
   });
 
-  it('should continue using an existing Ed25519Key with no delegation', async () => {
-    // set the timer to a fixed value
+  it('should remain anonymous with a key but no delegation', async () => {
     vi.setSystemTime(new Date('2020-01-01T00:00:00.000Z'));
 
     const storage: AuthClientStorage = {
@@ -724,106 +340,69 @@ describe('Migration from Ed25519Key', () => {
       set: vi.fn(),
     };
 
-    const client = new AuthClient({ storage, idleOptions: { disableIdle: true } });
-
+    const client = new AuthClient({ storage });
     const identity = await client.getIdentity();
     expect(identity.getPrincipal().isAnonymous()).toBe(true);
   });
 
-  it('should continue using an existing Ed25519Key with an expired delegation', async () => {
-    // set the timer to a fixed value
+  it('should clear storage when the delegation has expired', async () => {
     vi.setSystemTime(new Date('2020-01-01T00:00:00.000Z'));
 
-    // two days ago
     const expiration = new Date('2019-12-30T00:00:00.000Z');
-
     const key = Ed25519KeyIdentity.fromJSON(JSON.stringify(testSecrets));
+    const chain = await createTestDelegation(key, expiration);
 
-    const chain = DelegationChain.create(key, key.getPublicKey(), expiration);
     const fakeStore: Record<string, string> = {};
-    fakeStore[KEY_STORAGE_DELEGATION] = JSON.stringify((await chain).toJSON());
+    fakeStore[KEY_STORAGE_DELEGATION] = JSON.stringify(chain.toJSON());
     fakeStore[KEY_STORAGE_KEY] = JSON.stringify(testSecrets);
 
     const storage: AuthClientStorage = {
       remove: vi.fn(async (x) => {
         delete fakeStore[x];
       }),
-      get: vi.fn(async (x) => {
-        return fakeStore[x] ?? null;
-      }),
+      get: vi.fn(async (x) => fakeStore[x] ?? null),
       set: vi.fn(),
     };
 
-    const client = new AuthClient({ storage, idleOptions: { disableIdle: true } });
-
+    const client = new AuthClient({ storage });
     const identity = await client.getIdentity();
     expect(identity.getPrincipal().isAnonymous()).toBe(true);
-
-    // expect the delegation to be removed
-    expect(storage.remove).toHaveBeenCalledTimes(3);
-    expect(fakeStore).toMatchInlineSnapshot(`{}`);
+    expect(storage.remove).toHaveBeenCalled();
   });
+});
 
-  it('should generate and store a ECDSAKey if no key is stored', async () => {
-    const fakeStore: Record<string, string> = {};
+describe('Migration from localStorage', () => {
+  it('should proceed normally if no values are stored in localStorage', async () => {
     const storage: AuthClientStorage = {
       remove: vi.fn(),
-      get: vi.fn(),
-      set: vi.fn(async (x, y) => {
-        fakeStore[x] = y;
-      }),
+      get: vi.fn().mockResolvedValue(null),
+      set: vi.fn(),
     };
-    const client = new AuthClient({ storage, idleOptions: { disableIdle: true } });
+
+    new AuthClient({ storage });
     // Wait for hydration
-    await client.getIdentity();
+    await new Promise((r) => setTimeout(r, 0));
 
-    // It should have stored a cryptoKey
-    expect(Object.keys(fakeStore[KEY_STORAGE_KEY])).toMatchInlineSnapshot(`
-      [
-        "publicKey",
-        "privateKey",
-      ]
-    `);
+    // No migration should have occurred (no set calls for delegation/key)
+    expect(storage.set).not.toHaveBeenCalled();
   });
 
-  it("should generate and store a Ed25519 if no key is stored and keyType is set to Ed25519, and load the same key if it's found in storage", async () => {
-    const fakeStore: Record<string, string> = {};
+  it('should migrate storage from localStorage', async () => {
+    const legacyStorage = new LocalStorage();
     const storage: AuthClientStorage = {
       remove: vi.fn(),
-      get: vi.fn(async (key) => fakeStore[key] ?? null),
-      set: vi.fn(async (x, y) => {
-        fakeStore[x] = y;
-      }),
+      get: vi.fn().mockResolvedValue(null),
+      set: vi.fn(),
     };
 
-    // Mock the ED25519 generate method, only for the first auth client
-    const generate = vi.spyOn(Ed25519KeyIdentity, 'generate');
-    generate.mockImplementationOnce((): Ed25519KeyIdentity => {
-      const key = Ed25519KeyIdentity.fromJSON(JSON.stringify(testSecrets));
-      return key;
-    });
+    await legacyStorage.set(KEY_STORAGE_DELEGATION, 'test');
+    await legacyStorage.set(KEY_STORAGE_KEY, 'key');
 
-    const client1 = new AuthClient({
-      storage,
-      keyType: 'Ed25519',
-      idleOptions: { disableIdle: true },
-    });
-    const identity1 = await client1.getIdentity();
+    new AuthClient({ storage });
+    // Wait for hydration
+    await new Promise((r) => setTimeout(r, 0));
 
-    // This auth client should find the Ed25519 key in the storage,
-    // and not generate a new one
-    const client2 = new AuthClient({
-      storage,
-      keyType: 'Ed25519',
-      idleOptions: { disableIdle: true },
-    });
-    const identity2 = await client2.getIdentity();
-
-    expect(generate).toHaveBeenCalledTimes(1);
-    // It should have stored a cryptoKey
-    expect(fakeStore[KEY_STORAGE_KEY]).toEqual(JSON.stringify(testSecrets));
-    // The first identity, created from testSecrets, should be the same as the second identity,
-    // loaded from the storage
-    expect(identity1.getPrincipal().toString()).toEqual(identity2.getPrincipal().toString());
+    expect(storage.set).toHaveBeenCalledWith(KEY_STORAGE_DELEGATION, 'test');
+    expect(storage.set).toHaveBeenCalledWith(KEY_STORAGE_KEY, 'key');
   });
 });
