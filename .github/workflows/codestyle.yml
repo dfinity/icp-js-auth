@@ -13,7 +13,7 @@ jobs:
         uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
 
       - name: Setup PNPM
-        uses: dfinity/ci-tools/actions/setup-pnpm@main
+        uses: dfinity/ci-tools/actions/setup-pnpm@afeee4fbdc0683a88ec5a74ed7f59a2ce0e833ad # main
 
       - name: Check JS Codestyle
         run: pnpm codestyle:check
