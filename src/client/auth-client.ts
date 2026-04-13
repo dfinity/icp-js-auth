@@ -16,7 +16,7 @@ import {
   type PartialIdentity,
 } from '@icp-sdk/core/identity';
 import type { Principal } from '@icp-sdk/core/principal';
-import { IdleManager, type IdleManagerOptions } from './idle-manager.ts';
+import { IdleManager, type IdleManagerOptions } from './idle-manager.js';
 import {
   type AuthClientStorage,
   IdbStorage,
@@ -25,7 +25,7 @@ import {
   KEY_VECTOR,
   LocalStorage,
   type StoredKey,
-} from './storage.ts';
+} from './storage.js';
 
 const NANOSECONDS_PER_SECOND = BigInt(1_000_000_000);
 const SECONDS_PER_HOUR = BigInt(3_600);
