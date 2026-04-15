@@ -17,7 +17,7 @@ const network = 'ic'; // typically, this value is read from the environment (e.g
 const identityProvider =
   network === 'ic'
     ? 'https://id.ai/authorize' // Mainnet
-    : 'http://rdmx6-jaaaa-aaaaa-aaadq-cai.localhost:4943'; // Local
+    : 'http://id.ai.localhost:8000'; // default name mapping set by icp-cli when ii is enabled
 
 const authClient = new AuthClient({ identityProvider });
 
