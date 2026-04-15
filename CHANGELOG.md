@@ -1,5 +1,23 @@
 ## Unreleased
 
+### BREAKING CHANGE
+
+- - `identityProvider`, `derivationOrigin`, and `windowOpenerFeatures`
+moved from `AuthClientLoginOptions` to `AuthClientCreateOptions`
+- `loginOptions` field removed from `AuthClientCreateOptions`
+- - `allowPinAuthentication` and `customValues` login options removed (not
+supported by the signer protocol)
+- `InternetIdentityAuthResponseSuccess` type removed
+- `ERROR_USER_INTERRUPT` removed
+
+### Feat
+
+- fresh session keys, improved error handling, singleton IdleManager (#80)
+
+### Refactor
+
+- replace custom postMessage protocol with @icp-sdk/signer (#75)
+
 ## 5.0.0 (2025-12-18)
 
 - build: bump `@icp-sdk/core` to 5.0.0 (#65)
