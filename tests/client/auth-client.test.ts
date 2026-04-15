@@ -728,6 +728,8 @@ describe('Migration from Ed25519Key', () => {
     const identity2 = client2.getIdentity();
 
     expect(generate).toHaveBeenCalledTimes(1);
+    // It should have stored a cryptoKey
+    expect(fakeStore[KEY_STORAGE_KEY]).toEqual(JSON.stringify(testSecrets));
     // The first identity, created from testSecrets, should be the same as the second identity,
     // loaded from the storage
     expect(identity1.getPrincipal().toString()).toEqual(identity2.getPrincipal().toString());
