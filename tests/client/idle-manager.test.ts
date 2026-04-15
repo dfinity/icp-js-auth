@@ -1,4 +1,4 @@
-import { beforeAll, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 import { IdleManager } from '../../src/client/idle-manager.ts';
 
 const MILLISECONDS_PER_SECOND = 1000;
@@ -11,6 +11,15 @@ beforeAll(() => {
     writable: true,
     value: { assign: vi.fn(), reload: vi.fn() },
   });
+});
+
+afterEach(() => {
+  // Tear down the singleton between tests so each test starts fresh.
+  try {
+    IdleManager.create().exit();
+  } catch {
+    // ignore if already torn down
+  }
 });
 
 describe('IdleManager', () => {
@@ -130,5 +139,30 @@ describe('IdleManager', () => {
     // simulate user being inactive for 9 minutes, plus the debounce
     vi.advanceTimersByTime(9 * MILLISECONDS_PER_MINUTE + scrollDebounce);
     expect(cb).toHaveBeenCalled();
+  });
+
+  it('should return the same instance on multiple create() calls', () => {
+    const instance1 = IdleManager.create();
+    const instance2 = IdleManager.create();
+    expect(instance1).toBe(instance2);
+  });
+
+  it('should return a fresh instance after exit()', () => {
+    const instance1 = IdleManager.create();
+    instance1.exit();
+    const instance2 = IdleManager.create();
+    expect(instance1).not.toBe(instance2);
+  });
+
+  it('should fire callbacks from multiple create() calls when idle', () => {
+    const cb1 = vi.fn();
+    const cb2 = vi.fn();
+    IdleManager.create({ onIdle: cb1 });
+    IdleManager.create({ onIdle: cb2 });
+
+    // simulate user being inactive for 10 minutes
+    vi.advanceTimersByTime(10 * MILLISECONDS_PER_MINUTE);
+    expect(cb1).toHaveBeenCalled();
+    expect(cb2).toHaveBeenCalled();
   });
 });

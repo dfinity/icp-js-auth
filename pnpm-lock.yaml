@@ -8,9 +8,6 @@ importers:
 
   .:
     dependencies:
-      '@icp-sdk/signer':
-        specifier: ^5.2.0
-        version: 5.2.0(@icp-sdk/core@5.2.1)
       idb:
         specifier: ^7.1.1
         version: 7.1.1
@@ -21,6 +18,9 @@ importers:
       '@icp-sdk/core':
         specifier: ^5.2.1
         version: 5.2.1
+      '@icp-sdk/signer':
+        specifier: ^5.2.0
+        version: 5.2.0(@icp-sdk/core@5.2.1)
       fake-indexeddb:
         specifier: ^6.2.5
         version: 6.2.5
