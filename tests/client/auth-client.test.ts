@@ -41,7 +41,8 @@ beforeEach(() => {
 });
 
 afterEach(() => {
-  // Tear down the IdleManager singleton between tests to avoid leaking state.
+  // IdleManager is a singleton — without tearing it down, idle timers and DOM
+  // listeners from one test bleed into the next, causing spurious failures.
   try {
     IdleManager.create().exit();
   } catch {
