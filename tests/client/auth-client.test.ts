@@ -38,9 +38,11 @@ beforeEach(() => {
   vi.unstubAllGlobals();
   vi.useRealTimers();
   vi.clearAllMocks();
+  localStorage.clear();
 });
 
 afterEach(() => {
+  localStorage.clear();
   // IdleManager is a singleton — without tearing it down, idle timers and DOM
   // listeners from one test bleed into the next, causing spurious failures.
   try {
@@ -52,34 +54,38 @@ afterEach(() => {
 
 describe('Auth Client', () => {
   it('should initialize with an AnonymousIdentity', async () => {
-    const test = await AuthClient.create({ idleOptions: { disableIdle: true } });
-    expect(await test.isAuthenticated()).toBe(false);
-    expect(test.getIdentity().getPrincipal().isAnonymous()).toBe(true);
+    const test = new AuthClient({ idleOptions: { disableIdle: true } });
+    expect(test.isAuthenticated()).toBe(false);
+    expect((await test.getIdentity()).getPrincipal().isAnonymous()).toBe(true);
   });
 
   it('should initialize with a provided identity', async () => {
     const identity = Ed25519KeyIdentity.generate();
-    const test = await AuthClient.create({
+    const test = new AuthClient({
       identity,
     });
-    expect(test.getIdentity().getPrincipal().isAnonymous()).toBe(false);
-    expect(test.getIdentity()).toBe(identity);
+    expect((await test.getIdentity()).getPrincipal().isAnonymous()).toBe(false);
+    expect(await test.getIdentity()).toBe(identity);
   });
 
   it('should log users out', async () => {
-    const test = await AuthClient.create({ idleOptions: { disableIdle: true } });
+    const test = new AuthClient({ idleOptions: { disableIdle: true } });
     await test.logout();
-    expect(await test.isAuthenticated()).toBe(false);
-    expect(test.getIdentity().getPrincipal().isAnonymous()).toBe(true);
+    expect(test.isAuthenticated()).toBe(false);
+    expect((await test.getIdentity()).getPrincipal().isAnonymous()).toBe(true);
   });
 
   it('should not initialize an idleManager if the user is not logged in', async () => {
-    const test = await AuthClient.create({ idleOptions: { disableIdle: true } });
+    const test = new AuthClient({ idleOptions: { disableIdle: true } });
+    // Wait for hydration to complete
+    await test.getIdentity();
     expect(test.idleManager).not.toBeDefined();
   });
 
   it('should initialize an idleManager if an identity is passed', async () => {
-    const test = await AuthClient.create({ identity: Ed25519KeyIdentity.generate() });
+    const test = new AuthClient({ identity: Ed25519KeyIdentity.generate() });
+    // Wait for hydration to complete
+    await test.getIdentity();
     expect(test.idleManager).toBeDefined();
   });
 
@@ -104,12 +110,15 @@ describe('Auth Client', () => {
     };
 
     // setup auth client
-    const test = await AuthClient.create({
+    const test = new AuthClient({
       identity,
       idleOptions: {
         idleTimeout: 1000,
       },
     });
+
+    // Wait for hydration
+    await test.getIdentity();
 
     const httpAgent = await HttpAgent.create({ fetch: mockFetch });
     const actor = Actor.createActor(actorInterface, { canisterId, agent: httpAgent });
@@ -130,19 +139,22 @@ describe('Auth Client', () => {
     try {
       await actor.greet('hello');
     } catch (error) {
-      expect(await test.isAuthenticated()).toBe(false);
+      expect(test.isAuthenticated()).toBe(false);
       expect((error as AgentError).message).toBe(expectedError);
     }
   });
 
   it('should not set up an idle timer if the disable option is set', async () => {
     const idleFn = vi.fn();
-    const test = await AuthClient.create({
+    const test = new AuthClient({
       idleOptions: {
         idleTimeout: 1000,
         disableIdle: true,
       },
     });
+
+    // Wait for hydration
+    await test.getIdentity();
 
     expect(idleFn).not.toHaveBeenCalled();
     expect(test.idleManager).toBeUndefined();
@@ -168,7 +180,7 @@ describe('Auth Client login', () => {
     const chain = await setupMockDelegation();
     mockSignerInstance.requestDelegation.mockResolvedValueOnce(chain);
 
-    const client = await AuthClient.create({ idleOptions: { disableIdle: true } });
+    const client = new AuthClient({ idleOptions: { disableIdle: true } });
     const onSuccess = vi.fn();
     await client.login({ onSuccess });
 
@@ -180,7 +192,7 @@ describe('Auth Client login', () => {
   it('should call onError on signer failure', async () => {
     mockSignerInstance.requestDelegation.mockRejectedValueOnce(new Error('mock error message'));
 
-    const client = await AuthClient.create({ idleOptions: { disableIdle: true } });
+    const client = new AuthClient({ idleOptions: { disableIdle: true } });
     const onError = vi.fn();
     await client.login({ onError });
 
@@ -191,7 +203,7 @@ describe('Auth Client login', () => {
   it('should throw when login fails and no onError is provided', async () => {
     mockSignerInstance.requestDelegation.mockRejectedValueOnce(new Error('mock throw message'));
 
-    const client = await AuthClient.create({ idleOptions: { disableIdle: true } });
+    const client = new AuthClient({ idleOptions: { disableIdle: true } });
     await expect(client.login()).rejects.toThrow('mock throw message');
     expect(mockSignerInstance.closeChannel).toHaveBeenCalledOnce();
   });
@@ -199,7 +211,7 @@ describe('Auth Client login', () => {
   it('should call onError instead of throwing when onError is provided', async () => {
     mockSignerInstance.requestDelegation.mockRejectedValueOnce(new Error('callback error'));
 
-    const client = await AuthClient.create({ idleOptions: { disableIdle: true } });
+    const client = new AuthClient({ idleOptions: { disableIdle: true } });
     const onError = vi.fn();
 
     // Should NOT throw
@@ -211,7 +223,7 @@ describe('Auth Client login', () => {
     const chain = await setupMockDelegation();
     mockSignerInstance.requestDelegation.mockResolvedValueOnce(chain);
 
-    const client = await AuthClient.create({ idleOptions: { disableIdle: true } });
+    const client = new AuthClient({ idleOptions: { disableIdle: true } });
     const onError = vi.fn();
     const onSuccess = vi.fn(() => {
       throw new Error('onSuccess error');
@@ -226,7 +238,7 @@ describe('Auth Client login', () => {
     const chain = await setupMockDelegation();
     mockSignerInstance.requestDelegation.mockResolvedValueOnce(chain);
 
-    const client = await AuthClient.create({
+    const client = new AuthClient({
       identityProvider: 'http://127.0.0.1',
       windowOpenerFeatures: 'toolbar=0,location=0,menubar=0',
       idleOptions: { disableIdle: true },
@@ -243,7 +255,7 @@ describe('Auth Client login', () => {
     const chain = await setupMockDelegation();
     mockSignerInstance.requestDelegation.mockResolvedValueOnce(chain);
 
-    const client = await AuthClient.create({ idleOptions: { disableIdle: true } });
+    const client = new AuthClient({ idleOptions: { disableIdle: true } });
     await client.login();
 
     expect(mockPostMessageTransport).toHaveBeenCalledWith({
@@ -257,7 +269,7 @@ describe('Auth Client login', () => {
     mockSignerInstance.requestDelegation.mockResolvedValueOnce(chain);
 
     // derivationOrigin is now set at create-time and passed via Signer constructor.
-    const client = await AuthClient.create({
+    const client = new AuthClient({
       identityProvider: 'http://127.0.0.1',
       derivationOrigin: 'http://127.0.0.1:1234',
       idleOptions: { disableIdle: true },
@@ -272,7 +284,7 @@ describe('Auth Client login', () => {
     const chain = await setupMockDelegation();
     mockSignerInstance.requestDelegation.mockResolvedValueOnce(chain);
 
-    const client = await AuthClient.create({ idleOptions: { disableIdle: true } });
+    const client = new AuthClient({ idleOptions: { disableIdle: true } });
     await client.login({ maxTimeToLive: BigInt(1000) });
 
     const callArgs = mockSignerInstance.requestDelegation.mock.calls[0][0];
@@ -283,10 +295,10 @@ describe('Auth Client login', () => {
     const chain = await setupMockDelegation();
     mockSignerInstance.requestDelegation.mockResolvedValueOnce(chain);
 
-    const client = await AuthClient.create({ idleOptions: { disableIdle: true } });
+    const client = new AuthClient({ idleOptions: { disableIdle: true } });
     await client.login();
 
-    expect(client.getIdentity().getPrincipal().isAnonymous()).toBe(false);
+    expect((await client.getIdentity()).getPrincipal().isAnonymous()).toBe(false);
   });
 
   it('should persist delegation and key to storage after login', async () => {
@@ -299,7 +311,7 @@ describe('Auth Client login', () => {
       set: vi.fn(),
     };
 
-    const client = await AuthClient.create({
+    const client = new AuthClient({
       storage,
       keyType: 'Ed25519',
       idleOptions: { disableIdle: true },
@@ -337,7 +349,7 @@ describe('Auth Client login', () => {
       }),
     };
 
-    const client = await AuthClient.create({
+    const client = new AuthClient({
       storage,
       keyType: 'Ed25519',
       idleOptions: { disableIdle: true },
@@ -353,11 +365,11 @@ describe('Auth Client login', () => {
     expect(keyAfterFirstLogin).not.toEqual(keyAfterSecondLogin);
   });
 
-  it('should use the identityProvider passed to the create method', async () => {
+  it('should use the identityProvider passed to the constructor', async () => {
     const chain = await setupMockDelegation();
     mockSignerInstance.requestDelegation.mockResolvedValueOnce(chain);
 
-    const client = await AuthClient.create({
+    const client = new AuthClient({
       identityProvider: 'http://my-local-website.localhost:8080',
       idleOptions: { disableIdle: true },
     });
@@ -386,7 +398,7 @@ describe('Auth Client login', () => {
       set: vi.fn(),
     };
 
-    const test = await AuthClient.create({
+    const test = new AuthClient({
       storage,
       idleOptions: {
         idleTimeout: 1000,
@@ -420,7 +432,7 @@ describe('Auth Client login', () => {
       set: vi.fn(),
     };
 
-    const test = await AuthClient.create({
+    const test = new AuthClient({
       storage,
       idleOptions: {
         idleTimeout: 1000,
@@ -457,7 +469,7 @@ describe('Auth Client login', () => {
     };
 
     const idleCb = vi.fn();
-    const test = await AuthClient.create({
+    const test = new AuthClient({
       storage,
       idleOptions: {
         idleTimeout: 1000,
@@ -484,12 +496,15 @@ describe('Auth Client login', () => {
       set: vi.fn(),
     };
 
-    await AuthClient.create({
+    const client = new AuthClient({
       storage,
       idleOptions: {
         idleTimeout: 1000,
       },
     });
+
+    // Wait for hydration
+    await client.getIdentity();
 
     expect(storage.set).toHaveBeenCalled();
     expect(storage.remove).not.toHaveBeenCalled();
@@ -501,6 +516,73 @@ describe('Auth Client login', () => {
     expect(storage.remove).not.toHaveBeenCalled();
     // Page should not be reloaded
     expect(window.location.reload).not.toHaveBeenCalled();
+  });
+});
+
+describe('localStorage expiration flag', () => {
+  function setupMockDelegation() {
+    const key = Ed25519KeyIdentity.generate();
+    const chain = DelegationChain.create(
+      key,
+      key.getPublicKey(),
+      new Date(Date.now() + 60 * 60 * 1000),
+    );
+    return chain;
+  }
+
+  it('should set the expiration flag in localStorage on login', async () => {
+    const chain = await setupMockDelegation();
+    mockSignerInstance.requestDelegation.mockResolvedValueOnce(chain);
+
+    const client = new AuthClient({ idleOptions: { disableIdle: true } });
+    expect(localStorage.getItem('ic-delegation_expiration')).toBeNull();
+
+    await client.login();
+
+    const stored = localStorage.getItem('ic-delegation_expiration');
+    expect(stored).not.toBeNull();
+    // The expiration should be a bigint string representing nanoseconds in the future
+    const expNanos = BigInt(stored!);
+    const nowNanos = BigInt(Date.now()) * BigInt(1_000_000);
+    expect(expNanos).toBeGreaterThan(nowNanos);
+  });
+
+  it('should clear the expiration flag on logout', async () => {
+    const chain = await setupMockDelegation();
+    mockSignerInstance.requestDelegation.mockResolvedValueOnce(chain);
+
+    const client = new AuthClient({ idleOptions: { disableIdle: true } });
+    await client.login();
+
+    expect(localStorage.getItem('ic-delegation_expiration')).not.toBeNull();
+
+    await client.logout();
+
+    expect(localStorage.getItem('ic-delegation_expiration')).toBeNull();
+  });
+
+  it('isAuthenticated should return true when expiration is in the future', async () => {
+    const chain = await setupMockDelegation();
+    mockSignerInstance.requestDelegation.mockResolvedValueOnce(chain);
+
+    const client = new AuthClient({ idleOptions: { disableIdle: true } });
+    await client.login();
+
+    expect(client.isAuthenticated()).toBe(true);
+  });
+
+  it('isAuthenticated should return false when expiration is in the past', async () => {
+    // Manually set a past expiration
+    const pastNanos = (BigInt(Date.now()) - BigInt(60_000)) * BigInt(1_000_000);
+    localStorage.setItem('ic-delegation_expiration', pastNanos.toString());
+
+    const client = new AuthClient({ idleOptions: { disableIdle: true } });
+    expect(client.isAuthenticated()).toBe(false);
+  });
+
+  it('isAuthenticated should return false when no expiration is set', () => {
+    const client = new AuthClient({ idleOptions: { disableIdle: true } });
+    expect(client.isAuthenticated()).toBe(false);
   });
 });
 
@@ -521,7 +603,9 @@ describe('Migration from localstorage', () => {
       set: vi.fn(),
     };
 
-    await AuthClient.create({ storage, idleOptions: { disableIdle: true } });
+    const client = new AuthClient({ storage, idleOptions: { disableIdle: true } });
+    // Wait for hydration to complete
+    await client.getIdentity();
 
     // Key is stored during creation when none is provided
     expect(storage.set).toHaveBeenCalledTimes(1);
@@ -538,23 +622,27 @@ describe('Migration from localstorage', () => {
       set: vi.fn(),
     };
 
-    await AuthClient.create({ storage, idleOptions: { disableIdle: true } });
+    const client = new AuthClient({ storage, idleOptions: { disableIdle: true } });
+    // Wait for hydration to complete
+    await client.getIdentity();
 
     expect(storage.set).toHaveBeenCalledTimes(1);
   });
 
   it('should migrate storage from localstorage', async () => {
-    const localStorage = new LocalStorage();
+    const legacyStorage = new LocalStorage();
     const storage: AuthClientStorage = {
       remove: vi.fn(),
       get: vi.fn(),
       set: vi.fn(),
     };
 
-    await localStorage.set(KEY_STORAGE_DELEGATION, 'test');
-    await localStorage.set(KEY_STORAGE_KEY, 'key');
+    await legacyStorage.set(KEY_STORAGE_DELEGATION, 'test');
+    await legacyStorage.set(KEY_STORAGE_KEY, 'key');
 
-    await AuthClient.create({ storage, idleOptions: { disableIdle: true } });
+    const client = new AuthClient({ storage, idleOptions: { disableIdle: true } });
+    // Wait for hydration to complete
+    await client.getIdentity();
 
     expect(storage.set).toHaveBeenCalledTimes(3);
   });
@@ -585,9 +673,9 @@ describe('Migration from Ed25519Key', () => {
       set: vi.fn(),
     };
 
-    const client = await AuthClient.create({ storage });
+    const client = new AuthClient({ storage });
 
-    const identity = client.getIdentity();
+    const identity = await client.getIdentity();
     expect(identity.getPrincipal().isAnonymous()).toBe(false);
   });
 
@@ -604,9 +692,9 @@ describe('Migration from Ed25519Key', () => {
       set: vi.fn(),
     };
 
-    const client = await AuthClient.create({ storage, idleOptions: { disableIdle: true } });
+    const client = new AuthClient({ storage, idleOptions: { disableIdle: true } });
 
-    const identity = client.getIdentity();
+    const identity = await client.getIdentity();
     expect(identity.getPrincipal().isAnonymous()).toBe(true);
   });
 
@@ -634,9 +722,9 @@ describe('Migration from Ed25519Key', () => {
       set: vi.fn(),
     };
 
-    const client = await AuthClient.create({ storage, idleOptions: { disableIdle: true } });
+    const client = new AuthClient({ storage, idleOptions: { disableIdle: true } });
 
-    const identity = client.getIdentity();
+    const identity = await client.getIdentity();
     expect(identity.getPrincipal().isAnonymous()).toBe(true);
 
     // expect the delegation to be removed
@@ -653,7 +741,9 @@ describe('Migration from Ed25519Key', () => {
         fakeStore[x] = y;
       }),
     };
-    await AuthClient.create({ storage, idleOptions: { disableIdle: true } });
+    const client = new AuthClient({ storage, idleOptions: { disableIdle: true } });
+    // Wait for hydration
+    await client.getIdentity();
 
     // It should have stored a cryptoKey
     expect(Object.keys(fakeStore[KEY_STORAGE_KEY])).toMatchInlineSnapshot(`
@@ -681,21 +771,21 @@ describe('Migration from Ed25519Key', () => {
       return key;
     });
 
-    const client1 = await AuthClient.create({
+    const client1 = new AuthClient({
       storage,
       keyType: 'Ed25519',
       idleOptions: { disableIdle: true },
     });
-    const identity1 = client1.getIdentity();
+    const identity1 = await client1.getIdentity();
 
     // This auth client should find the Ed25519 key in the storage,
     // and not generate a new one
-    const client2 = await AuthClient.create({
+    const client2 = new AuthClient({
       storage,
       keyType: 'Ed25519',
       idleOptions: { disableIdle: true },
     });
-    const identity2 = client2.getIdentity();
+    const identity2 = await client2.getIdentity();
 
     expect(generate).toHaveBeenCalledTimes(1);
     // It should have stored a cryptoKey
