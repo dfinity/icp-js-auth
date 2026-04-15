@@ -630,15 +630,15 @@ describe('Migration from localstorage', () => {
   });
 
   it('should migrate storage from localstorage', async () => {
-    const ls = new LocalStorage();
+    const legacyStorage = new LocalStorage();
     const storage: AuthClientStorage = {
       remove: vi.fn(),
       get: vi.fn(),
       set: vi.fn(),
     };
 
-    await ls.set(KEY_STORAGE_DELEGATION, 'test');
-    await ls.set(KEY_STORAGE_KEY, 'key');
+    await legacyStorage.set(KEY_STORAGE_DELEGATION, 'test');
+    await legacyStorage.set(KEY_STORAGE_KEY, 'key');
 
     const client = new AuthClient({ storage, idleOptions: { disableIdle: true } });
     // Wait for hydration to complete

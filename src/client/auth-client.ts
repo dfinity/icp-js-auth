@@ -34,6 +34,8 @@ const ECDSA_KEY_LABEL = 'ECDSA';
 const ED25519_KEY_LABEL = 'Ed25519';
 type BaseKeyType = typeof ECDSA_KEY_LABEL | typeof ED25519_KEY_LABEL;
 
+// localStorage key used to cache the delegation expiration so that
+// isAuthenticated() can answer synchronously without hitting IndexedDB.
 const KEY_STORAGE_EXPIRATION = 'ic-delegation_expiration';
 
 /**
@@ -143,6 +145,7 @@ function serializeKey(key: SignIdentity | PartialIdentity): StoredKey {
   throw new Error('Unsupported key type');
 }
 
+/** Serializes and persists a session key to storage. */
 async function persistKey(
   storage: AuthClientStorage,
   key: SignIdentity | PartialIdentity,
@@ -151,9 +154,9 @@ async function persistKey(
   await storage.set(KEY_STORAGE_KEY, serialized);
 }
 
+/** Loads a session key from storage. Returns `null` when nothing is stored or the value is corrupt. */
 async function restoreKey(
   storage: AuthClientStorage,
-  _keyType: BaseKeyType,
 ): Promise<SignIdentity | PartialIdentity | null> {
   const maybeIdentityStorage = await storage.get(KEY_STORAGE_KEY);
   if (!maybeIdentityStorage) return null;
@@ -167,7 +170,9 @@ async function restoreKey(
       return Ed25519KeyIdentity.fromJSON(maybeIdentityStorage);
     }
   } catch {
-    // Stored value isn't a valid identity serialization – ignore.
+    // The stored value may be corrupt or from an incompatible version.
+    // Returning null lets the caller fall through to key generation,
+    // which is safer than crashing on startup.
   }
   return null;
 }
@@ -185,6 +190,7 @@ async function restoreChain(storage: AuthClientStorage): Promise<DelegationChain
   return DelegationChain.fromJSON(chainStorage as string);
 }
 
+/** Reads the cached delegation expiration from localStorage for synchronous auth checks. */
 function getExpirationFlag(): bigint | null {
   try {
     const raw = localStorage.getItem(KEY_STORAGE_EXPIRATION);
@@ -224,6 +230,10 @@ async function deleteStorage(storage: AuthClientStorage): Promise<void> {
   }
 }
 
+/**
+ * Migrates a legacy session from localStorage to the primary (IndexedDB) storage.
+ * Only applies to ECDSA keys — Ed25519 keys were never stored in localStorage.
+ */
 async function migrateFromLocalStorage(
   storage: AuthClientStorage,
   keyType: BaseKeyType,
@@ -298,7 +308,6 @@ export class AuthClient {
       derivationOrigin: options.derivationOrigin?.toString(),
     });
 
-    // Fire-and-forget hydration; memoize the promise.
     this.#initPromise = this.#hydrate();
   }
 
@@ -316,12 +325,12 @@ export class AuthClient {
     if (options.identity) {
       key = options.identity;
     } else {
-      key = await restoreKey(storage, keyType);
+      key = await restoreKey(storage);
 
       if (!key) {
         // Attempt to migrate from localstorage
         await migrateFromLocalStorage(storage, keyType);
-        key = await restoreKey(storage, keyType);
+        key = await restoreKey(storage);
       }
     }
 
@@ -447,7 +456,7 @@ export class AuthClient {
         maxTimeToLive,
       });
 
-      // --- inline _handleSuccess logic ---
+      // Store the new session state and set up idle tracking.
       this.#key = key;
       this.#chain = delegationChain;
 
@@ -470,8 +479,8 @@ export class AuthClient {
       // Persist the fresh key that was used for this login.
       await persistKey(this.#storage, this.#key);
 
-      // onSuccess should be the last thing to do to avoid consumers
-      // interfering by navigating or refreshing the page
+      // Call onSuccess last: the callback may navigate away or reload the
+      // page, so all session state must be persisted before it runs.
       await options?.onSuccess?.();
     } catch (err) {
       // If an onError callback is provided, route the error there (callback-style).
