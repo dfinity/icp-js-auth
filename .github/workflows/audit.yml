@@ -1,8 +1,12 @@
 name: audit
 
+# Disabled until https://github.com/pnpm/pnpm/issues/11265 is resolved.
+# on:
+#   merge_group:
+#   pull_request:
+
 on:
-  merge_group:
-  pull_request:
+  workflow_dispatch:
 
 jobs:
   audit:
