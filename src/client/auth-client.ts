@@ -284,7 +284,7 @@ export class AuthClient {
   }
 
   /**
-   * Requests signed user attributes from the identity provider.
+   * Requests signed identity attributes from the identity provider.
    *
    * @param params - Request parameters.
    * @param params.keys - Attribute keys to request (e.g. `['email', 'name']`).

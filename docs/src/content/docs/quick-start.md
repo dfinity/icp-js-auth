@@ -21,10 +21,7 @@ const identityProvider =
     ? 'https://id.ai/authorize' // Mainnet
     : 'http://id.ai.localhost:8000'; // default name mapping set by icp-cli when ii is enabled
 
-const internetIdentityCanisterId =
-  network === 'ic'
-    ? Principal.fromText('rdmx6-jaaaa-aaaaa-aaadq-cai') // Mainnet
-    : Principal.fromText('rdmx6-jaaaa-aaaaa-aaadq-cai'); // Local (replace with your local canister ID)
+const internetIdentityCanisterId = Principal.fromText('rdmx6-jaaaa-aaaaa-aaadq-cai');
 
 const authClient = new AuthClient({ identityProvider });
 

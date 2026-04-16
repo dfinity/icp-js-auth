@@ -73,9 +73,9 @@ const authClient = new AuthClient({
 await authClient.login();
 ```
 
-### Requesting User Attributes
+### Requesting Identity Attributes
 
-You can request signed user attributes at any time — during login or later when a specific feature needs them. Use `AttributesIdentity` to include the attributes in canister calls:
+You can request signed identity attributes at any time — during login or later when a specific feature needs them. Use `AttributesIdentity` to include the attributes in canister calls:
 
 ```typescript
 import { AuthClient } from '@icp-sdk/auth/client';
