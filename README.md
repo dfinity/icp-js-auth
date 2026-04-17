@@ -75,7 +75,13 @@ await authClient.login();
 
 ### Requesting Identity Attributes
 
-You can request signed identity attributes at any time — during login or later when a specific feature needs them. Use `AttributesIdentity` to include the attributes in canister calls:
+You can request signed identity attributes at any time — during login or later when a specific feature needs them. Each signed attribute bundle includes implicit fields that your backend canister should verify:
+
+- **`implicit:nonce`** — a single-use challenge from your canister that prevents replay attacks. Must originate from the backend, not the frontend.
+- **`implicit:origin`** — the requesting origin, verified by the canister to prevent cross-origin reuse of attribute bundles.
+- **`implicit:issued_at_timestamp_ns`** — issuance timestamp, checked by the canister to reject stale attributes.
+
+Use `AttributesIdentity` to include the attributes in canister calls:
 
 ```typescript
 import { AuthClient } from '@icp-sdk/auth/client';
@@ -84,14 +90,19 @@ import { HttpAgent, Actor } from '@icp-sdk/core/agent';
 
 const authClient = new AuthClient();
 
-// request attributes during login
+// 1. get a single-use nonce from your backend canister
+const anonymousAgent = await HttpAgent.create();
+const anonymousActor = Actor.createActor(backendIdl, { agent: anonymousAgent, canisterId });
+const nonce: Uint8Array = await anonymousActor.linkEmailBegin();
+
+// 2. request attributes during login with the canister-issued nonce
 const loginPromise = authClient.login();
-const attributesPromise = authClient.requestAttributes({ keys: ['email', 'name'] });
+const attributesPromise = authClient.requestAttributes({ keys: ['email'], nonce });
 
 await loginPromise;
 const { data, signature } = await attributesPromise;
 
-// create an agent that includes the attributes in every call
+// 3. create an agent that includes the attributes in every call
 const identity = await authClient.getIdentity();
 const identityWithAttributes = new AttributesIdentity({
   inner: identity,
@@ -100,15 +111,16 @@ const identityWithAttributes = new AttributesIdentity({
 });
 const agent = await HttpAgent.create({ identity: identityWithAttributes });
 
-// the register call will include the signed email and name as attributes
+// 4. canister extracts email after verifying nonce, origin, and timestamp
 const app = Actor.createActor(appIdl, { agent, canisterId });
-await app.register();
+await app.linkEmailFinish();
 ```
 
 Attributes can also be requested later, e.g. when the user accesses a feature that needs their email:
 
 ```typescript
-const { data, signature } = await authClient.requestAttributes({ keys: ['email'] });
+const nonce: Uint8Array = await anonymousActor.linkEmailBegin();
+const { data, signature } = await authClient.requestAttributes({ keys: ['email'], nonce });
 
 const identityWithAttributes = new AttributesIdentity({
   inner: await authClient.getIdentity(),
@@ -117,9 +129,8 @@ const identityWithAttributes = new AttributesIdentity({
 });
 const agent = await HttpAgent.create({ identity: identityWithAttributes });
 
-// the registerEmail call will include the signed email as an attribute
 const app = Actor.createActor(appIdl, { agent, canisterId });
-await app.registerEmail();
+await app.linkEmailFinish();
 ```
 
 Attributes can also be scoped to a specific OpenID provider. When using one-click sign-in, scoped attributes have implicit consent — no additional user prompt is needed:
@@ -131,9 +142,11 @@ const authClient = new AuthClient({
   openIdProvider: 'google',
 });
 
+const nonce: Uint8Array = await anonymousActor.linkEmailBegin();
 const loginPromise = authClient.login();
 const attributesPromise = authClient.requestAttributes({
   keys: [`openid:${OPENID_PROVIDER_URLS.google}:email`],
+  nonce,
 });
 
 await loginPromise;

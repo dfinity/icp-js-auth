@@ -420,13 +420,14 @@ describe('AuthClient requestAttributes', () => {
       result: { data, signature },
     });
 
+    const nonce = new Uint8Array(32).fill(1);
     const client = new AuthClient();
-    const result = await client.requestAttributes({ keys: ['email', 'name'] });
+    const result = await client.requestAttributes({ keys: ['email', 'name'], nonce });
 
     const callArgs = mockSignerInstance.sendRequest.mock.calls[0][0];
     expect(callArgs.method).toBe('ii-icrc3-attributes');
     expect(callArgs.params.keys).toEqual(['email', 'name']);
-    expect(typeof callArgs.params.nonce).toBe('string');
+    expect(callArgs.params.nonce).toBe(btoa(String.fromCharCode(...nonce)));
     expect(Array.from(result.data)).toEqual(Array.from(new TextEncoder().encode('hello')));
     expect(Array.from(result.signature)).toEqual(Array.from(new TextEncoder().encode('sig')));
   });
@@ -446,7 +447,7 @@ describe('AuthClient requestAttributes', () => {
     expect(callArgs.params.nonce).toBe(btoa(String.fromCharCode(...nonce)));
   });
 
-  it('should generate a random nonce when omitted', async () => {
+  it('should forward different nonces as distinct base64 values', async () => {
     mockSignerInstance.sendRequest.mockResolvedValue({
       jsonrpc: '2.0',
       id: null,
@@ -454,8 +455,8 @@ describe('AuthClient requestAttributes', () => {
     });
 
     const client = new AuthClient();
-    await client.requestAttributes({ keys: ['email'] });
-    await client.requestAttributes({ keys: ['email'] });
+    await client.requestAttributes({ keys: ['email'], nonce: new Uint8Array(32).fill(1) });
+    await client.requestAttributes({ keys: ['email'], nonce: new Uint8Array(32).fill(2) });
 
     const nonce1 = mockSignerInstance.sendRequest.mock.calls[0][0].params.nonce;
     const nonce2 = mockSignerInstance.sendRequest.mock.calls[1][0].params.nonce;
@@ -469,8 +470,11 @@ describe('AuthClient requestAttributes', () => {
       error: { code: -1, message: 'not supported' },
     });
 
+    const nonce = new Uint8Array(32).fill(1);
     const client = new AuthClient();
-    await expect(client.requestAttributes({ keys: ['email'] })).rejects.toThrow('not supported');
+    await expect(client.requestAttributes({ keys: ['email'], nonce })).rejects.toThrow(
+      'not supported',
+    );
   });
 
   it('should throw when the response is missing data or signature', async () => {
@@ -480,8 +484,9 @@ describe('AuthClient requestAttributes', () => {
       result: { data: btoa('hello') },
     });
 
+    const nonce = new Uint8Array(32).fill(1);
     const client = new AuthClient();
-    await expect(client.requestAttributes({ keys: ['email'] })).rejects.toThrow(
+    await expect(client.requestAttributes({ keys: ['email'], nonce })).rejects.toThrow(
       'Invalid response: missing data or signature',
     );
   });

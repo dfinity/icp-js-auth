@@ -288,15 +288,15 @@ export class AuthClient {
    *
    * @param params - Request parameters.
    * @param params.keys - Attribute keys to request (e.g. `['email', 'name']`).
-   * @param params.nonce - Optional 32-byte nonce. A random one is generated when omitted.
+   * @param params.nonce - 32-byte nonce issued by the RP canister.
    * @returns Signed attribute data and signature.
    * @throws When the identity provider returns an error or an invalid response.
    */
   async requestAttributes(params: {
     keys: string[];
-    nonce?: Uint8Array;
+    nonce: Uint8Array;
   }): Promise<SignedAttributes> {
-    const nonceBytes = params.nonce ?? globalThis.crypto.getRandomValues(new Uint8Array(32));
+    const nonceBytes = params.nonce;
 
     const response = await this.#signer.sendRequest({
       jsonrpc: '2.0',
