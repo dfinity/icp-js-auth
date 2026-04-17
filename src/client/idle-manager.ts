@@ -46,7 +46,7 @@ export class IdleManager {
    * on the existing instance.
    * @param {IdleManagerOptions} options Optional configuration
    * @see {@link IdleManagerOptions}
-   * @param options.onIdle Callback once user has been idle. Use to prompt for fresh login, and use `Actor.agentOf(your_actor).invalidateIdentity()` to protect the user
+   * @param options.onIdle Callback once user has been idle. Use to prompt for fresh sign-in, and use `Actor.agentOf(your_actor).invalidateIdentity()` to protect the user
    * @param options.idleTimeout timeout in ms
    * @param options.captureScroll capture scroll events
    * @param options.scrollDebounce scroll debounce time in ms

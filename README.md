@@ -42,22 +42,20 @@ import { AuthClient } from '@icp-sdk/auth/client';
 
 const authClient = new AuthClient();
 
-// Check for an existing session (synchronous)
-if (authClient.isAuthenticated()) {
-  const identity = await authClient.getIdentity();
-  console.log('Restored session:', identity.getPrincipal().toString());
+// sign in only when there's no active session (existing sessions are restored automatically)
+if (!authClient.isAuthenticated()) {
+  try {
+    await authClient.signIn();
+  } catch (error) {
+    console.error('Sign-in failed:', error);
+    throw error;
+  }
 }
 
-// Log in
-try {
-  await authClient.login();
-  const identity = await authClient.getIdentity();
-  console.log('Logged in:', identity.getPrincipal().toString());
-} catch (error) {
-  console.error('Login failed:', error);
-}
+const identity = await authClient.getIdentity();
+console.log('Identity:', identity.getPrincipal().toString());
 
-// Log out
+// later, to end the session
 await authClient.logout();
 ```
 
@@ -70,7 +68,7 @@ const authClient = new AuthClient({
   openIdProvider: 'google', // or 'apple' or 'microsoft'
 });
 
-await authClient.login();
+await authClient.signIn();
 ```
 
 ### Requesting Identity Attributes
@@ -92,12 +90,12 @@ const anonymousAgent = await HttpAgent.create();
 const backend = Actor.createActor(backendIdl, { agent: anonymousAgent, canisterId });
 const nonce: Uint8Array = await backend.registerBegin();
 
-// login and attribute request happen in parallel — the user sees a single II interaction
+// sign-in and attribute request happen in parallel — the user sees a single II interaction
 try {
-  const loginPromise = authClient.login();
+  const signInPromise = authClient.signIn();
   const attributesPromise = authClient.requestAttributes({ keys: ['email'], nonce });
 
-  await loginPromise;
+  await signInPromise;
   const { data, signature } = await attributesPromise;
 
   // wrap the identity so the signed attributes are included in the canister call
@@ -122,7 +120,7 @@ The signed attribute bundle includes implicit fields that your backend canister 
 - **`implicit:origin`** — the requesting origin, verified by the canister to prevent a malicious dapp from forwarding attribute bundles to your backend.
 - **`implicit:issued_at_timestamp_ns`** — issuance timestamp, allowing the canister to reject stale attributes even if the nonce hasn't expired yet.
 
-> Attributes can also be requested after login — for example, when a user later triggers an action like linking an email. The flow is the same: the backend issues a nonce for that action, the frontend calls `requestAttributes`, and the backend verifies the result.
+> Attributes can also be requested after sign-in — for example, when a user later triggers an action like linking an email. The flow is the same: the backend issues a nonce for that action, the frontend calls `requestAttributes`, and the backend verifies the result.
 
 #### OpenID-Scoped Attributes
 
@@ -136,13 +134,13 @@ const authClient = new AuthClient({
 });
 
 const nonce: Uint8Array = await backend.registerBegin();
-const loginPromise = authClient.login();
+const signInPromise = authClient.signIn();
 const attributesPromise = authClient.requestAttributes({
   keys: [`openid:${OPENID_PROVIDER_URLS.google}:email`],
   nonce,
 });
 
-await loginPromise;
+await signInPromise;
 const { data, signature } = await attributesPromise;
 // ... wrap with AttributesIdentity and complete the action as above
 ```

@@ -61,7 +61,7 @@ export interface AuthClientCreateOptions {
   storage?: AuthClientStorage;
 
   /**
-   * Type of session key to generate on each login.
+   * Type of session key to generate on each sign-in.
    *
    * Use `'Ed25519'` when your storage provider does not support `CryptoKey`.
    * @default 'ECDSA'
@@ -119,9 +119,9 @@ export type OnSuccessFunc = () => void | Promise<void>;
 export type OnErrorFunc = (error?: string) => void | Promise<void>;
 
 /**
- * Options for {@link AuthClient.login}.
+ * Options for {@link AuthClient.signIn}.
  */
-export interface AuthClientLoginOptions {
+export interface AuthClientSignInOptions {
   /**
    * Maximum lifetime of the delegation in nanoseconds.
    * @default 8 hours
@@ -134,12 +134,12 @@ export interface AuthClientLoginOptions {
   targets?: Principal[];
 
   /**
-   * Called after a successful login.
+   * Called after a successful sign-in.
    */
   onSuccess?: OnSuccessFunc;
 
   /**
-   * Called when login fails. When provided the error is **not** re-thrown,
+   * Called when sign-in fails. When provided the error is **not** re-thrown,
    * allowing the caller to handle it via this callback instead.
    */
   onError?: OnErrorFunc;
@@ -160,8 +160,8 @@ export interface SignedAttributes {
  *   const identity = await authClient.getIdentity();
  * }
  *
- * await authClient.login({
- *   onSuccess: () => console.log('Logged in!'),
+ * await authClient.signIn({
+ *   onSuccess: () => console.log('Signed in!'),
  * });
  */
 export class AuthClient {
@@ -223,26 +223,26 @@ export class AuthClient {
   /**
    * Opens the identity provider and requests a delegation.
    *
-   * @param options - Login options.
+   * @param options - Sign-in options.
    * @param options.maxTimeToLive - Maximum lifetime of the delegation in nanoseconds.
    * @param options.targets - Restrict the delegation to specific canisters.
-   * @param options.onSuccess - Called after a successful login.
-   * @param options.onError - Called when login fails. When provided the error is not re-thrown.
+   * @param options.onSuccess - Called after a successful sign-in.
+   * @param options.onError - Called when sign-in fails. When provided the error is not re-thrown.
    * @throws When authentication fails and no `onError` callback is provided.
    *
    * @example
-   * await authClient.login({
-   *   onSuccess: () => console.log('Logged in!'),
+   * await authClient.signIn({
+   *   onSuccess: () => console.log('Signed in!'),
    *   onError: (err) => console.error(err),
    * });
    */
-  async login(options?: AuthClientLoginOptions): Promise<void> {
+  async signIn(options?: AuthClientSignInOptions): Promise<void> {
     try {
       await this.#signer.openChannel();
 
       const maxTimeToLive = options?.maxTimeToLive ?? DEFAULT_MAX_TIME_TO_LIVE;
 
-      // Fresh key per login so each session has its own cryptographic identity.
+      // Fresh key per sign-in so each session has its own cryptographic identity.
       const key =
         this.#options.identity ?? (await generateKey(this.#options.keyType ?? ECDSA_KEY_LABEL));
 
@@ -354,7 +354,7 @@ export class AuthClient {
 
   // Attempts to restore a previous session (key + delegation chain) from
   // storage. If found and still valid, sets #identity and #chain so the
-  // client is ready to use without a new login().
+  // client is ready to use without a new signIn().
   async #hydrate(): Promise<void> {
     const key =
       this.#options.identity ??

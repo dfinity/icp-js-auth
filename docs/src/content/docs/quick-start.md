@@ -31,11 +31,11 @@ if (authClient.isAuthenticated()) {
   console.log('Restored session:', identity.getPrincipal().toString());
 }
 
-// login and request attributes in parallel
-const loginPromise = authClient.login();
+// sign in and request attributes in parallel
+const signInPromise = authClient.signIn();
 const attributesPromise = authClient.requestAttributes({ keys: ['email', 'name'] });
 
-await loginPromise;
+await signInPromise;
 const { data, signature } = await attributesPromise;
 
 // wrap the identity with attributes so canister calls include sender_info
