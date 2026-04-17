@@ -12,12 +12,16 @@ In a web application, you can use the package in this way:
 ```typescript
 import { AuthClient } from '@icp-sdk/auth/client';
 import { HttpAgent } from '@icp-sdk/core/agent';
+import { AttributesIdentity } from '@icp-sdk/core/identity';
+import { Principal } from '@icp-sdk/core/principal';
 
 const network = 'ic'; // typically, this value is read from the environment (e.g. process.env.DFX_NETWORK)
 const identityProvider =
   network === 'ic'
     ? 'https://id.ai/authorize' // Mainnet
     : 'http://id.ai.localhost:8000'; // default name mapping set by icp-cli when ii is enabled
+
+const internetIdentityCanisterId = Principal.fromText('rdmx6-jaaaa-aaaaa-aaadq-cai');
 
 const authClient = new AuthClient({ identityProvider });
 
@@ -27,22 +31,25 @@ if (authClient.isAuthenticated()) {
   console.log('Restored session:', identity.getPrincipal().toString());
 }
 
-const canisterId = Principal.fromText('uqqxf-5h777-77774-qaaaa-cai');
-const agent = await HttpAgent.create({
-  host: 'https://icp-api.io',
+// sign in and request attributes in parallel
+const signInPromise = authClient.signIn();
+const attributesPromise = authClient.requestAttributes({ keys: ['email', 'name'] });
+
+await signInPromise;
+const { data, signature } = await attributesPromise;
+
+// wrap the identity with attributes so canister calls include sender_info
+const identity = await authClient.getIdentity();
+const identityWithAttributes = new AttributesIdentity({
+  inner: identity,
+  attributes: { data, signature },
+  signer: { canisterId: internetIdentityCanisterId },
 });
 
-try {
-  await authClient.login();
-} catch (error) {
-  console.error('Login failed:', error);
-}
+const agent = await HttpAgent.create({ identity: identityWithAttributes });
 
-const identity = await authClient.getIdentity();
-agent.replaceIdentity(identity);
-
-// this call will be authenticated
-await agent.call(canisterId, {
+// this call will include the signed attributes
+await agent.call(appCanisterId, {
   methodName: 'greet',
   arg: IDL.encode([IDL.Text], ['world']),
 });

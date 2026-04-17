@@ -39,11 +39,13 @@ const KEY_STORAGE_EXPIRATION = 'ic-delegation_expiration';
 
 export type OpenIdProvider = 'google' | 'apple' | 'microsoft';
 
-const OPENID_PROVIDER_URLS: Record<OpenIdProvider, string> = {
+export const OPENID_PROVIDER_URLS = {
   google: 'https://accounts.google.com',
   apple: 'https://appleid.apple.com',
   microsoft: 'https://login.microsoftonline.com/{tid}/v2.0',
-};
+} as const satisfies Record<OpenIdProvider, string>;
+
+const DEFAULT_OPENID_SCOPE_KEYS = ['name', 'email', 'verified_email'] as const;
 
 /**
  * Options for creating an {@link AuthClient}.
@@ -61,7 +63,7 @@ export interface AuthClientCreateOptions {
   storage?: AuthClientStorage;
 
   /**
-   * Type of session key to generate on each login.
+   * Type of session key to generate on each sign-in.
    *
    * Use `'Ed25519'` when your storage provider does not support `CryptoKey`.
    * @default 'ECDSA'
@@ -114,14 +116,10 @@ export interface IdleOptions extends IdleManagerOptions {
   disableDefaultIdleCallback?: boolean;
 }
 
-export type OnSuccessFunc = () => void | Promise<void>;
-
-export type OnErrorFunc = (error?: string) => void | Promise<void>;
-
 /**
- * Options for {@link AuthClient.login}.
+ * Options for {@link AuthClient.signIn}.
  */
-export interface AuthClientLoginOptions {
+export interface AuthClientSignInOptions {
   /**
    * Maximum lifetime of the delegation in nanoseconds.
    * @default 8 hours
@@ -132,17 +130,11 @@ export interface AuthClientLoginOptions {
    * Restrict the delegation to specific canisters.
    */
   targets?: Principal[];
+}
 
-  /**
-   * Called after a successful login.
-   */
-  onSuccess?: OnSuccessFunc;
-
-  /**
-   * Called when login fails. When provided the error is **not** re-thrown,
-   * allowing the caller to handle it via this callback instead.
-   */
-  onError?: OnErrorFunc;
+export interface SignedAttributes {
+  data: Uint8Array;
+  signature: Uint8Array;
 }
 
 /**
@@ -151,13 +143,9 @@ export interface AuthClientLoginOptions {
  * @example
  * const authClient = new AuthClient();
  *
- * if (authClient.isAuthenticated()) {
- *   const identity = await authClient.getIdentity();
- * }
- *
- * await authClient.login({
- *   onSuccess: () => console.log('Logged in!'),
- * });
+ * const identity = authClient.isAuthenticated()
+ *   ? await authClient.getIdentity()
+ *   : await authClient.signIn();
  */
 export class AuthClient {
   #identity: Identity | PartialIdentity = new AnonymousIdentity();
@@ -216,65 +204,95 @@ export class AuthClient {
   }
 
   /**
-   * Opens the identity provider and requests a delegation.
+   * Opens the identity provider, requests a delegation, and returns the authenticated identity.
    *
-   * @param options - Login options.
+   * @param options - Sign-in options.
    * @param options.maxTimeToLive - Maximum lifetime of the delegation in nanoseconds.
    * @param options.targets - Restrict the delegation to specific canisters.
-   * @param options.onSuccess - Called after a successful login.
-   * @param options.onError - Called when login fails. When provided the error is not re-thrown.
-   * @throws When authentication fails and no `onError` callback is provided.
+   * @returns The authenticated identity.
+   * @throws When authentication fails.
    *
    * @example
-   * await authClient.login({
-   *   onSuccess: () => console.log('Logged in!'),
-   *   onError: (err) => console.error(err),
-   * });
+   * try {
+   *   const identity = await authClient.signIn();
+   * } catch (error) {
+   *   console.error('Sign-in failed:', error);
+   * }
    */
-  async login(options?: AuthClientLoginOptions): Promise<void> {
+  async signIn(options?: AuthClientSignInOptions): Promise<Identity> {
+    await this.#signer.openChannel();
+
+    const maxTimeToLive = options?.maxTimeToLive ?? DEFAULT_MAX_TIME_TO_LIVE;
+
+    // Fresh key per sign-in so each session has its own cryptographic identity.
+    const key =
+      this.#options.identity ?? (await generateKey(this.#options.keyType ?? ECDSA_KEY_LABEL));
+
+    const delegationChain = await this.#signer.requestDelegation({
+      publicKey: key.getPublicKey(),
+      targets: options?.targets,
+      maxTimeToLive,
+    });
+
+    this.#chain = delegationChain;
+
+    // PartialIdentity only has the public key — no signing capability.
+    if ('toDer' in key) {
+      this.#identity = PartialDelegationIdentity.fromDelegation(key, this.#chain);
+    } else {
+      this.#identity = DelegationIdentity.fromDelegation(key, this.#chain);
+    }
+
+    const idleOptions = this.#options?.idleOptions;
+    if (!this.idleManager && !idleOptions?.disableIdle) {
+      this.idleManager = IdleManager.create(idleOptions);
+      this.#registerDefaultIdleCallback();
+    }
+
+    // Persist so the session survives page reloads.
+    await persistChain(this.#storage, this.#chain);
+    await persistKey(this.#storage, key);
+
+    return this.#identity;
+  }
+
+  /**
+   * Requests signed identity attributes from the identity provider.
+   *
+   * @param params - Request parameters.
+   * @param params.keys - Attribute keys to request (e.g. `['email', 'name']`).
+   * @param params.nonce - 32-byte nonce issued by the RP canister.
+   * @returns Signed attribute data and signature.
+   * @throws When the identity provider returns an error or an invalid response.
+   */
+  async requestAttributes(params: {
+    keys: string[];
+    nonce: Uint8Array;
+  }): Promise<SignedAttributes> {
+    const nonceBytes = params.nonce;
+
+    const response = await this.#signer.sendRequest({
+      jsonrpc: '2.0',
+      method: 'ii-icrc3-attributes',
+      params: { keys: params.keys, nonce: toBase64(nonceBytes) },
+    });
+
+    if ('error' in response) {
+      throw new Error(response.error.message);
+    }
+
+    const result = response.result as Record<string, unknown> | undefined;
+    if (typeof result?.data !== 'string' || typeof result?.signature !== 'string') {
+      throw new Error('Invalid response: missing data or signature');
+    }
+
     try {
-      await this.#signer.openChannel();
-
-      const maxTimeToLive = options?.maxTimeToLive ?? DEFAULT_MAX_TIME_TO_LIVE;
-
-      // Fresh key per login so each session has its own cryptographic identity.
-      const key =
-        this.#options.identity ?? (await generateKey(this.#options.keyType ?? ECDSA_KEY_LABEL));
-
-      const delegationChain = await this.#signer.requestDelegation({
-        publicKey: key.getPublicKey(),
-        targets: options?.targets,
-        maxTimeToLive,
-      });
-
-      this.#chain = delegationChain;
-
-      // PartialIdentity only has the public key — no signing capability.
-      if ('toDer' in key) {
-        this.#identity = PartialDelegationIdentity.fromDelegation(key, this.#chain);
-      } else {
-        this.#identity = DelegationIdentity.fromDelegation(key, this.#chain);
-      }
-
-      const idleOptions = this.#options?.idleOptions;
-      if (!this.idleManager && !idleOptions?.disableIdle) {
-        this.idleManager = IdleManager.create(idleOptions);
-        this.#registerDefaultIdleCallback();
-      }
-
-      // Persist so the session survives page reloads.
-      await persistChain(this.#storage, this.#chain);
-      await persistKey(this.#storage, key);
-
-      await options?.onSuccess?.();
-    } catch (error) {
-      // If an onError callback is provided, delegate error handling to the caller.
-      // Otherwise, re-throw so the error can be caught with try/catch or .catch().
-      if (options?.onError) {
-        await options.onError(error instanceof Error ? error.message : String(error));
-      } else {
-        throw error;
-      }
+      return {
+        data: fromBase64(result.data),
+        signature: fromBase64(result.signature),
+      };
+    } catch (cause) {
+      throw new Error('Invalid response: data or signature is not valid base64', { cause });
     }
   }
 
@@ -309,7 +327,7 @@ export class AuthClient {
 
   // Attempts to restore a previous session (key + delegation chain) from
   // storage. If found and still valid, sets #identity and #chain so the
-  // client is ready to use without a new login().
+  // client is ready to use without a new signIn().
   async #hydrate(): Promise<void> {
     const key =
       this.#options.identity ??
@@ -341,6 +359,37 @@ export class AuthClient {
       });
     }
   }
+}
+
+/**
+ * Encodes a Uint8Array to a base64 string.
+ * @param bytes - The bytes to encode.
+ */
+function toBase64(bytes: Uint8Array): string {
+  if ('toBase64' in bytes && typeof bytes.toBase64 === 'function') {
+    return bytes.toBase64();
+  }
+  let binary = '';
+  for (let i = 0; i < bytes.byteLength; i++) {
+    binary += String.fromCharCode(bytes[i]);
+  }
+  return globalThis.btoa(binary);
+}
+
+/**
+ * Decodes a base64 string to a Uint8Array.
+ * @param str - The base64-encoded string.
+ */
+function fromBase64(str: string): Uint8Array {
+  if ('fromBase64' in Uint8Array && typeof Uint8Array.fromBase64 === 'function') {
+    return Uint8Array.fromBase64(str);
+  }
+  const binary = globalThis.atob(str);
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) {
+    bytes[i] = binary.charCodeAt(i);
+  }
+  return bytes;
 }
 
 /**
@@ -495,4 +544,32 @@ async function migrateFromLocalStorage(
     console.error(`error while attempting to recover localstorage: ${error}`);
     return null;
   }
+}
+
+/**
+ * Scopes attribute keys to an OpenID provider.
+ *
+ * When using one-click sign-in, attributes can be scoped to the same provider
+ * so the user grants access in a single step without an additional prompt.
+ *
+ * @param params.openIdProvider - The OpenID provider the keys should be scoped to.
+ * @param params.keys - The attribute keys to scope. Defaults to `['name', 'email', 'verified_email']`.
+ * @returns The scoped attribute keys as `openid:<provider-url>:<key>`.
+ *
+ * @example
+ * scopedKeys({ openIdProvider: 'google', keys: ['email'] });
+ * // ['openid:https://accounts.google.com:email']
+ */
+export function scopedKeys<
+  P extends keyof typeof OPENID_PROVIDER_URLS,
+  K extends string = (typeof DEFAULT_OPENID_SCOPE_KEYS)[number],
+>(params: {
+  openIdProvider: P;
+  keys?: readonly K[];
+}): `openid:${(typeof OPENID_PROVIDER_URLS)[P]}:${K}`[] {
+  const provider = OPENID_PROVIDER_URLS[params.openIdProvider];
+  const keys = params.keys ?? DEFAULT_OPENID_SCOPE_KEYS;
+  return keys.map(
+    (key) => `openid:${provider}:${key}` as `openid:${(typeof OPENID_PROVIDER_URLS)[P]}:${K}`,
+  );
 }

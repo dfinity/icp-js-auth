@@ -10,12 +10,13 @@ import {
   LocalStorage,
 } from '../../src/client/storage.ts';
 
-// Mock @icp-sdk/signer so login() doesn't open real windows.
+// Mock @icp-sdk/signer so signIn() doesn't open real windows.
 const { mockSignerInstance, mockPostMessageTransport } = vi.hoisted(() => ({
   mockSignerInstance: {
     openChannel: vi.fn(),
     closeChannel: vi.fn(),
     requestDelegation: vi.fn(),
+    sendRequest: vi.fn(),
   },
   mockPostMessageTransport: vi.fn(),
 }));
@@ -25,6 +26,7 @@ vi.mock('@icp-sdk/signer', () => ({
     openChannel = mockSignerInstance.openChannel;
     closeChannel = mockSignerInstance.closeChannel;
     requestDelegation = mockSignerInstance.requestDelegation;
+    sendRequest = mockSignerInstance.sendRequest;
   },
 }));
 
@@ -43,7 +45,7 @@ async function createTestDelegation(key: Ed25519KeyIdentity, expiration?: Date) 
 /**
  * Helper: configures the mocked Signer so requestDelegation resolves with a test chain.
  */
-async function mockSignerForLogin() {
+async function mockSignerForSignIn() {
   const key = Ed25519KeyIdentity.generate();
   const chain = await createTestDelegation(key);
   mockSignerInstance.openChannel.mockResolvedValue(undefined);
@@ -59,6 +61,7 @@ beforeEach(() => {
   mockSignerInstance.openChannel.mockReset();
   mockSignerInstance.closeChannel.mockReset();
   mockSignerInstance.requestDelegation.mockReset();
+  mockSignerInstance.sendRequest.mockReset();
 });
 
 afterEach(async () => {
@@ -140,61 +143,51 @@ describe('AuthClient', () => {
   });
 });
 
-describe('AuthClient login', () => {
-  it('should call onSuccess after a successful login', async () => {
-    await mockSignerForLogin();
+describe('AuthClient signIn', () => {
+  it('should return the authenticated identity', async () => {
+    await mockSignerForSignIn();
     const client = new AuthClient();
-    const onSuccess = vi.fn();
-    await client.login({ onSuccess });
-    expect(onSuccess).toHaveBeenCalled();
+    const identity = await client.signIn();
+    expect(identity.getPrincipal().toString()).toBeTruthy();
   });
 
-  it('should set up an idle manager after login', async () => {
-    await mockSignerForLogin();
+  it('should set up an idle manager after sign-in', async () => {
+    await mockSignerForSignIn();
     const client = new AuthClient();
-    await client.login();
+    await client.signIn();
     expect(client.idleManager).toBeDefined();
   });
 
   it('should not set up an idle manager if disableIdle is set', async () => {
-    await mockSignerForLogin();
+    await mockSignerForSignIn();
     const client = new AuthClient({ idleOptions: { disableIdle: true } });
-    await client.login();
+    await client.signIn();
     expect(client.idleManager).toBeUndefined();
   });
 
-  it('should throw on failure when no onError is provided', async () => {
+  it('should throw on sign-in failure', async () => {
     mockSignerInstance.openChannel.mockRejectedValue(new Error('connection failed'));
 
     const client = new AuthClient();
-    await expect(client.login()).rejects.toThrow('connection failed');
+    await expect(client.signIn()).rejects.toThrow('connection failed');
   });
 
-  it('should call onError instead of throwing when onError is provided', async () => {
-    mockSignerInstance.openChannel.mockRejectedValue(new Error('connection failed'));
-
-    const client = new AuthClient();
-    const onError = vi.fn();
-    await client.login({ onError });
-    expect(onError).toHaveBeenCalledWith('connection failed');
-  });
-
-  it('should persist delegation and key after login', async () => {
-    await mockSignerForLogin();
+  it('should persist delegation and key after sign-in', async () => {
+    await mockSignerForSignIn();
     const storage: AuthClientStorage = {
       remove: vi.fn(),
       get: vi.fn().mockResolvedValue(null),
       set: vi.fn(),
     };
     const client = new AuthClient({ storage });
-    await client.login();
+    await client.signIn();
 
     expect(storage.set).toHaveBeenCalledWith(KEY_STORAGE_DELEGATION, expect.any(String));
     expect(storage.set).toHaveBeenCalledWith(KEY_STORAGE_KEY, expect.anything());
   });
 
-  it('should generate a fresh key for each login', async () => {
-    await mockSignerForLogin();
+  it('should generate a fresh key for each sign-in', async () => {
+    await mockSignerForSignIn();
     const storedKeys: unknown[] = [];
     const storage: AuthClientStorage = {
       remove: vi.fn(),
@@ -204,25 +197,25 @@ describe('AuthClient login', () => {
       }),
     };
     const client = new AuthClient({ storage, keyType: 'Ed25519' });
-    await client.login();
-    await client.login();
+    await client.signIn();
+    await client.signIn();
 
     expect(storedKeys).toHaveLength(2);
     expect(storedKeys[0]).not.toEqual(storedKeys[1]);
   });
 
-  it('should set the localStorage expiration flag after login', async () => {
-    await mockSignerForLogin();
+  it('should set the localStorage expiration flag after sign-in', async () => {
+    await mockSignerForSignIn();
     const client = new AuthClient({ idleOptions: { disableIdle: true } });
     expect(client.isAuthenticated()).toBe(false);
-    await client.login();
+    await client.signIn();
     expect(client.isAuthenticated()).toBe(true);
   });
 
   it('should clear the localStorage expiration flag on logout', async () => {
-    await mockSignerForLogin();
+    await mockSignerForSignIn();
     const client = new AuthClient({ idleOptions: { disableIdle: true } });
-    await client.login();
+    await client.signIn();
     expect(client.isAuthenticated()).toBe(true);
     await client.logout();
     expect(client.isAuthenticated()).toBe(false);
@@ -233,7 +226,7 @@ describe('AuthClient idle behavior', () => {
   it('should log out after idle and reload the window by default', async () => {
     vi.stubGlobal('location', { reload: vi.fn() });
 
-    await mockSignerForLogin();
+    await mockSignerForSignIn();
     const storage: AuthClientStorage = {
       remove: vi.fn(),
       get: vi.fn().mockResolvedValue(null),
@@ -243,7 +236,7 @@ describe('AuthClient idle behavior', () => {
       storage,
       idleOptions: { idleTimeout: 1000 },
     });
-    await client.login();
+    await client.signIn();
 
     expect(storage.remove).not.toHaveBeenCalled();
 
@@ -256,7 +249,7 @@ describe('AuthClient idle behavior', () => {
   it('should not reload the page if the default callback is disabled', async () => {
     vi.stubGlobal('location', { reload: vi.fn() });
 
-    await mockSignerForLogin();
+    await mockSignerForSignIn();
     const storage: AuthClientStorage = {
       remove: vi.fn(),
       get: vi.fn().mockResolvedValue(null),
@@ -266,7 +259,7 @@ describe('AuthClient idle behavior', () => {
       storage,
       idleOptions: { idleTimeout: 1000, disableDefaultIdleCallback: true },
     });
-    await client.login();
+    await client.signIn();
 
     await new Promise((r) => setTimeout(r, 1100));
 
@@ -277,12 +270,12 @@ describe('AuthClient idle behavior', () => {
   it('should call onIdle instead of the default behavior when provided', async () => {
     vi.stubGlobal('location', { reload: vi.fn() });
 
-    await mockSignerForLogin();
+    await mockSignerForSignIn();
     const idleCb = vi.fn();
     const client = new AuthClient({
       idleOptions: { idleTimeout: 1000, onIdle: idleCb },
     });
-    await client.login();
+    await client.signIn();
 
     // Wait for the idle timeout to fire (real timers).
     await new Promise((r) => setTimeout(r, 1100));
@@ -404,5 +397,87 @@ describe('Migration from localStorage', () => {
 
     expect(storage.set).toHaveBeenCalledWith(KEY_STORAGE_DELEGATION, 'test');
     expect(storage.set).toHaveBeenCalledWith(KEY_STORAGE_KEY, 'key');
+  });
+});
+
+describe('AuthClient requestAttributes', () => {
+  it('should send a JSON-RPC request and return decoded data and signature', async () => {
+    const data = btoa('hello');
+    const signature = btoa('sig');
+    mockSignerInstance.sendRequest.mockResolvedValue({
+      jsonrpc: '2.0',
+      id: null,
+      result: { data, signature },
+    });
+
+    const nonce = new Uint8Array(32).fill(1);
+    const client = new AuthClient();
+    const result = await client.requestAttributes({ keys: ['email', 'name'], nonce });
+
+    const callArgs = mockSignerInstance.sendRequest.mock.calls[0][0];
+    expect(callArgs.method).toBe('ii-icrc3-attributes');
+    expect(callArgs.params.keys).toEqual(['email', 'name']);
+    expect(callArgs.params.nonce).toBe(btoa(String.fromCharCode(...nonce)));
+    expect(Array.from(result.data)).toEqual(Array.from(new TextEncoder().encode('hello')));
+    expect(Array.from(result.signature)).toEqual(Array.from(new TextEncoder().encode('sig')));
+  });
+
+  it('should use a provided nonce', async () => {
+    mockSignerInstance.sendRequest.mockResolvedValue({
+      jsonrpc: '2.0',
+      id: null,
+      result: { data: btoa('hello'), signature: btoa('sig') },
+    });
+
+    const nonce = new Uint8Array(32).fill(42);
+    const client = new AuthClient();
+    await client.requestAttributes({ keys: ['email'], nonce });
+
+    const callArgs = mockSignerInstance.sendRequest.mock.calls[0][0];
+    expect(callArgs.params.nonce).toBe(btoa(String.fromCharCode(...nonce)));
+  });
+
+  it('should forward different nonces as distinct base64 values', async () => {
+    mockSignerInstance.sendRequest.mockResolvedValue({
+      jsonrpc: '2.0',
+      id: null,
+      result: { data: btoa('a'), signature: btoa('b') },
+    });
+
+    const client = new AuthClient();
+    await client.requestAttributes({ keys: ['email'], nonce: new Uint8Array(32).fill(1) });
+    await client.requestAttributes({ keys: ['email'], nonce: new Uint8Array(32).fill(2) });
+
+    const nonce1 = mockSignerInstance.sendRequest.mock.calls[0][0].params.nonce;
+    const nonce2 = mockSignerInstance.sendRequest.mock.calls[1][0].params.nonce;
+    expect(nonce1).not.toBe(nonce2);
+  });
+
+  it('should throw when the response contains an error', async () => {
+    mockSignerInstance.sendRequest.mockResolvedValue({
+      jsonrpc: '2.0',
+      id: null,
+      error: { code: -1, message: 'not supported' },
+    });
+
+    const nonce = new Uint8Array(32).fill(1);
+    const client = new AuthClient();
+    await expect(client.requestAttributes({ keys: ['email'], nonce })).rejects.toThrow(
+      'not supported',
+    );
+  });
+
+  it('should throw when the response is missing data or signature', async () => {
+    mockSignerInstance.sendRequest.mockResolvedValue({
+      jsonrpc: '2.0',
+      id: null,
+      result: { data: btoa('hello') },
+    });
+
+    const nonce = new Uint8Array(32).fill(1);
+    const client = new AuthClient();
+    await expect(client.requestAttributes({ keys: ['email'], nonce })).rejects.toThrow(
+      'Invalid response: missing data or signature',
+    );
   });
 });
