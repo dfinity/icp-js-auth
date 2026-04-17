@@ -1,12 +1,8 @@
-## Unreleased
+## 6.1.0 (2026-04-17)
 
 ### Feat
 
-- add `requestAttributes()` for signed identity attributes (#85)
-
-### BREAKING CHANGE
-
-- `login()` is now renamed to `signIn()`
+- add requestAttributes for signed user attributes (#85)
 
 ## 6.0.0 (2026-04-16)
 
