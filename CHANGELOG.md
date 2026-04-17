@@ -4,6 +4,10 @@
 
 - add requestAttributes for signed user attributes (#85)
 
+### BREAKING CHANGE
+
+- `login()` is now renamed to `signIn()`
+
 ## 6.0.0 (2026-04-16)
 
 ### BREAKING CHANGE
