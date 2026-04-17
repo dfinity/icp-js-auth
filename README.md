@@ -42,17 +42,17 @@ import { AuthClient } from '@icp-sdk/auth/client';
 
 const authClient = new AuthClient();
 
-// sign in only when there's no active session (existing sessions are restored automatically)
-if (!authClient.isAuthenticated()) {
-  try {
-    await authClient.signIn();
-  } catch (error) {
-    console.error('Sign-in failed:', error);
-    throw error;
-  }
+// restore an existing session if there is one, otherwise sign in
+let identity;
+try {
+  identity = authClient.isAuthenticated()
+    ? await authClient.getIdentity()
+    : await authClient.signIn();
+} catch (error) {
+  console.error('Sign-in failed:', error);
+  throw error;
 }
 
-const identity = await authClient.getIdentity();
 console.log('Identity:', identity.getPrincipal().toString());
 
 // later, to end the session
@@ -67,8 +67,6 @@ Skip the Internet Identity authentication method screen and offer sign-in option
 const authClient = new AuthClient({
   openIdProvider: 'google', // or 'apple' or 'microsoft'
 });
-
-await authClient.signIn();
 ```
 
 ### Requesting Identity Attributes
@@ -127,7 +125,7 @@ The signed attribute bundle includes implicit fields that your backend canister 
 When using one-click sign-in, attributes can be scoped to the OpenID provider. Scoped attributes have implicit consent — the user authenticates and shares attributes in a single step without an additional prompt:
 
 ```typescript
-import { AuthClient, OPENID_PROVIDER_URLS } from '@icp-sdk/auth/client';
+import { AuthClient, scopedKeys } from '@icp-sdk/auth/client';
 
 const authClient = new AuthClient({
   openIdProvider: 'google',
@@ -136,7 +134,7 @@ const authClient = new AuthClient({
 const nonce: Uint8Array = await backend.registerBegin();
 const signInPromise = authClient.signIn();
 const attributesPromise = authClient.requestAttributes({
-  keys: [`openid:${OPENID_PROVIDER_URLS.google}:email`],
+  keys: scopedKeys({ openIdProvider: 'google' }),
   nonce,
 });
 

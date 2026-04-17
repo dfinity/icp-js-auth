@@ -144,12 +144,11 @@ describe('AuthClient', () => {
 });
 
 describe('AuthClient signIn', () => {
-  it('should call onSuccess after a successful sign-in', async () => {
+  it('should return the authenticated identity', async () => {
     await mockSignerForSignIn();
     const client = new AuthClient();
-    const onSuccess = vi.fn();
-    await client.signIn({ onSuccess });
-    expect(onSuccess).toHaveBeenCalled();
+    const identity = await client.signIn();
+    expect(identity.getPrincipal().toString()).toBeTruthy();
   });
 
   it('should set up an idle manager after sign-in', async () => {
@@ -166,20 +165,11 @@ describe('AuthClient signIn', () => {
     expect(client.idleManager).toBeUndefined();
   });
 
-  it('should throw on failure when no onError is provided', async () => {
+  it('should throw on sign-in failure', async () => {
     mockSignerInstance.openChannel.mockRejectedValue(new Error('connection failed'));
 
     const client = new AuthClient();
     await expect(client.signIn()).rejects.toThrow('connection failed');
-  });
-
-  it('should call onError instead of throwing when onError is provided', async () => {
-    mockSignerInstance.openChannel.mockRejectedValue(new Error('connection failed'));
-
-    const client = new AuthClient();
-    const onError = vi.fn();
-    await client.signIn({ onError });
-    expect(onError).toHaveBeenCalledWith('connection failed');
   });
 
   it('should persist delegation and key after sign-in', async () => {
