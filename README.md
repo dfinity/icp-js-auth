@@ -133,6 +133,8 @@ const authClient = new AuthClient({
 
 const nonce: Uint8Array = await backend.registerBegin();
 const signInPromise = authClient.signIn();
+// requests name, email, and verified_email from the
+// Google account linked to the user's Internet Identity
 const attributesPromise = authClient.requestAttributes({
   keys: scopedKeys({ openIdProvider: 'google' }),
   nonce,

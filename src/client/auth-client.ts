@@ -45,6 +45,8 @@ export const OPENID_PROVIDER_URLS = {
   microsoft: 'https://login.microsoftonline.com/{tid}/v2.0',
 } as const satisfies Record<OpenIdProvider, string>;
 
+const DEFAULT_OPENID_SCOPE_KEYS = ['name', 'email', 'verified_email'] as const;
+
 /**
  * Options for creating an {@link AuthClient}.
  */
@@ -543,8 +545,6 @@ async function migrateFromLocalStorage(
     return null;
   }
 }
-
-const DEFAULT_OPENID_SCOPE_KEYS = ['name', 'email', 'verified_email'] as const;
 
 /**
  * Scopes attribute keys to an OpenID provider.
