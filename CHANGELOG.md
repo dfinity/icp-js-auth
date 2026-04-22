@@ -1,3 +1,9 @@
+## Unreleased
+
+### Feat
+
+- Make @icp-sdk/signer a direct dep and bump its minor version. (#101)
+
 ## 6.1.0 (2026-04-17)
 
 ### Feat
