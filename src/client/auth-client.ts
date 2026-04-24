@@ -273,6 +273,7 @@ export class AuthClient {
 
     const response = await this.#signer.sendRequest({
       jsonrpc: '2.0',
+      id: globalThis.crypto.randomUUID(),
       method: 'ii-icrc3-attributes',
       params: { keys: params.keys, nonce: toBase64(nonceBytes) },
     });
