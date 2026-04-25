@@ -79,6 +79,7 @@ Here's a registration flow where the backend needs the user's email:
 import { AuthClient } from '@icp-sdk/auth/client';
 import { AttributesIdentity } from '@icp-sdk/core/identity';
 import { HttpAgent, Actor } from '@icp-sdk/core/agent';
+import { Principal } from '@icp-sdk/core/principal';
 
 const authClient = new AuthClient();
 
@@ -93,12 +94,12 @@ try {
   const signInPromise = authClient.signIn();
   const attributesPromise = authClient.requestAttributes({ keys: ['email'], nonce });
 
-  await signInPromise;
+  const identity = await signInPromise;
   const { data, signature } = await attributesPromise;
 
   // wrap the identity so the signed attributes are included in the canister call
   const identityWithAttributes = new AttributesIdentity({
-    inner: await authClient.getIdentity(),
+    inner: identity,
     attributes: { data, signature },
     signer: { canisterId: Principal.fromText('rdmx6-jaaaa-aaaaa-aaadq-cai') }, // Internet Identity canister ID
   });
