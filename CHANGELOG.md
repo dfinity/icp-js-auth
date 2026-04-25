@@ -1,3 +1,9 @@
+## Unreleased
+
+### Fix
+
+- include id in requestAttributes JSON-RPC request (#104)
+
 ## 6.2.0 (2026-04-22)
 
 ### Feat
