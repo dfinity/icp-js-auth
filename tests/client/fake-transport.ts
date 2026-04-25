@@ -97,9 +97,10 @@ class FakeChannel implements Channel {
     }
     this.#requests.push(request);
     // Per JSON-RPC 2.0, a request without an id is a Notification and receives
-    // no response. Mirroring that means tests whose code forgets to set an id
-    // will hang on the signer's correlation wait and fail via test timeout —
-    // the same way they would against a real signer.
+    // no response. This test transport treats `id: null` the same way, so
+    // tests whose code omits an id (or sets it to `null`) hang on the signer's
+    // correlation wait and fail via test timeout — the same as against a real
+    // signer.
     if (request.id === undefined || request.id === null) return;
     for (const handler of this.#handlers) {
       const response = await handler(request);

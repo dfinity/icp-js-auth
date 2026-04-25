@@ -79,6 +79,7 @@ Here's a registration flow where the backend needs the user's email:
 import { AuthClient } from '@icp-sdk/auth/client';
 import { AttributesIdentity } from '@icp-sdk/core/identity';
 import { HttpAgent, Actor } from '@icp-sdk/core/agent';
+import { Principal } from '@icp-sdk/core/principal';
 
 const authClient = new AuthClient();
 
