@@ -1,5 +1,9 @@
 ## Unreleased
 
+### Fix
+
+- release `@icp-sdk/signer` v5.3.1 bump (#109)
+
 ## 6.2.1 (2026-04-25)
 
 ### Fix
