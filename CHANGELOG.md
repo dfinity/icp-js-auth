@@ -1,3 +1,15 @@
+## Unreleased
+
+### BREAKING CHANGE
+
+- `AuthClient.logout()` is renamed to
+`AuthClient.signOut()`. Callers must rename `authClient.logout(...)` to
+`authClient.signOut(...)`.
+
+### Refactor
+
+- rename AuthClient.logout to signOut (#112)
+
 ## 6.2.2 (2026-04-26)
 
 ### Fix
