@@ -110,7 +110,7 @@ export interface IdleOptions extends IdleManagerOptions {
   disableIdle?: boolean;
 
   /**
-   * Disables the default idle callback (logout & reload).
+   * Disables the default idle callback (sign-out & reload).
    * @default false
    */
   disableDefaultIdleCallback?: boolean;
@@ -300,10 +300,10 @@ export class AuthClient {
   /**
    * Clears the stored session and resets the client to an anonymous state.
    *
-   * @param options - Logout options.
-   * @param options.returnTo - URL to navigate to after logout.
+   * @param options - Sign-out options.
+   * @param options.returnTo - URL to navigate to after sign-out.
    */
-  async logout(options: { returnTo?: string } = {}): Promise<void> {
+  async signOut(options: { returnTo?: string } = {}): Promise<void> {
     await deleteStorage(this.#storage);
 
     this.#identity = new AnonymousIdentity();
@@ -355,7 +355,7 @@ export class AuthClient {
     const idleOptions = this.#options?.idleOptions;
     if (!idleOptions?.onIdle && !idleOptions?.disableDefaultIdleCallback) {
       this.idleManager?.registerCallback(() => {
-        this.logout();
+        this.signOut();
         location.reload();
       });
     }

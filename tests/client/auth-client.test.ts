@@ -135,15 +135,15 @@ describe('AuthClient', () => {
     expect(resolved.getPrincipal().isAnonymous()).toBe(false);
   });
 
-  it('should log users out', async () => {
+  it('should sign users out', async () => {
     const client = new AuthClient();
-    await client.logout();
+    await client.signOut();
     expect(client.isAuthenticated()).toBe(false);
     const identity = await client.getIdentity();
     expect(identity.getPrincipal().isAnonymous()).toBe(true);
   });
 
-  it('should not initialize an idleManager if the user is not logged in', async () => {
+  it('should not initialize an idleManager if the user is not signed in', async () => {
     const client = new AuthClient();
     await client.getIdentity(); // wait for hydration
     expect(client.idleManager).toBeUndefined();
@@ -275,18 +275,18 @@ describe('AuthClient signIn', () => {
     expect(client.isAuthenticated()).toBe(true);
   });
 
-  it('should clear the localStorage expiration flag on logout', async () => {
+  it('should clear the localStorage expiration flag on sign-out', async () => {
     const client = new AuthClient({ idleOptions: { disableIdle: true } });
     handleSignIn(FakeTransport.last());
     await client.signIn();
     expect(client.isAuthenticated()).toBe(true);
-    await client.logout();
+    await client.signOut();
     expect(client.isAuthenticated()).toBe(false);
   });
 });
 
 describe('AuthClient idle behavior', () => {
-  it('should log out after idle and reload the window by default', async () => {
+  it('should sign out after idle and reload the window by default', async () => {
     const storage: AuthClientStorage = {
       remove: vi.fn(),
       get: vi.fn().mockResolvedValue(null),

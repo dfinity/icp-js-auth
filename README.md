@@ -56,7 +56,7 @@ try {
 console.log('Identity:', identity.getPrincipal().toString());
 
 // later, to end the session
-await authClient.logout();
+await authClient.signOut();
 ```
 
 ### One-Click OpenID Sign-In
