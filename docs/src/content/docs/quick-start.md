@@ -55,7 +55,7 @@ await agent.call(appCanisterId, {
 });
 
 // later in your app
-await authClient.logout();
+await authClient.signOut();
 ```
 
 ## Next Steps
