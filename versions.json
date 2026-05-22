@@ -1,7 +1,12 @@
 [
   {
     "path": "latest",
-    "label": "Latest (v7.0.0)"
+    "label": "Latest (v7.1.0)"
+  },
+  {
+    "path": "v7.1",
+    "label": "v7.1",
+    "versionInTitle": "v7.1.0"
   },
   {
     "path": "v7.0",
