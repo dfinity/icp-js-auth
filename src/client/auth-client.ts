@@ -332,25 +332,17 @@ export class AuthClient {
   // scheduled by a prior request on the same signer). The original auto-close
   // setting is restored before sendRequest, so the next response resumes
   // normal close behaviour.
-  //
-  // The `autoCloseTransportChannel` runtime accessor on Signer is being added
-  // in @icp-sdk/signer >= 5.4.0. Until the dependency is bumped, suppress the
-  // type errors and rely on the assignment being a harmless no-op against
-  // older versions.
   async #resolveNonce(nonce: Uint8Array | Promise<Uint8Array>): Promise<Uint8Array> {
     if (!(nonce instanceof Promise)) {
       return nonce;
     }
 
     await this.#signer.openChannel();
-    // @ts-expect-error -- see note above; remove after @icp-sdk/signer bump
-    const previousAutoClose: boolean = this.#signer.autoCloseTransportChannel;
-    // @ts-expect-error -- see note above; remove after @icp-sdk/signer bump
+    const previousAutoClose = this.#signer.autoCloseTransportChannel;
     this.#signer.autoCloseTransportChannel = false;
     try {
       return await nonce;
     } finally {
-      // @ts-expect-error -- see note above; remove after @icp-sdk/signer bump
       this.#signer.autoCloseTransportChannel = previousAutoClose;
     }
   }
