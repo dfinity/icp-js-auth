@@ -1,3 +1,9 @@
+## Unreleased
+
+### Feat
+
+- **auth-client**: support Promise<Uint8Array> nonce in requestAttributes (#116)
+
 ## 7.0.0 (2026-05-04)
 
 ### BREAKING CHANGE
