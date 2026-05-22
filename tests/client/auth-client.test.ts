@@ -516,6 +516,57 @@ describe('AuthClient requestAttributes', () => {
       'Invalid response: missing data or signature',
     );
   });
+
+  it('should accept a Promise<Uint8Array> nonce and forward the resolved value', async () => {
+    const client = new AuthClient();
+    const transport = FakeTransport.last();
+    handleRequestAttributes(transport);
+
+    const nonceBytes = new Uint8Array(32).fill(7);
+    const result = await client.requestAttributes({
+      keys: ['email'],
+      nonce: Promise.resolve(nonceBytes),
+    });
+
+    expect(transport.requests[0].params?.nonce).toBe(btoa(String.fromCharCode(...nonceBytes)));
+    expect(Array.from(result.data)).toEqual(Array.from(new TextEncoder().encode('hello')));
+  });
+
+  it('should open the transport channel before awaiting a nonce promise', async () => {
+    const client = new AuthClient();
+    const transport = FakeTransport.last();
+    handleRequestAttributes(transport);
+
+    const establishOrder: string[] = [];
+    const originalEstablish = transport.establishChannel.bind(transport);
+    transport.establishChannel = async () => {
+      establishOrder.push('establish');
+      return originalEstablish();
+    };
+
+    const nonceBytes = new Uint8Array(32).fill(9);
+    const noncePromise = new Promise<Uint8Array>((resolve) => {
+      // Resolving in a later microtask so the channel has time to open first.
+      queueMicrotask(() => {
+        establishOrder.push('resolve-nonce');
+        resolve(nonceBytes);
+      });
+    });
+
+    await client.requestAttributes({ keys: ['email'], nonce: noncePromise });
+
+    expect(establishOrder).toEqual(['establish', 'resolve-nonce']);
+    expect(transport.requests[0].params?.nonce).toBe(btoa(String.fromCharCode(...nonceBytes)));
+  });
+
+  it('should propagate rejection from a nonce promise', async () => {
+    const client = new AuthClient();
+    handleRequestAttributes(FakeTransport.last());
+
+    await expect(
+      client.requestAttributes({ keys: ['email'], nonce: Promise.reject(new Error('boom')) }),
+    ).rejects.toThrow('boom');
+  });
 });
 
 describe('AuthClient signIn + requestAttributes', () => {

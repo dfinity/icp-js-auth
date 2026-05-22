@@ -259,17 +259,25 @@ export class AuthClient {
   /**
    * Requests signed identity attributes from the identity provider.
    *
+   * The `nonce` may be a `Uint8Array` or a `Promise<Uint8Array>`. Passing a
+   * promise lets the identity provider window open while the nonce (typically
+   * fetched from the RP canister) is still being resolved, avoiding a perceived
+   * delay before the user sees the prompt. Auto-close of the signer transport
+   * channel is temporarily disabled while awaiting the promise so the window
+   * cannot be closed out from under the pending flow.
+   *
    * @param params - Request parameters.
    * @param params.keys - Attribute keys to request (e.g. `['email', 'name']`).
-   * @param params.nonce - 32-byte nonce issued by the RP canister.
+   * @param params.nonce - 32-byte nonce issued by the RP canister, or a promise
+   *   resolving to one.
    * @returns Signed attribute data and signature.
    * @throws When the identity provider returns an error or an invalid response.
    */
   async requestAttributes(params: {
     keys: string[];
-    nonce: Uint8Array;
+    nonce: Uint8Array | Promise<Uint8Array>;
   }): Promise<SignedAttributes> {
-    const nonceBytes = params.nonce;
+    const nonceBytes = await this.#resolveNonce(params.nonce);
 
     const response = await this.#signer.sendRequest({
       jsonrpc: '2.0',
@@ -315,6 +323,27 @@ export class AuthClient {
       } catch {
         window.location.href = options.returnTo;
       }
+    }
+  }
+
+  // When the caller passes a Promise<Uint8Array>, open the transport channel
+  // first so the identity provider window is visible while we wait, and
+  // suspend auto-close so it can't fire mid-await (e.g. due to a close
+  // scheduled by a prior request on the same signer). The original auto-close
+  // setting is restored before sendRequest, so the next response resumes
+  // normal close behaviour.
+  async #resolveNonce(nonce: Uint8Array | Promise<Uint8Array>): Promise<Uint8Array> {
+    if (!(nonce instanceof Promise)) {
+      return nonce;
+    }
+
+    await this.#signer.openChannel();
+    const previousAutoClose = this.#signer.autoCloseTransportChannel;
+    this.#signer.autoCloseTransportChannel = false;
+    try {
+      return await nonce;
+    } finally {
+      this.#signer.autoCloseTransportChannel = previousAutoClose;
     }
   }
 
