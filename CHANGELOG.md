@@ -1,3 +1,16 @@
+## Unreleased
+
+### BREAKING CHANGE
+
+- `AuthClient.requestAttributes` now takes `nonce` as a
+callback `() => Promise<Uint8Array>` instead of a `Uint8Array |
+Promise<Uint8Array>` value. Pass the function that fetches the nonce
+(don't await it at the call site): `nonce: () => fetchNonce()`.
+
+### Feat
+
+- **auth-client**: URL redirect transport (#121)
+
 ## 7.1.0 (2026-05-22)
 
 ### Feat
