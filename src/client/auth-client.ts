@@ -267,7 +267,9 @@ export class AuthClient {
     const maxTimeToLive = options?.maxTimeToLive ?? DEFAULT_MAX_TIME_TO_LIVE;
     const keyType = this.#options.keyType ?? ECDSA_KEY_LABEL;
 
-    const { key, pendingKeySlot } = await this.#acquireSessionKey(keyType);
+    const { key, pendingKeySlot } = this.#urlTransport
+      ? await this.#ensureSessionKeyForRedirectFlow(this.#urlTransport, keyType)
+      : { key: await this.#ensureSessionKeyForWindowFlow(keyType) };
 
     const delegationChain = await this.#signer.requestDelegation({
       publicKey: key.getPublicKey(),
@@ -303,28 +305,32 @@ export class AuthClient {
     return this.#identity;
   }
 
-  // Obtains the session key that the delegation is bound to.
-  //
-  // In redirect mode `signIn` runs twice — once on the load that navigates to
-  // the identity provider, and again on the return load that replays the
-  // delegation minted for the FIRST load's key. Both runs must therefore use
-  // the same key. A per-flow key id is journaled via the transport (stable
-  // across the redirect) and the key is kept in storage under that id, so the
-  // return load restores the same key rather than generating a fresh one that
-  // would not match the replayed delegation. In 'window' mode there is no
-  // return load, so a fresh key per sign-in is used, nothing extra persisted.
-  async #acquireSessionKey(
+  // Window flow: sign-in completes in a single load, so a fresh session key per
+  // sign-in is enough (or the caller-provided identity), with nothing to
+  // persist for a later load.
+  async #ensureSessionKeyForWindowFlow(
+    keyType: BaseKeyType,
+  ): Promise<SignIdentity | PartialIdentity> {
+    return this.#options.identity ?? (await generateKey(keyType));
+  }
+
+  // Redirect flow: `signIn` runs twice — once on the load that navigates to the
+  // identity provider, and again on the return load that replays the delegation
+  // minted for the FIRST load's key. Both runs must therefore use the same key.
+  // A per-flow key id is journaled via the transport (stable across the
+  // redirect) and the key is kept in storage under that id, so the return load
+  // restores the same key rather than generating a fresh one that would not
+  // match the replayed delegation. A caller-provided identity is already stable
+  // across the redirect, so it is used as-is with nothing persisted.
+  async #ensureSessionKeyForRedirectFlow(
+    transport: UrlTransport,
     keyType: BaseKeyType,
   ): Promise<{ key: SignIdentity | PartialIdentity; pendingKeySlot?: string }> {
-    if (this.#options.identity) {
+    if (this.#options.identity !== undefined) {
       return { key: this.#options.identity };
     }
 
-    if (!this.#urlTransport) {
-      return { key: await generateKey(keyType) };
-    }
-
-    const keyId = await this.#urlTransport.memoize(() => globalThis.crypto.randomUUID());
+    const keyId = await transport.memoize(() => globalThis.crypto.randomUUID());
     const pendingKeySlot = `${PENDING_KEY_PREFIX}${keyId}`;
 
     const restored = await restoreKeyAt(this.#storage, pendingKeySlot);
