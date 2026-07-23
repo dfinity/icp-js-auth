@@ -14,10 +14,13 @@ import { FakeTransport } from './fake-transport.ts';
 
 // Swap `PostMessageTransport` for `FakeTransport` so `AuthClient` uses the real
 // `Signer` over an in-memory transport — no window is opened and nothing about
-// the signer's JSON-RPC correlation is faked.
-vi.mock('@icp-sdk/signer/web', async () => {
+// the signer's JSON-RPC correlation is faked. `UrlTransport` is kept as the
+// real export so the constructor's `instanceof UrlTransport` transport-select
+// check behaves; redirect-flow tests replace it separately.
+vi.mock('@icp-sdk/signer/web', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@icp-sdk/signer/web')>();
   const { FakeTransport } = await import('./fake-transport.ts');
-  return { PostMessageTransport: FakeTransport };
+  return { ...actual, PostMessageTransport: FakeTransport };
 });
 
 function toBase64(bytes: Uint8Array): string {
@@ -178,6 +181,14 @@ describe('AuthClient', () => {
       },
     });
     expect(client.idleManager).toBeUndefined();
+  });
+
+  it('memoize runs the producer and returns its value in window mode', async () => {
+    const client = new AuthClient(); // default 'window' transport
+    const produce = vi.fn(async () => 'value');
+
+    expect(await client.memoize(produce)).toBe('value');
+    expect(produce).toHaveBeenCalledOnce();
   });
 });
 
@@ -463,7 +474,10 @@ describe('AuthClient requestAttributes', () => {
     handleRequestAttributes(transport);
 
     const nonce = new Uint8Array(32).fill(1);
-    const result = await client.requestAttributes({ keys: ['email', 'name'], nonce });
+    const result = await client.requestAttributes({
+      keys: ['email', 'name'],
+      nonce: () => Promise.resolve(nonce),
+    });
 
     const sent = transport.requests[0];
     expect(sent.method).toBe('ii-icrc3-attributes');
@@ -479,7 +493,7 @@ describe('AuthClient requestAttributes', () => {
     handleRequestAttributes(transport);
 
     const nonce = new Uint8Array(32).fill(42);
-    await client.requestAttributes({ keys: ['email'], nonce });
+    await client.requestAttributes({ keys: ['email'], nonce: () => Promise.resolve(nonce) });
 
     expect(transport.requests[0].params?.nonce).toBe(btoa(String.fromCharCode(...nonce)));
   });
@@ -489,8 +503,14 @@ describe('AuthClient requestAttributes', () => {
     const transport = FakeTransport.last();
     handleRequestAttributes(transport);
 
-    await client.requestAttributes({ keys: ['email'], nonce: new Uint8Array(32).fill(1) });
-    await client.requestAttributes({ keys: ['email'], nonce: new Uint8Array(32).fill(2) });
+    await client.requestAttributes({
+      keys: ['email'],
+      nonce: () => Promise.resolve(new Uint8Array(32).fill(1)),
+    });
+    await client.requestAttributes({
+      keys: ['email'],
+      nonce: () => Promise.resolve(new Uint8Array(32).fill(2)),
+    });
 
     expect(transport.requests[0].params?.nonce).not.toBe(transport.requests[1].params?.nonce);
   });
@@ -502,9 +522,9 @@ describe('AuthClient requestAttributes', () => {
     });
 
     const nonce = new Uint8Array(32).fill(1);
-    await expect(client.requestAttributes({ keys: ['email'], nonce })).rejects.toThrow(
-      'not supported',
-    );
+    await expect(
+      client.requestAttributes({ keys: ['email'], nonce: () => Promise.resolve(nonce) }),
+    ).rejects.toThrow('not supported');
   });
 
   it('should throw when the response is missing data or signature', async () => {
@@ -512,12 +532,12 @@ describe('AuthClient requestAttributes', () => {
     handleRequestAttributes(FakeTransport.last(), { result: { data: btoa('hello') } });
 
     const nonce = new Uint8Array(32).fill(1);
-    await expect(client.requestAttributes({ keys: ['email'], nonce })).rejects.toThrow(
-      'Invalid response: missing data or signature',
-    );
+    await expect(
+      client.requestAttributes({ keys: ['email'], nonce: () => Promise.resolve(nonce) }),
+    ).rejects.toThrow('Invalid response: missing data or signature');
   });
 
-  it('should accept a Promise<Uint8Array> nonce and forward the resolved value', async () => {
+  it('should accept a nonce callback returning a promise and forward the resolved value', async () => {
     const client = new AuthClient();
     const transport = FakeTransport.last();
     handleRequestAttributes(transport);
@@ -525,7 +545,7 @@ describe('AuthClient requestAttributes', () => {
     const nonceBytes = new Uint8Array(32).fill(7);
     const result = await client.requestAttributes({
       keys: ['email'],
-      nonce: Promise.resolve(nonceBytes),
+      nonce: () => Promise.resolve(nonceBytes),
     });
 
     expect(transport.requests[0].params?.nonce).toBe(btoa(String.fromCharCode(...nonceBytes)));
@@ -553,7 +573,7 @@ describe('AuthClient requestAttributes', () => {
       });
     });
 
-    await client.requestAttributes({ keys: ['email'], nonce: noncePromise });
+    await client.requestAttributes({ keys: ['email'], nonce: () => noncePromise });
 
     expect(establishOrder).toEqual(['establish', 'resolve-nonce']);
     expect(transport.requests[0].params?.nonce).toBe(btoa(String.fromCharCode(...nonceBytes)));
@@ -564,7 +584,7 @@ describe('AuthClient requestAttributes', () => {
     handleRequestAttributes(FakeTransport.last());
 
     await expect(
-      client.requestAttributes({ keys: ['email'], nonce: Promise.reject(new Error('boom')) }),
+      client.requestAttributes({ keys: ['email'], nonce: () => Promise.reject(new Error('boom')) }),
     ).rejects.toThrow('boom');
   });
 });
@@ -578,7 +598,10 @@ describe('AuthClient signIn + requestAttributes', () => {
 
     const [identity, attributes] = await Promise.all([
       client.signIn(),
-      client.requestAttributes({ keys: ['email'], nonce: new Uint8Array(32).fill(1) }),
+      client.requestAttributes({
+        keys: ['email'],
+        nonce: () => Promise.resolve(new Uint8Array(32).fill(1)),
+      }),
     ]);
 
     expect(identity.getPrincipal().isAnonymous()).toBe(false);
@@ -594,7 +617,7 @@ describe('AuthClient signIn + requestAttributes', () => {
     const identity = await client.signIn();
     const attributes = await client.requestAttributes({
       keys: ['email'],
-      nonce: new Uint8Array(32).fill(1),
+      nonce: () => Promise.resolve(new Uint8Array(32).fill(1)),
     });
 
     expect(identity.getPrincipal().isAnonymous()).toBe(false);
@@ -609,7 +632,7 @@ describe('AuthClient signIn + requestAttributes', () => {
 
     const attributes = await client.requestAttributes({
       keys: ['email'],
-      nonce: new Uint8Array(32).fill(1),
+      nonce: () => Promise.resolve(new Uint8Array(32).fill(1)),
     });
     const identity = await client.signIn();
 
