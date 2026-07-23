@@ -10,7 +10,7 @@ import {
 } from '@icp-sdk/core/identity';
 import type { Principal } from '@icp-sdk/core/principal';
 import { Signer } from '@icp-sdk/signer';
-import { PostMessageTransport } from '@icp-sdk/signer/web';
+import { PostMessageTransport, UrlTransport } from '@icp-sdk/signer/web';
 import { IdleManager, type IdleManagerOptions } from './idle-manager.js';
 import {
   type AuthClientStorage,
@@ -36,6 +36,11 @@ type BaseKeyType = typeof ECDSA_KEY_LABEL | typeof ED25519_KEY_LABEL;
 // localStorage key used to cache the delegation expiration so that
 // isAuthenticated() can answer synchronously without hitting IndexedDB.
 const KEY_STORAGE_EXPIRATION = 'ic-delegation_expiration';
+
+// Storage key prefix for a redirect flow's session key, held only while the
+// flow is in progress (keyed by a per-flow id) and removed once the delegation
+// is persisted. See AuthClient.#acquireSessionKey.
+const PENDING_KEY_PREFIX = 'ic-auth-pending-key:';
 
 export type OpenIdProvider = 'google' | 'apple' | 'microsoft';
 
@@ -95,6 +100,30 @@ export interface AuthClientCreateOptions {
   windowOpenerFeatures?: string;
 
   /**
+   * How the client communicates with the identity provider.
+   *
+   * - `'window'` (default) — the identity provider opens in a separate browser
+   *   tab or window (a popup when {@link windowOpenerFeatures} is set) and
+   *   communicates over the ICRC-29 `postMessage` transport.
+   * - `'redirect'` — the current page navigates to the identity provider over
+   *   the ICRC-167 URL transport, which returns to this same page. The callback
+   *   URL is the current page's URL (`location.origin + location.pathname`), so
+   *   that page must be on an origin you control and declared in that origin's
+   *   `/.well-known/ii-auth-callbacks` allow-list. Use it for full-page sign-in
+   *   that shouldn't need a user gesture to open a window (e.g. redirecting on a
+   *   restricted route), or native apps handing off via universal links.
+   *
+   * With `'redirect'` the page unloads on each step and the flow re-runs on the
+   * return load, so call `signIn` / `requestAttributes` directly on the page's
+   * load (not deferred behind, say, a click handler): a fresh visit starts the
+   * flow and the identity provider's return replays it to completion. Give each
+   * flow its own route so its persisted state stays isolated.
+   * @default 'window'
+   * @see https://github.com/dfinity/wg-identity-authentication/blob/main/topics/icrc_167_browser_url_transport.md
+   */
+  transport?: 'window' | 'redirect';
+
+  /**
    * OpenID provider for one-click sign-in. When set, the identity provider
    * URL includes an `openid` search param so the user authenticates via
    * the chosen provider (e.g. Google) instead of seeing Internet Identity directly.
@@ -152,6 +181,9 @@ export class AuthClient {
   #chain: DelegationChain | null = null;
   #storage: AuthClientStorage;
   #signer: Signer;
+  // Set only in redirect mode, so the redirect-specific paths (nonce/key
+  // journaling) can reach `memoize`. Undefined in the default 'window' mode.
+  #urlTransport: UrlTransport | undefined;
   #options: AuthClientCreateOptions;
   #initPromise: Promise<void> | null = null;
   idleManager: IdleManager | undefined;
@@ -167,10 +199,20 @@ export class AuthClient {
       identityProviderUrl.searchParams.set('openid', OPENID_PROVIDER_URLS[options.openIdProvider]);
     }
 
-    const transport = new PostMessageTransport({
-      url: identityProviderUrl.toString(),
-      windowOpenerFeatures: options.windowOpenerFeatures,
-    });
+    const transport =
+      options.transport === 'redirect'
+        ? new UrlTransport({
+            url: identityProviderUrl.toString(),
+            // The callback is this page: a fresh visit starts the flow and the
+            // provider's return lands back here to replay it. Drop any query
+            // and fragment so it stays stable across the redirect.
+            callbackUrl: `${globalThis.location.origin}${globalThis.location.pathname}`,
+          })
+        : new PostMessageTransport({
+            url: identityProviderUrl.toString(),
+            windowOpenerFeatures: options.windowOpenerFeatures,
+          });
+    this.#urlTransport = transport instanceof UrlTransport ? transport : undefined;
 
     this.#signer = new Signer({
       transport,
@@ -223,10 +265,11 @@ export class AuthClient {
     await this.#signer.openChannel();
 
     const maxTimeToLive = options?.maxTimeToLive ?? DEFAULT_MAX_TIME_TO_LIVE;
+    const keyType = this.#options.keyType ?? ECDSA_KEY_LABEL;
 
-    // Fresh key per sign-in so each session has its own cryptographic identity.
-    const key =
-      this.#options.identity ?? (await generateKey(this.#options.keyType ?? ECDSA_KEY_LABEL));
+    const { key, pendingKeySlot } = this.#urlTransport
+      ? await this.#ensureSessionKeyForRedirectFlow(this.#urlTransport, keyType)
+      : { key: await this.#ensureSessionKeyForWindowFlow(keyType) };
 
     const delegationChain = await this.#signer.requestDelegation({
       publicKey: key.getPublicKey(),
@@ -253,31 +296,85 @@ export class AuthClient {
     await persistChain(this.#storage, this.#chain);
     await persistKey(this.#storage, key);
 
+    // The flow is complete: the delegation is bound to this key and stored, so
+    // the per-flow pending copy is no longer needed.
+    if (pendingKeySlot !== undefined) {
+      await this.#storage.remove(pendingKeySlot);
+    }
+
     return this.#identity;
+  }
+
+  // Window flow: sign-in completes in a single load, so a fresh session key per
+  // sign-in is enough (or the caller-provided identity), with nothing to
+  // persist for a later load.
+  async #ensureSessionKeyForWindowFlow(
+    keyType: BaseKeyType,
+  ): Promise<SignIdentity | PartialIdentity> {
+    return this.#options.identity ?? (await generateKey(keyType));
+  }
+
+  // Redirect flow: `signIn` runs twice — once on the load that navigates to the
+  // identity provider, and again on the return load that replays the delegation
+  // minted for the FIRST load's key. Both runs must therefore use the same key.
+  // A per-flow key id is journaled via the transport (stable across the
+  // redirect) and the key is kept in storage under that id, so the return load
+  // restores the same key rather than generating a fresh one that would not
+  // match the replayed delegation. A caller-provided identity is already stable
+  // across the redirect, so it is used as-is with nothing persisted.
+  async #ensureSessionKeyForRedirectFlow(
+    transport: UrlTransport,
+    keyType: BaseKeyType,
+  ): Promise<{ key: SignIdentity | PartialIdentity; pendingKeySlot?: string }> {
+    if (this.#options.identity !== undefined) {
+      return { key: this.#options.identity };
+    }
+
+    const keyId = await transport.memoize(() => globalThis.crypto.randomUUID());
+    const pendingKeySlot = `${PENDING_KEY_PREFIX}${keyId}`;
+
+    const restored = await restoreKeyAt(this.#storage, pendingKeySlot);
+    if (restored) {
+      return { key: restored, pendingKeySlot };
+    }
+
+    const key = await generateKey(keyType);
+    await this.#storage.set(pendingKeySlot, serializeKey(key));
+    return { key, pendingKeySlot };
   }
 
   /**
    * Requests signed identity attributes from the identity provider.
    *
-   * The `nonce` may be a `Uint8Array` or a `Promise<Uint8Array>`. Passing a
-   * promise lets the identity provider window open while the nonce (typically
-   * fetched from the RP canister) is still being resolved, avoiding a perceived
-   * delay before the user sees the prompt. Auto-close of the signer transport
-   * channel is temporarily disabled while awaiting the promise so the window
-   * cannot be closed out from under the pending flow.
+   * The `nonce` is a callback that produces the 32-byte nonce (typically
+   * fetched from the RP canister), returning a promise resolving to it. It is a
+   * callback rather than a value so the redirect flow can journal the nonce and
+   * reuse the exact same bytes when the flow replays on the return load,
+   * instead of fetching a fresh single-use nonce that the signer never signed
+   * against.
+   *
+   * In 'window' mode the callback lets the identity provider window open while the
+   * nonce is still resolving, avoiding a perceived delay before the user sees
+   * the prompt; auto-close of the signer transport channel is temporarily
+   * disabled while awaiting so the window cannot be closed out from under the
+   * pending flow.
    *
    * @param params - Request parameters.
    * @param params.keys - Attribute keys to request (e.g. `['email', 'name']`).
-   * @param params.nonce - 32-byte nonce issued by the RP canister, or a promise
-   *   resolving to one.
+   * @param params.nonce - Produces the 32-byte nonce issued by the RP canister,
+   *   as a promise resolving to it.
    * @returns Signed attribute data and signature.
    * @throws When the identity provider returns an error or an invalid response.
    */
   async requestAttributes(params: {
     keys: string[];
-    nonce: Uint8Array | Promise<Uint8Array>;
+    nonce: () => Promise<Uint8Array>;
   }): Promise<SignedAttributes> {
-    const nonceBytes = await this.#resolveNonce(params.nonce);
+    // In redirect mode the nonce is journaled (base64, since the journal is
+    // JSON) so the replay on the return load signs against the same bytes.
+    const nonceBytes = this.#urlTransport
+      ? fromBase64(await this.#urlTransport.memoize(async () => toBase64(await params.nonce())))
+      : await this.#resolveNonce(params.nonce);
 
     const response = await this.#signer.sendRequest({
       jsonrpc: '2.0',
@@ -306,6 +403,44 @@ export class AuthClient {
   }
 
   /**
+   * Runs and journals a piece of your own async work so its result stays stable
+   * across the `'redirect'` flow.
+   *
+   * In `'redirect'` mode the page unloads on each step and `signIn` /
+   * `requestAttributes` re-run on the return load, so a value you compute on the
+   * first visit (from `location`, a fetch, `crypto`, …) would otherwise be
+   * recomputed — and may differ — on the return. Wrap it in `memoize`: it runs
+   * `produce` once on the first visit, journals the result, and replays that
+   * result on the return load instead of re-running. Use it for a value the
+   * post-flow code depends on, e.g. the URL to navigate to once sign-in
+   * completes:
+   *
+   * ```ts
+   * const next = await authClient.memoize(
+   *   () => new URLSearchParams(location.search).get('next') ?? '/',
+   * );
+   * await authClient.signIn();
+   * location.assign(next); // the value captured before the redirect
+   * ```
+   *
+   * Call `memoize` in a stable order relative to `signIn` / `requestAttributes`
+   * across loads (same order every load — branch only on values recovered from
+   * earlier results), and keep the result JSON-serializable, since the journal
+   * is JSON.
+   *
+   * In `'window'` mode there is no redirect, so this simply runs `produce` and
+   * returns its result without persisting anything.
+   * @param produce - Produces the value to journal on the first load.
+   * @returns The produced value, or the journaled value on a replay load.
+   */
+  async memoize<T>(produce: () => T | Promise<T>): Promise<T> {
+    if (this.#urlTransport) {
+      return this.#urlTransport.memoize(produce);
+    }
+    return produce();
+  }
+
+  /**
    * Clears the stored session and resets the client to an anonymous state.
    *
    * @param options - Sign-out options.
@@ -326,22 +461,19 @@ export class AuthClient {
     }
   }
 
-  // When the caller passes a Promise<Uint8Array>, open the transport channel
-  // first so the identity provider window is visible while we wait, and
+  // Popup-mode nonce resolution. Start the fetch, then open the transport
+  // channel so the identity provider window is visible while we wait, and
   // suspend auto-close so it can't fire mid-await (e.g. due to a close
   // scheduled by a prior request on the same signer). The original auto-close
   // setting is restored before sendRequest, so the next response resumes
   // normal close behaviour.
-  async #resolveNonce(nonce: Uint8Array | Promise<Uint8Array>): Promise<Uint8Array> {
-    if (!(nonce instanceof Promise)) {
-      return nonce;
-    }
-
+  async #resolveNonce(nonce: () => Promise<Uint8Array>): Promise<Uint8Array> {
+    const value = nonce();
     await this.#signer.openChannel();
     const previousAutoClose = this.#signer.autoCloseTransportChannel;
     this.#signer.autoCloseTransportChannel = false;
     try {
-      return await nonce;
+      return await value;
     } finally {
       this.#signer.autoCloseTransportChannel = previousAutoClose;
     }
@@ -471,6 +603,31 @@ async function restoreKey(
     // The stored value may be corrupt or from an incompatible version.
     // Returning null lets the caller fall through to key generation,
     // which is safer than crashing on startup.
+    return null;
+  }
+}
+
+/**
+ * Loads a session key from a specific storage slot, deserializing by stored
+ * shape (`CryptoKeyPair` → ECDSA, JSON string → Ed25519). Unlike
+ * {@link restoreKey} it does not migrate from localStorage — it reads only the
+ * given slot, as used for a redirect flow's per-flow pending key.
+ * @param storage - The storage backend.
+ * @param storageKey - The slot to read.
+ */
+async function restoreKeyAt(
+  storage: AuthClientStorage,
+  storageKey: string,
+): Promise<SignIdentity | PartialIdentity | null> {
+  const stored = await storage.get(storageKey);
+  if (!stored) return null;
+
+  try {
+    if (typeof stored === 'object') {
+      return await ECDSAKeyIdentity.fromKeyPair(stored);
+    }
+    return Ed25519KeyIdentity.fromJSON(stored);
+  } catch {
     return null;
   }
 }
