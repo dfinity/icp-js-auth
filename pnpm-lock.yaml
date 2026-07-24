@@ -9,8 +9,8 @@ importers:
   .:
     dependencies:
       '@icp-sdk/signer':
-        specifier: ^5.5.0
-        version: 5.5.0(@icp-sdk/core@5.2.1)
+        specifier: ^5.6.0
+        version: 5.6.0(@icp-sdk/core@5.2.1)
       idb:
         specifier: ^7.1.1
         version: 7.1.1
@@ -337,8 +337,8 @@ packages:
   '@icp-sdk/core@5.2.1':
     resolution: {integrity: sha512-FImRjnayCarov7vfr52QU3BO8tPAprbyl4O+0KWz4v7h8ZbKq15fhtdb53M6+ltUsCbWkP/lEgrQ4t1WhIAHjQ==}
 
-  '@icp-sdk/signer@5.5.0':
-    resolution: {integrity: sha512-ZYKGFL3RwYCPRhB8ej+LykFWT9366nYuYAOUeiTxEvPCyz+sft4j6JBCKftnnJM/x6CgZe/YGgfLCtYjDSH+Qw==}
+  '@icp-sdk/signer@5.6.0':
+    resolution: {integrity: sha512-zL8SR7YvMaTrEq6/8+ZX5wvTsXSUOm79dyZz7dj8MvHNZpH8pOKxE8QNmqThW4112EKES4ZLGxnAr3BJV1Oryg==}
     peerDependencies:
       '@icp-sdk/core': ^5
 
@@ -1170,7 +1170,7 @@ snapshots:
       '@scure/bip39': 1.6.0
       asn1js: 3.0.7
 
-  '@icp-sdk/signer@5.5.0(@icp-sdk/core@5.2.1)':
+  '@icp-sdk/signer@5.6.0(@icp-sdk/core@5.2.1)':
     dependencies:
       '@icp-sdk/core': 5.2.1
 

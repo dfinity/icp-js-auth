@@ -72,14 +72,25 @@ export class FakeUrlTransport implements Transport {
     this.#handlers.push(handler);
   }
 
-  async memoize<T>(produce: () => T | Promise<T>): Promise<T> {
+  // Mirrors the real transport's polymorphic memoize: a sync producer returns
+  // synchronously (so a value can be read where `await` isn't possible, e.g. in
+  // a constructor), an async one returns a promise.
+  memoize<T>(produce: () => Promise<T>): Promise<T>;
+  memoize<T>(produce: () => T): T;
+  memoize<T>(produce: () => T | Promise<T>): T | Promise<T> {
     const index = this.#cursor++;
     if (index < FakeUrlTransport.journal.length) {
       return FakeUrlTransport.journal[index] as T; // replay from an earlier load
     }
-    const value = await produce();
-    FakeUrlTransport.journal[index] = value;
-    return value;
+    const produced = produce();
+    if (produced instanceof Promise) {
+      return produced.then((value) => {
+        FakeUrlTransport.journal[index] = value;
+        return value;
+      });
+    }
+    FakeUrlTransport.journal[index] = produced;
+    return produced;
   }
 
   async establishChannel(): Promise<Channel> {
