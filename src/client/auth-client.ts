@@ -216,16 +216,14 @@ export class AuthClient {
 
     this.#signer = new Signer({
       transport,
-      // In the redirect flow, journal the derivation origin so it survives the
-      // top-level redirect: the return load reconstructs this client from a
-      // query-less callback URL, so `options.derivationOrigin` (like the
-      // identity provider) is no longer available — the memoized value replays
-      // from the journal instead. `memoize` returns synchronously for a
-      // synchronous producer, so the value is usable directly here in the
-      // constructor. The window flow completes in one load and needs no journal.
-      derivationOrigin: this.#urlTransport
-        ? this.#urlTransport.memoize(() => options.derivationOrigin?.toString())
-        : options.derivationOrigin?.toString(),
+      // Journal the derivation origin so it survives the top-level redirect: the
+      // return load reconstructs this client from a query-less callback URL, so
+      // `options.derivationOrigin` (like the identity provider) is no longer
+      // available — the memoized value replays from the journal instead.
+      // `memoize` returns synchronously for a synchronous producer, so the value
+      // is usable directly here; in the window flow it is a passthrough that runs
+      // the producer without persisting anything.
+      derivationOrigin: this.memoize(() => options.derivationOrigin?.toString()),
     });
 
     this.#registerDefaultIdleCallback();
@@ -474,10 +472,18 @@ export class AuthClient {
    *
    * In `'window'` mode there is no redirect, so this simply runs `produce` and
    * returns its result without persisting anything.
+   *
+   * Mirrors the producer's shape: a synchronous `produce` returns its value
+   * directly, an asynchronous one returns a promise. Awaiting the result is
+   * always safe (`await` on a non-promise is a no-op); the synchronous form lets
+   * a value be memoized where an `await` is not possible, such as in a
+   * constructor.
    * @param produce - Produces the value to journal on the first load.
    * @returns The produced value, or the journaled value on a replay load.
    */
-  async memoize<T>(produce: () => T | Promise<T>): Promise<T> {
+  memoize<T>(produce: () => Promise<T>): Promise<T>;
+  memoize<T>(produce: () => T): T;
+  memoize<T>(produce: () => T | Promise<T>): T | Promise<T> {
     if (this.#urlTransport) {
       return this.#urlTransport.memoize(produce);
     }
