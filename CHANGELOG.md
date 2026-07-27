@@ -1,3 +1,9 @@
+## Unreleased
+
+### Fix
+
+- **auth-client**: keep the redirect flow batched and its derivation origin stable (#124)
+
 ## 8.0.0 (2026-07-23)
 
 ### BREAKING CHANGE
