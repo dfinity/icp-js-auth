@@ -286,6 +286,12 @@ export class AuthClient {
     }> = this.#urlTransport
       ? this.#ensureSessionKeyForRedirectFlow(this.#urlTransport, keyType)
       : this.#ensureSessionKeyForWindowFlow(keyType).then((key) => ({ key }));
+    // The acquisition is started eagerly, before the awaits below. If one of
+    // those throws first, `sessionKeyPromise` is never awaited, so attach a
+    // no-op rejection handler now to keep a later acquisition failure from
+    // surfacing as an unhandled rejection. The `await` below still observes a
+    // rejection and propagates it when reached.
+    void sessionKeyPromise.catch(() => undefined);
 
     await this.#signer.openChannel();
 
