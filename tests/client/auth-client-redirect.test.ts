@@ -111,10 +111,41 @@ describe('AuthClient redirect (UrlTransport) sign-in', () => {
 
     expect(identity.getPrincipal().isAnonymous()).toBe(false);
     expect(FakeUrlTransport.last().requests[0]?.method).toBe('icrc34_delegation');
-    // The key id was journaled via `memoize`, and the pending key was removed
-    // once the delegation was persisted.
-    expect(FakeUrlTransport.journal).toHaveLength(1);
+    // The flow journals values that replay across the redirect: the (unset)
+    // derivation origin from construction, the session key id, and the
+    // key-acquisition step that holds the batch so the delegation isn't split
+    // off from a concurrent request. The pending key is removed once the
+    // delegation is persisted.
+    expect(FakeUrlTransport.journal).toHaveLength(3);
+    expect(FakeUrlTransport.journal[0]).toBeUndefined(); // derivation origin unset
     expect(pendingSlots(storage)).toEqual([]);
+  });
+
+  it('journals the derivation origin so it survives the redirect', async () => {
+    const storage = createSharedStorage();
+    const DERIVATION = 'https://derivation.example.com';
+
+    // Load 1: derivation origin supplied — forwarded on the request and journaled.
+    FakeUrlTransport.nextRespond = false;
+    const client1 = new AuthClient({
+      transport: 'redirect',
+      derivationOrigin: DERIVATION,
+      storage,
+    });
+    handleSignIn(FakeUrlTransport.last());
+    const pending1 = client1.signIn().catch(() => undefined); // navigates away
+    await flush();
+    expect(FakeUrlTransport.last().requests[0]?.params?.icrc95DerivationOrigin).toBe(DERIVATION);
+
+    // Load 2: the callback URL has no query, so no derivation origin is passed
+    // to the reconstructed client — the memoized value replays, so the request
+    // still carries the original derivation origin.
+    FakeUrlTransport.nextRespond = true;
+    const client2 = new AuthClient({ transport: 'redirect', storage });
+    handleSignIn(FakeUrlTransport.last());
+    await client2.signIn();
+    expect(FakeUrlTransport.last().requests[0]?.params?.icrc95DerivationOrigin).toBe(DERIVATION);
+    void pending1;
   });
 
   it('derives the callback URL from the current location', () => {
@@ -181,7 +212,9 @@ describe('AuthClient redirect (UrlTransport) requestAttributes', () => {
 
     expect(thunk).toHaveBeenCalledOnce();
     expect(FakeUrlTransport.last().requests[0]?.params?.nonce).toBe(toBase64(nonce));
-    expect(FakeUrlTransport.journal).toEqual([toBase64(nonce)]); // journaled as base64
+    // Slot 0 is the (unset) derivation origin journaled at construction; slot 1
+    // is the nonce, journaled as base64.
+    expect(FakeUrlTransport.journal).toEqual([undefined, toBase64(nonce)]);
   });
 
   it('reuses the memoized nonce across the redirect instead of re-fetching', async () => {

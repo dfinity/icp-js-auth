@@ -216,7 +216,14 @@ export class AuthClient {
 
     this.#signer = new Signer({
       transport,
-      derivationOrigin: options.derivationOrigin?.toString(),
+      // Journal the derivation origin so it survives the top-level redirect: the
+      // return load reconstructs this client from a query-less callback URL, so
+      // `options.derivationOrigin` (like the identity provider) is no longer
+      // available — the memoized value replays from the journal instead.
+      // `memoize` returns synchronously for a synchronous producer, so the value
+      // is usable directly here; in the window flow it is a passthrough that runs
+      // the producer without persisting anything.
+      derivationOrigin: this.memoize(() => options.derivationOrigin?.toString()),
     });
 
     this.#registerDefaultIdleCallback();
@@ -262,14 +269,33 @@ export class AuthClient {
    * }
    */
   async signIn(options?: AuthClientSignInOptions): Promise<Identity> {
-    await this.#signer.openChannel();
-
     const maxTimeToLive = options?.maxTimeToLive ?? DEFAULT_MAX_TIME_TO_LIVE;
     const keyType = this.#options.keyType ?? ECDSA_KEY_LABEL;
 
-    const { key, pendingKeySlot } = this.#urlTransport
-      ? await this.#ensureSessionKeyForRedirectFlow(this.#urlTransport, keyType)
-      : { key: await this.#ensureSessionKeyForWindowFlow(keyType) };
+    // Start session-key acquisition BEFORE opening the channel, awaiting it only
+    // after. In the redirect flow the acquisition's first `transport.memoize`
+    // runs synchronously when invoked, so its in-flight bump lands in the same
+    // tick `signIn` is called — holding the transport's batch flush from the
+    // very start of the flow rather than only after the `openChannel` await.
+    // Under `Promise.all([signIn, requestAttributes])` this is what keeps a
+    // faster concurrent request from flushing before this flow's delegation
+    // request is buffered.
+    const sessionKeyPromise: Promise<{
+      key: SignIdentity | PartialIdentity;
+      pendingKeySlot?: string;
+    }> = this.#urlTransport
+      ? this.#ensureSessionKeyForRedirectFlow(this.#urlTransport, keyType)
+      : this.#ensureSessionKeyForWindowFlow(keyType).then((key) => ({ key }));
+    // The acquisition is started eagerly, before the awaits below. If one of
+    // those throws first, `sessionKeyPromise` is never awaited, so attach a
+    // no-op rejection handler now to keep a later acquisition failure from
+    // surfacing as an unhandled rejection. The `await` below still observes a
+    // rejection and propagates it when reached.
+    void sessionKeyPromise.catch(() => undefined);
+
+    await this.#signer.openChannel();
+
+    const { key, pendingKeySlot } = await sessionKeyPromise;
 
     const delegationChain = await this.#signer.requestDelegation({
       publicKey: key.getPublicKey(),
@@ -333,13 +359,35 @@ export class AuthClient {
     const keyId = await transport.memoize(() => globalThis.crypto.randomUUID());
     const pendingKeySlot = `${PENDING_KEY_PREFIX}${keyId}`;
 
-    const restored = await restoreKeyAt(this.#storage, pendingKeySlot);
-    if (restored) {
-      return { key: restored, pendingKeySlot };
-    }
+    // Acquire the per-flow key inside a `memoize` producer so the transport
+    // holds its batch flush across the (async) key restore/generate + storage
+    // write. The transport coalesces concurrently issued requests into one
+    // redirect by flushing on a macrotask once no memoize producer is in
+    // flight; without this hold, a faster concurrent request (e.g. the nonce
+    // path of `requestAttributes`) buffers first and trips that flush before
+    // this flow's delegation request — issued only once the key is ready — is
+    // buffered, splitting what should be one redirect into two.
+    //
+    // The key is captured in a closure, not read back after the producer: on
+    // the FIRST load the producer sets `acquired`, so the delegation request
+    // that follows is issued with no intervening storage read — a read there
+    // would re-open the very flush gap this closes. The producer is skipped on
+    // the replay load (its result is journaled), where the key is instead
+    // restored from storage. Only the id is journaled; the key lives in storage.
+    let acquired: SignIdentity | PartialIdentity | null = null;
+    await transport.memoize(async () => {
+      acquired = await restoreKeyAt(this.#storage, pendingKeySlot);
+      if (acquired === null) {
+        acquired = await generateKey(keyType);
+        await this.#storage.set(pendingKeySlot, serializeKey(acquired));
+      }
+      return keyId;
+    });
 
-    const key = await generateKey(keyType);
-    await this.#storage.set(pendingKeySlot, serializeKey(key));
+    const key = acquired ?? (await restoreKeyAt(this.#storage, pendingKeySlot));
+    if (key === null) {
+      throw new Error('Session key missing after acquisition');
+    }
     return { key, pendingKeySlot };
   }
 
@@ -430,10 +478,18 @@ export class AuthClient {
    *
    * In `'window'` mode there is no redirect, so this simply runs `produce` and
    * returns its result without persisting anything.
+   *
+   * Mirrors the producer's shape: a synchronous `produce` returns its value
+   * directly, an asynchronous one returns a promise. Awaiting the result is
+   * always safe (`await` on a non-promise is a no-op); the synchronous form lets
+   * a value be memoized where an `await` is not possible, such as in a
+   * constructor.
    * @param produce - Produces the value to journal on the first load.
    * @returns The produced value, or the journaled value on a replay load.
    */
-  async memoize<T>(produce: () => T | Promise<T>): Promise<T> {
+  memoize<T>(produce: () => Promise<T>): Promise<T>;
+  memoize<T>(produce: () => T): T;
+  memoize<T>(produce: () => T | Promise<T>): T | Promise<T> {
     if (this.#urlTransport) {
       return this.#urlTransport.memoize(produce);
     }
