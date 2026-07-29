@@ -571,8 +571,9 @@ export class AuthClient {
   #registerDefaultIdleCallback() {
     const idleOptions = this.#options?.idleOptions;
     if (!idleOptions?.onIdle && !idleOptions?.disableDefaultIdleCallback) {
-      this.idleManager?.registerCallback(() => {
-        this.signOut();
+      this.idleManager?.registerCallback(async () => {
+        // Reload only after teardown resolves, or #hydrate restores the still-valid session.
+        await this.signOut();
         location.reload();
       });
     }
