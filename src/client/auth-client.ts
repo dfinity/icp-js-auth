@@ -42,6 +42,19 @@ const KEY_STORAGE_EXPIRATION = 'ic-delegation_expiration';
 // is persisted. See AuthClient.#acquireSessionKey.
 const PENDING_KEY_PREFIX = 'ic-auth-pending-key:';
 
+// The storage backend has no key enumeration, so pending-key slots are tracked
+// explicitly here: an abandoned flow never removes its key, so a later flow
+// prunes expired orphans by slot instead of leaking them forever.
+const PENDING_KEYS_REGISTRY_KEY = 'ic-auth-pending-keys';
+// Past the URL transport's ~10-min flow window the flow can't resume, so a
+// pending key older than this is treated as abandoned.
+const PENDING_KEY_TTL_MS = 10 * 60 * 1000;
+
+interface PendingKeyEntry {
+  slot: string;
+  expiresAt: number;
+}
+
 export type OpenIdProvider = 'google' | 'apple' | 'microsoft';
 
 export const OPENID_PROVIDER_URLS = {
@@ -326,6 +339,7 @@ export class AuthClient {
     // the per-flow pending copy is no longer needed.
     if (pendingKeySlot !== undefined) {
       await this.#storage.remove(pendingKeySlot);
+      await unregisterPendingKey(this.#storage, pendingKeySlot);
     }
 
     return this.#identity;
@@ -380,6 +394,7 @@ export class AuthClient {
       if (acquired === null) {
         acquired = await generateKey(keyType);
         await this.#storage.set(pendingKeySlot, serializeKey(acquired));
+        await sweepAndRegisterPendingKey(this.#storage, pendingKeySlot, Date.now());
       }
       return keyId;
     });
@@ -671,6 +686,64 @@ async function restoreKey(
  * @param storage - The storage backend.
  * @param storageKey - The slot to read.
  */
+async function readPendingRegistry(storage: AuthClientStorage): Promise<PendingKeyEntry[]> {
+  const raw = await storage.get(PENDING_KEYS_REGISTRY_KEY);
+  if (typeof raw !== 'string') return [];
+  try {
+    const parsed: unknown = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return [];
+    return parsed.filter(
+      (entry): entry is PendingKeyEntry =>
+        typeof entry === 'object' &&
+        entry !== null &&
+        typeof (entry as PendingKeyEntry).slot === 'string' &&
+        typeof (entry as PendingKeyEntry).expiresAt === 'number',
+    );
+  } catch {
+    return [];
+  }
+}
+
+async function writePendingRegistry(
+  storage: AuthClientStorage,
+  entries: PendingKeyEntry[],
+): Promise<void> {
+  if (entries.length === 0) {
+    await storage.remove(PENDING_KEYS_REGISTRY_KEY);
+    return;
+  }
+  await storage.set(PENDING_KEYS_REGISTRY_KEY, JSON.stringify(entries));
+}
+
+// Removes expired pending-key slots, then registers `slot` with a fresh expiry.
+async function sweepAndRegisterPendingKey(
+  storage: AuthClientStorage,
+  slot: string,
+  now: number,
+): Promise<void> {
+  const entries = await readPendingRegistry(storage);
+  const live: PendingKeyEntry[] = [];
+  for (const entry of entries) {
+    if (entry.slot === slot) continue; // re-registered with a fresh expiry below
+    if (entry.expiresAt <= now) {
+      await storage.remove(entry.slot);
+    } else {
+      live.push(entry);
+    }
+  }
+  live.push({ slot, expiresAt: now + PENDING_KEY_TTL_MS });
+  await writePendingRegistry(storage, live);
+}
+
+// Drops a slot from the pending-key registry once its flow completes.
+async function unregisterPendingKey(storage: AuthClientStorage, slot: string): Promise<void> {
+  const entries = await readPendingRegistry(storage);
+  const remaining = entries.filter((entry) => entry.slot !== slot);
+  if (remaining.length !== entries.length) {
+    await writePendingRegistry(storage, remaining);
+  }
+}
+
 async function restoreKeyAt(
   storage: AuthClientStorage,
   storageKey: string,

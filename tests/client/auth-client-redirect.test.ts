@@ -121,6 +121,24 @@ describe('AuthClient redirect (UrlTransport) sign-in', () => {
     expect(pendingSlots(storage)).toEqual([]);
   });
 
+  it('sweeps expired pending keys abandoned by earlier flows', async () => {
+    const storage = createSharedStorage();
+    const staleSlot = `${PENDING_KEY_PREFIX}abandoned`;
+    storage.map.set(staleSlot, JSON.stringify({ stale: 'key' }));
+    storage.map.set(
+      'ic-auth-pending-keys',
+      JSON.stringify([{ slot: staleSlot, expiresAt: Date.now() - 1 }]),
+    );
+
+    const client = new AuthClient({ transport: 'redirect', storage });
+    handleSignIn(FakeUrlTransport.last());
+    await client.signIn();
+
+    expect(storage.map.has(staleSlot)).toBe(false);
+    expect(pendingSlots(storage)).toEqual([]);
+    expect(storage.map.has('ic-auth-pending-keys')).toBe(false);
+  });
+
   it('journals the derivation origin so it survives the redirect', async () => {
     const storage = createSharedStorage();
     const DERIVATION = 'https://derivation.example.com';
