@@ -146,6 +146,33 @@ describe('AuthClient', () => {
     expect(identity.getPrincipal().isAnonymous()).toBe(true);
   });
 
+  it('navigates to a same-origin returnTo on sign out', async () => {
+    vi.stubGlobal('location', {
+      reload: vi.fn(),
+      href: 'http://localhost/app',
+      origin: 'http://localhost',
+    });
+    const client = new AuthClient();
+    const pushState = vi.spyOn(window.history, 'pushState').mockImplementation(() => {});
+    await client.signOut({ returnTo: '/logged-out' });
+    expect(pushState).toHaveBeenCalledWith({}, '', 'http://localhost/logged-out');
+    pushState.mockRestore();
+  });
+
+  it('refuses a cross-origin, protocol-relative, or javascript: returnTo', async () => {
+    const client = new AuthClient();
+    const pushState = vi.spyOn(window.history, 'pushState');
+    for (const returnTo of [
+      'https://evil.example/phish',
+      '//evil.example',
+      'javascript:fetch("https://evil.example/" + document.cookie)',
+    ]) {
+      await client.signOut({ returnTo });
+    }
+    expect(pushState).not.toHaveBeenCalled();
+    pushState.mockRestore();
+  });
+
   it('should not initialize an idleManager if the user is not signed in', async () => {
     const client = new AuthClient();
     await client.getIdentity(); // wait for hydration

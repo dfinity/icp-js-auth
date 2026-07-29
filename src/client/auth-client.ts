@@ -508,11 +508,21 @@ export class AuthClient {
     this.#identity = new AnonymousIdentity();
     this.#chain = null;
 
-    if (options.returnTo) {
+    if (options.returnTo !== undefined) {
+      // Same-origin http(s) only, and no `location.href` fallback on rejection:
+      // that fallback is exactly how a javascript:/cross-origin value would run.
+      let target: URL | undefined;
       try {
-        window.history.pushState({}, '', options.returnTo);
+        target = new URL(options.returnTo, window.location.href);
       } catch {
-        window.location.href = options.returnTo;
+        target = undefined;
+      }
+      if (
+        target !== undefined &&
+        (target.protocol === 'https:' || target.protocol === 'http:') &&
+        target.origin === window.location.origin
+      ) {
+        window.history.pushState({}, '', target.href);
       }
     }
   }
