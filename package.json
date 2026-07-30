@@ -50,11 +50,11 @@
   },
   "packageManager": "pnpm@10.13.1",
   "devDependencies": {
-    "@biomejs/biome": "^2.4.10",
-    "@icp-sdk/core": "^5.2.1",
+    "@biomejs/biome": "^2.5.6",
+    "@icp-sdk/core": "^5.4.0",
     "fake-indexeddb": "^6.2.5",
     "jsdom": "^27.4.0",
-    "publint": "^0.3.18",
+    "publint": "^0.3.22",
     "typescript": "^5.9.3",
     "vitest": "4.0.14"
   },
