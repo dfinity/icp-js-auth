@@ -1,812 +1,396 @@
-import { Actor, type AgentError, HttpAgent } from '@icp-sdk/core/agent';
-import { IDL } from '@icp-sdk/core/candid';
-import { DelegationChain, ECDSAKeyIdentity, Ed25519KeyIdentity } from '@icp-sdk/core/identity';
+import { DelegationChain, Ed25519KeyIdentity } from '@icp-sdk/core/identity';
 import { Principal } from '@icp-sdk/core/principal';
-import { beforeEach, describe, expect, it, type Mock, vi } from 'vitest';
-import { AuthClient, ERROR_USER_INTERRUPT } from '../../src/client/auth-client.ts';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { AuthClient } from '../../src/client/auth-client.ts';
+import { IdleManager } from '../../src/client/idle-manager.ts';
 import {
   type AuthClientStorage,
   IdbStorage,
   KEY_STORAGE_DELEGATION,
   KEY_STORAGE_KEY,
   LocalStorage,
-  type StoredKey,
 } from '../../src/client/storage.ts';
+import { FakeTransport } from './fake-transport.ts';
+
+// Swap `PostMessageTransport` for `FakeTransport` so `AuthClient` uses the real
+// `Signer` over an in-memory transport — no window is opened and nothing about
+// the signer's JSON-RPC correlation is faked. `UrlTransport` is kept as the
+// real export so the constructor's `instanceof UrlTransport` transport-select
+// check behaves; redirect-flow tests replace it separately.
+vi.mock('@icp-sdk/signer/web', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@icp-sdk/signer/web')>();
+  const { FakeTransport } = await import('./fake-transport.ts');
+  return { ...actual, PostMessageTransport: FakeTransport };
+});
+
+function toBase64(bytes: Uint8Array): string {
+  let binary = '';
+  for (const b of bytes) binary += String.fromCharCode(b);
+  return btoa(binary);
+}
+
+async function createTestDelegation(key: Ed25519KeyIdentity, expiration?: Date) {
+  const exp = expiration ?? new Date(Date.now() + 24 * 60 * 60 * 1000); // 1 day from now
+  return DelegationChain.create(key, key.getPublicKey(), exp);
+}
+
+function encodeDelegationChainResponse(chain: DelegationChain) {
+  return {
+    publicKey: toBase64(new Uint8Array(chain.publicKey)),
+    signerDelegation: chain.delegations.map((sd) => ({
+      delegation: {
+        pubkey: toBase64(new Uint8Array(sd.delegation.pubkey)),
+        expiration: sd.delegation.expiration.toString(),
+        targets: sd.delegation.targets?.map((t) => t.toText()),
+      },
+      signature: toBase64(new Uint8Array(sd.signature)),
+    })),
+  };
+}
+
+type JsonRpcBody =
+  | { result: unknown }
+  | { error: { code: number; message: string; data?: unknown } };
+
+// Shared default bodies — declared as constants so both helpers use a
+// parameter-default form consistently. `DelegationChain.create` is async, so
+// top-level `await` is used; `await` isn't allowed inside param defaults.
+const DEFAULT_SIGN_IN_BODY: JsonRpcBody = {
+  result: encodeDelegationChainResponse(await createTestDelegation(Ed25519KeyIdentity.generate())),
+};
+
+const DEFAULT_REQUEST_ATTRIBUTES_BODY: JsonRpcBody = {
+  result: { data: btoa('hello'), signature: btoa('sig') },
+};
 
 /**
- * A class for mocking the IDP service.
+ * Registers an `icrc34_delegation` handler that returns the given body.
+ * Defaults to a valid delegation chain so `signIn()` resolves successfully.
  */
-class IdpMock {
-  constructor(
-    private readonly eventListener: (event: unknown) => void,
-    private readonly origin: string,
-  ) {}
+function handleSignIn(transport: FakeTransport, body: JsonRpcBody = DEFAULT_SIGN_IN_BODY): void {
+  transport.onRequest((req) => {
+    if (req.method !== 'icrc34_delegation') return;
+    if (req.id === undefined || req.id === null) return;
+    return { jsonrpc: '2.0', id: req.id, ...body };
+  });
+}
 
-  ready(origin?: string) {
-    this.send(
-      {
-        kind: 'authorize-ready',
-      },
-      origin,
-    );
-  }
-
-  send(message: unknown, origin?: string) {
-    this.eventListener({
-      origin: origin ?? this.origin,
-      data: message,
-    });
-  }
+/**
+ * Registers an `ii-icrc3-attributes` handler that returns the given body.
+ * Defaults to a valid success response with placeholder data and signature.
+ */
+function handleRequestAttributes(
+  transport: FakeTransport,
+  body: JsonRpcBody = DEFAULT_REQUEST_ATTRIBUTES_BODY,
+): void {
+  transport.onRequest((req) => {
+    if (req.method !== 'ii-icrc3-attributes') return;
+    if (req.id === undefined || req.id === null) return;
+    return { jsonrpc: '2.0', id: req.id, ...body };
+  });
 }
 
 beforeEach(() => {
   vi.unstubAllGlobals();
   vi.useRealTimers();
+  localStorage.clear();
+  FakeTransport.reset();
+  // `IdleManager.exit()` runs all registered callbacks on teardown (see
+  // idle-manager.ts#exit), including the default `location.reload()` callback
+  // from signed-in tests. Stub globally so afterEach teardown doesn't trigger
+  // jsdom's "Not implemented: navigation to another Document" warning.
+  vi.stubGlobal('location', { reload: vi.fn() });
 });
 
-describe('Auth Client', () => {
+afterEach(async () => {
+  // IdleManager is a singleton — without tearing it down, idle timers and DOM
+  // listeners from one test bleed into the next, causing spurious failures.
+  try {
+    IdleManager.create().exit();
+  } catch {
+    // no-op if already torn down
+  }
+  await new Promise((r) => setTimeout(r, 0));
+  localStorage.clear();
+});
+
+describe('AuthClient', () => {
   it('should initialize with an AnonymousIdentity', async () => {
-    const test = await AuthClient.create();
-    expect(await test.isAuthenticated()).toBe(false);
-    expect(test.getIdentity().getPrincipal().isAnonymous()).toBe(true);
+    const client = new AuthClient();
+    expect(client.isAuthenticated()).toBe(false);
+    const identity = await client.getIdentity();
+    expect(identity.getPrincipal().isAnonymous()).toBe(true);
   });
 
-  it('should initialize with a provided identity', async () => {
+  it('should use a provided identity as the key for hydration', async () => {
     const identity = Ed25519KeyIdentity.generate();
-    const test = await AuthClient.create({
-      identity,
-    });
-    expect(test.getIdentity().getPrincipal().isAnonymous()).toBe(false);
-    expect(test.getIdentity()).toBe(identity);
-  });
-
-  it('should log users out', async () => {
-    const test = await AuthClient.create();
-    await test.logout();
-    expect(await test.isAuthenticated()).toBe(false);
-    expect(test.getIdentity().getPrincipal().isAnonymous()).toBe(true);
-  });
-
-  it('should not initialize an idleManager if the user is not logged in', async () => {
-    const test = await AuthClient.create();
-    expect(test.idleManager).not.toBeDefined();
-  });
-
-  it('should initialize an idleManager if an identity is passed', async () => {
-    const test = await AuthClient.create({ identity: Ed25519KeyIdentity.generate() });
-    expect(test.idleManager).toBeDefined();
-  });
-
-  it('should be able to invalidate an identity after going idle', async () => {
-    const mockFetch = vi.fn();
-    vi.stubGlobal('location', {
-      reload: vi.fn(),
-      fetch: mockFetch,
-      hostname: '127.0.0.1',
-      protocol: 'http:',
-      port: '4943',
-      toString: vi.fn(() => 'http://127.0.0.1:4943'),
-    });
-
-    const identity = Ed25519KeyIdentity.generate();
-
-    const canisterId = Principal.fromText('uxrrr-q7777-77774-qaaaq-cai');
-    const actorInterface = () => {
-      return IDL.Service({
-        greet: IDL.Func([IDL.Text], [IDL.Text]),
-      });
-    };
-
-    // setup auth client
-    const test = await AuthClient.create({
-      identity,
-      idleOptions: {
-        idleTimeout: 1000,
-      },
-    });
-
-    const httpAgent = await HttpAgent.create({ fetch: mockFetch });
-    const actor = Actor.createActor(actorInterface, { canisterId, agent: httpAgent });
-
-    test.idleManager?.registerCallback(() => {
-      const agent = Actor.agentOf(actor);
-      agent!.invalidateIdentity?.();
-    });
-
-    // wait for the idle timeout
-    await new Promise((resolve) => setTimeout(resolve, 1000));
-
-    expect.assertions(2);
-
-    // check that the registered actor has been invalidated
-    const expectedError =
-      "This identity has expired due this application's security policy. Please refresh your authentication.";
-    try {
-      await actor.greet('hello');
-    } catch (error) {
-      expect(await test.isAuthenticated()).toBe(false);
-      expect((error as AgentError).message).toBe(expectedError);
-    }
-  });
-
-  it('should log out after idle and reload the window by default', async () => {
-    vi.useFakeTimers();
-
-    setup({
-      onAuthRequest: () => {
-        // Send a valid request.
-        idpMock.send({
-          kind: 'authorize-client-success',
-          delegations: [
-            {
-              delegation: {
-                pubkey: Uint8Array.from([]),
-                expiration: BigInt(0),
-              },
-              signature: Uint8Array.from([]),
-            },
-          ],
-          userPublicKey: Uint8Array.from([]),
-        });
-      },
-    });
-    vi.stubGlobal('location', { reload: vi.fn(), fetch: vi.fn() });
-
+    const chain = await createTestDelegation(identity);
     const storage: AuthClientStorage = {
       remove: vi.fn(),
-      get: vi.fn(),
+      get: vi.fn(async (x) => {
+        if (x === KEY_STORAGE_DELEGATION) return JSON.stringify(chain.toJSON());
+        return null;
+      }),
       set: vi.fn(),
     };
-
-    // setup auth client
-    const test = await AuthClient.create({
-      storage,
-      idleOptions: {
-        idleTimeout: 1000,
-      },
-    });
-
-    // Test login flow
-    const onSuccess = vi.fn();
-    test.login({ onSuccess });
-
-    idpMock.ready();
-
-    expect(storage.set).toHaveBeenCalled();
-    expect(storage.remove).not.toHaveBeenCalled();
-
-    // simulate user being inactive for 10 minutes
-    vi.advanceTimersByTime(10 * 60 * 1000);
-
-    // Storage should be cleared by default after logging out
-    expect(storage.remove).toHaveBeenCalled();
-
-    expect(window.location.reload).toHaveBeenCalled();
+    const client = new AuthClient({ identity, storage });
+    const resolved = await client.getIdentity();
+    expect(resolved.getPrincipal().isAnonymous()).toBe(false);
   });
 
-  it('should not reload the page if the default callback is disabled', async () => {
-    vi.useFakeTimers();
-
-    setup({
-      onAuthRequest: () => {
-        // Send a valid request.
-        idpMock.send({
-          kind: 'authorize-client-success',
-          delegations: [
-            {
-              delegation: {
-                pubkey: Uint8Array.from([]),
-                expiration: BigInt(0),
-              },
-              signature: Uint8Array.from([]),
-            },
-          ],
-          userPublicKey: Uint8Array.from([]),
-        });
-      },
-    });
-    vi.stubGlobal('location', { reload: vi.fn(), fetch: vi.fn() });
-
-    const storage: AuthClientStorage = {
-      remove: vi.fn(),
-      get: vi.fn(),
-      set: vi.fn(),
-    };
-
-    const test = await AuthClient.create({
-      storage,
-      idleOptions: {
-        idleTimeout: 1000,
-        disableDefaultIdleCallback: true,
-      },
-    });
-
-    // Test login flow
-    await test.login();
-    idpMock.ready();
-
-    expect(storage.set).toHaveBeenCalled();
-    expect(storage.remove).not.toHaveBeenCalled();
-
-    // simulate user being inactive for 10 minutes
-    vi.advanceTimersByTime(10 * 60 * 1000);
-
-    // Storage should not be cleared
-    expect(storage.remove).not.toHaveBeenCalled();
-    // Page should not be reloaded
-    expect(window.location.reload).not.toHaveBeenCalled();
+  it('should sign users out', async () => {
+    const client = new AuthClient();
+    await client.signOut();
+    expect(client.isAuthenticated()).toBe(false);
+    const identity = await client.getIdentity();
+    expect(identity.getPrincipal().isAnonymous()).toBe(true);
   });
 
-  it('should not reload the page if a callback is provided', async () => {
-    setup({
-      onAuthRequest: () => {
-        // Send a valid request.
-        idpMock.send({
-          kind: 'authorize-client-success',
-          delegations: [
-            {
-              delegation: {
-                pubkey: Uint8Array.from([]),
-                expiration: BigInt(0),
-              },
-              signature: Uint8Array.from([]),
-            },
-          ],
-          userPublicKey: Uint8Array.from([]),
-        });
-      },
-    });
-    vi.stubGlobal('location', { reload: vi.fn(), fetch: vi.fn() });
-
-    const idleCb = vi.fn();
-    const test = await AuthClient.create({
-      idleOptions: {
-        idleTimeout: 1000,
-        onIdle: idleCb,
-      },
-    });
-
-    vi.useFakeTimers();
-
-    test.login();
-    idpMock.ready();
-
-    // simulate user being inactive for 10 minutes
-    vi.advanceTimersByTime(10 * 60 * 1000);
-
-    expect(window.location.reload).not.toHaveBeenCalled();
-    expect(idleCb).toHaveBeenCalled();
+  it('should not initialize an idleManager if the user is not signed in', async () => {
+    const client = new AuthClient();
+    await client.getIdentity(); // wait for hydration
+    expect(client.idleManager).toBeUndefined();
   });
 
-  it('should not set up an idle timer if the disable option is set', async () => {
-    const idleFn = vi.fn();
-    const test = await AuthClient.create({
+  it.each([
+    ['google', 'https://accounts.google.com'],
+    ['apple', 'https://appleid.apple.com'],
+    ['microsoft', 'https://login.microsoftonline.com/{tid}/v2.0'],
+  ] as const)('should pass openid=%s search param to the transport', (provider, expectedUrl) => {
+    new AuthClient({ openIdProvider: provider });
+    const url = new URL(FakeTransport.last().options.url ?? '');
+    expect(url.searchParams.get('openid')).toBe(expectedUrl);
+  });
+
+  it('should not include openid search param when openIdProvider is not set', () => {
+    new AuthClient();
+    const url = new URL(FakeTransport.last().options.url ?? '');
+    expect(url.searchParams.has('openid')).toBe(false);
+  });
+
+  it('should forward windowOpenerFeatures to the transport', () => {
+    new AuthClient({ windowOpenerFeatures: 'width=500,height=600' });
+    expect(FakeTransport.last().options.windowOpenerFeatures).toBe('width=500,height=600');
+  });
+
+  it('should not set up an idle timer if the disable option is set', () => {
+    const client = new AuthClient({
       idleOptions: {
         idleTimeout: 1000,
         disableIdle: true,
       },
     });
-
-    expect(idleFn).not.toHaveBeenCalled();
-    expect(test.idleManager).toBeUndefined();
-    // wait for default 30 minute idle timeout
-    vi.useFakeTimers();
-    vi.advanceTimersByTime(30 * 60 * 1000);
-    expect(idleFn).not.toHaveBeenCalled();
+    expect(client.idleManager).toBeUndefined();
   });
 
-  it('should not set up an idle timer if the client is not logged in', async () => {
-    vi.useFakeTimers();
+  it('memoize runs the producer and returns its value in window mode', async () => {
+    const client = new AuthClient(); // default 'window' transport
+    const produce = vi.fn(async () => 'value');
 
-    setup({
-      onAuthRequest: () => {
-        // Send a valid request.
-        idpMock.send({
-          kind: 'authorize-client-success',
-          delegations: [
-            {
-              delegation: {
-                pubkey: Uint8Array.from([]),
-                expiration: BigInt(0),
-              },
-              signature: Uint8Array.from([]),
-            },
-          ],
-          userPublicKey: Uint8Array.from([]),
-        });
-      },
+    expect(await client.memoize(produce)).toBe('value');
+    expect(produce).toHaveBeenCalledOnce();
+  });
+});
+
+describe('AuthClient signIn', () => {
+  it('should return the authenticated identity', async () => {
+    const client = new AuthClient();
+    handleSignIn(FakeTransport.last());
+    const identity = await client.signIn();
+    expect(identity.getPrincipal().toString()).toBeTruthy();
+  });
+
+  it('should set up an idle manager after sign-in', async () => {
+    const client = new AuthClient();
+    handleSignIn(FakeTransport.last());
+    await client.signIn();
+    expect(client.idleManager).toBeDefined();
+  });
+
+  it('should not set up an idle manager if disableIdle is set', async () => {
+    const client = new AuthClient({ idleOptions: { disableIdle: true } });
+    handleSignIn(FakeTransport.last());
+    await client.signIn();
+    expect(client.idleManager).toBeUndefined();
+  });
+
+  it('should propagate signer errors from the delegation request', async () => {
+    const client = new AuthClient();
+    handleSignIn(FakeTransport.last(), {
+      error: { code: -1, message: 'connection failed' },
     });
-    vi.stubGlobal('location', { reload: vi.fn(), fetch: vi.fn() });
+    await expect(client.signIn()).rejects.toThrow('connection failed');
+  });
 
+  it('should forward targets and maxTimeToLive to the delegation request', async () => {
+    const client = new AuthClient();
+    const transport = FakeTransport.last();
+    handleSignIn(transport);
+
+    const target = Principal.fromText('aaaaa-aa');
+    await client.signIn({ targets: [target], maxTimeToLive: 1_000_000n });
+
+    const req = transport.requests[0];
+    expect(req.method).toBe('icrc34_delegation');
+    expect(req.params?.targets).toEqual([target.toText()]);
+    expect(req.params?.maxTimeToLive).toBe('1000000');
+  });
+
+  it('should forward derivationOrigin on every request as icrc95DerivationOrigin', async () => {
+    const client = new AuthClient({ derivationOrigin: 'https://example.com' });
+    const transport = FakeTransport.last();
+    handleSignIn(transport);
+
+    await client.signIn();
+
+    expect(transport.requests[0].params?.icrc95DerivationOrigin).toBe('https://example.com');
+  });
+
+  it('should persist delegation and key after sign-in', async () => {
     const storage: AuthClientStorage = {
       remove: vi.fn(),
-      get: vi.fn(),
+      get: vi.fn().mockResolvedValue(null),
       set: vi.fn(),
     };
+    const client = new AuthClient({ storage });
+    handleSignIn(FakeTransport.last());
+    await client.signIn();
 
-    await AuthClient.create({
+    expect(storage.set).toHaveBeenCalledWith(KEY_STORAGE_DELEGATION, expect.any(String));
+    expect(storage.set).toHaveBeenCalledWith(KEY_STORAGE_KEY, expect.anything());
+  });
+
+  it('should generate a fresh key for each sign-in', async () => {
+    const storedKeys: unknown[] = [];
+    const storage: AuthClientStorage = {
+      remove: vi.fn(),
+      get: vi.fn().mockResolvedValue(null),
+      set: vi.fn(async (k, v) => {
+        if (k === KEY_STORAGE_KEY) storedKeys.push(v);
+      }),
+    };
+    const client = new AuthClient({ storage, keyType: 'Ed25519' });
+    handleSignIn(FakeTransport.last());
+    await client.signIn();
+    await client.signIn();
+
+    expect(storedKeys).toHaveLength(2);
+    expect(storedKeys[0]).not.toEqual(storedKeys[1]);
+  });
+
+  it('should set the localStorage expiration flag after sign-in', async () => {
+    const client = new AuthClient({ idleOptions: { disableIdle: true } });
+    handleSignIn(FakeTransport.last());
+    expect(client.isAuthenticated()).toBe(false);
+    await client.signIn();
+    expect(client.isAuthenticated()).toBe(true);
+  });
+
+  it('should clear the localStorage expiration flag on sign-out', async () => {
+    const client = new AuthClient({ idleOptions: { disableIdle: true } });
+    handleSignIn(FakeTransport.last());
+    await client.signIn();
+    expect(client.isAuthenticated()).toBe(true);
+    await client.signOut();
+    expect(client.isAuthenticated()).toBe(false);
+  });
+});
+
+describe('AuthClient idle behavior', () => {
+  it('should sign out after idle and reload the window by default', async () => {
+    const storage: AuthClientStorage = {
+      remove: vi.fn(),
+      get: vi.fn().mockResolvedValue(null),
+      set: vi.fn(),
+    };
+    const client = new AuthClient({
       storage,
-      idleOptions: {
-        idleTimeout: 1000,
-      },
+      idleOptions: { idleTimeout: 1000 },
     });
+    handleSignIn(FakeTransport.last());
+    await client.signIn();
 
-    expect(storage.set).toHaveBeenCalled();
     expect(storage.remove).not.toHaveBeenCalled();
 
-    // simulate user being inactive for 10 minutes
-    vi.advanceTimersByTime(10 * 60 * 1000);
+    await new Promise((r) => setTimeout(r, 1100));
 
-    // Storage should not be cleared
+    expect(storage.remove).toHaveBeenCalled();
+    expect(window.location.reload).toHaveBeenCalled();
+    expect(client.isAuthenticated()).toBe(false);
+  });
+
+  it('should not reload the page if the default callback is disabled', async () => {
+    const storage: AuthClientStorage = {
+      remove: vi.fn(),
+      get: vi.fn().mockResolvedValue(null),
+      set: vi.fn(),
+    };
+    const client = new AuthClient({
+      storage,
+      idleOptions: { idleTimeout: 1000, disableDefaultIdleCallback: true },
+    });
+    handleSignIn(FakeTransport.last());
+    await client.signIn();
+
+    await new Promise((r) => setTimeout(r, 1100));
+
     expect(storage.remove).not.toHaveBeenCalled();
-    // Page should not be reloaded
     expect(window.location.reload).not.toHaveBeenCalled();
+  });
+
+  it('should call onIdle instead of the default behavior when provided', async () => {
+    const idleCb = vi.fn();
+    const client = new AuthClient({
+      idleOptions: { idleTimeout: 1000, onIdle: idleCb },
+    });
+    handleSignIn(FakeTransport.last());
+    await client.signIn();
+
+    // Wait for the idle timeout to fire (real timers).
+    await new Promise((r) => setTimeout(r, 1100));
+
+    expect(window.location.reload).not.toHaveBeenCalled();
+    expect(idleCb).toHaveBeenCalled();
   });
 });
 
 describe('IdbStorage', () => {
   it('should handle get and set', async () => {
     const storage = new IdbStorage();
-
     await storage.set('testKey', 'testValue');
     expect(await storage.get('testKey')).toBe('testValue');
   });
 });
 
-// A minimal interface of our interactions with the Window object of the IDP.
-interface IdpWindow {
-  postMessage: Mock;
-  close(): void;
-  closed: boolean;
-}
-
-let idpWindow: IdpWindow;
-let idpMock: IdpMock;
-function setup(options?: { onAuthRequest?: () => void }) {
-  // Set the event handler.
-  global.addEventListener = vi.fn((_, callback) => {
-    idpMock = new IdpMock(callback, 'https://identity.internetcomputer.org');
-  });
-
-  // Mock window.open and window.postMessage since we can't open windows here.
-  vi.stubGlobal(
-    'open',
-    vi.fn(() => {
-      idpWindow = {
-        postMessage: vi.fn((message) => {
-          if (message.kind === 'authorize-client') {
-            options?.onAuthRequest?.();
-          }
-        }),
-        close: vi.fn(() => {
-          idpWindow.closed = true;
-        }),
-        closed: false,
-      };
-      return idpWindow;
-    }),
-  );
-}
-
-describe('Auth Client login', () => {
-  it('should open a window with the IDP url', async () => {
-    setup();
-    const client = await AuthClient.create();
-    // Try without #authorize hash.
-    await client.login({ identityProvider: 'http://127.0.0.1' });
-    expect(globalThis.open).toHaveBeenCalledWith(
-      'http://127.0.0.1/#authorize',
-      'idpWindow',
-      undefined,
-    );
-
-    // Try with #authorize hash.
-    globalThis.open = vi.fn();
-    await client.login({ identityProvider: 'http://127.0.0.1#authorize' });
-    expect(globalThis.open).toHaveBeenCalledWith(
-      'http://127.0.0.1/#authorize',
-      'idpWindow',
-      undefined,
-    );
-
-    // Default url
-    globalThis.open = vi.fn();
-    await client.login();
-    expect(globalThis.open).toHaveBeenCalledWith(
-      'https://identity.internetcomputer.org/#authorize',
-      'idpWindow',
-      undefined,
-    );
-
-    // Default custom window.open feature
-    globalThis.open = vi.fn();
-    await client.login({
-      windowOpenerFeatures: 'toolbar=0,location=0,menubar=0',
-    });
-    expect(globalThis.open).toHaveBeenCalledWith(
-      'https://identity.internetcomputer.org/#authorize',
-      'idpWindow',
-      'toolbar=0,location=0,menubar=0',
-    );
-  });
-
-  it('should login with a derivation origin', async () => {
-    setup();
-    const client = await AuthClient.create();
-    // Try without #authorize hash.
-    await client.login({
-      identityProvider: 'http://127.0.0.1',
-      derivationOrigin: 'http://127.0.0.1:1234',
-    });
-
-    idpMock.ready('http://127.0.0.1');
-
-    const call = idpWindow.postMessage.mock.calls[0][0];
-    expect(call.derivationOrigin).toBe('http://127.0.0.1:1234');
-  });
-
-  it('should ignore authorize-ready events with bad origin', async () => {
-    setup();
-    const client = await AuthClient.create();
-    await client.login();
-
-    // Send an authorize-ready message with a bad origin. It should _not_ result
-    // in a message sent back to the IDP.
-    idpMock.ready('bad origin');
-
-    // No response to the IDP canister.
-    expect(idpWindow.postMessage).not.toHaveBeenCalled();
-  });
-
-  it('should respond to authorize-ready events with correct origin', async () => {
-    setup();
-    const client = await AuthClient.create();
-    await client.login();
-
-    // Send an authorize-ready message with the correct origin.
-    idpMock.ready();
-
-    // A response should be sent to the IDP.
-    expect(idpWindow.postMessage).toHaveBeenCalled();
-  });
-
-  it('should call onError and close the IDP window on failure', async () => {
-    setup({
-      onAuthRequest: () => {
-        // Send a failure message.
-        idpMock.send({
-          kind: 'authorize-client-failure',
-          text: 'mock error message',
-        });
-      },
-    });
-    const client = await AuthClient.create();
-    const failureFunc = vi.fn();
-    await client.login({ onError: failureFunc });
-
-    idpMock.ready();
-
-    expect(failureFunc).toHaveBeenCalledWith('mock error message');
-    expect(idpWindow.close).toHaveBeenCalled();
-  });
-
-  it('should call onError if received an invalid success message', () =>
-    new Promise((done) => {
-      setup({
-        onAuthRequest: () => {
-          idpMock.send({
-            kind: 'authorize-client-success',
-          });
-        },
-      });
-
-      AuthClient.create()
-        .then((client) => {
-          const onError = () => {
-            expect(idpWindow.close).toHaveBeenCalled();
-
-            client.logout().then(done);
-          };
-
-          return client.login({ onError: onError });
-        })
-        .then(() => {
-          idpMock.ready();
-        });
-    }));
-
-  it('should call onSuccess if received a valid success message', () =>
-    new Promise((done) => {
-      setup({
-        onAuthRequest: () => {
-          // Send a valid request.
-          idpMock.send({
-            kind: 'authorize-client-success',
-            delegations: [
-              {
-                delegation: {
-                  pubkey: Uint8Array.from([]),
-                  expiration: BigInt(0),
-                },
-                signature: Uint8Array.from([]),
-              },
-            ],
-            userPublicKey: Uint8Array.from([]),
-          });
-        },
-      });
-
-      AuthClient.create()
-        .then((client) => {
-          const onSuccess = () => {
-            expect(idpWindow.close).toHaveBeenCalled();
-
-            client.logout().then(done);
-          };
-
-          return client.login({ onSuccess: onSuccess });
-        })
-        .then(() => {
-          idpMock.ready();
-        });
-    }));
-
-  it('should call onError if the user closed the IDP window', async () => {
-    setup();
-    vi.useRealTimers();
-    const client = await AuthClient.create({ idleOptions: { disableIdle: true } });
-
-    await expect(
-      new Promise<void>((onSuccess, onError) =>
-        (async () => {
-          await client.login({ onSuccess, onError });
-          idpWindow.close();
-        })(),
-      ),
-    ).rejects.toMatch(ERROR_USER_INTERRUPT);
-  });
-
-  it('should overwrite stored Ed25519 key with in-memory key on login', async () => {
-    setup({
-      onAuthRequest: () => {
-        idpMock.send({
-          kind: 'authorize-client-success',
-          delegations: [
-            {
-              delegation: {
-                pubkey: Uint8Array.from([]),
-                expiration: BigInt(0),
-              },
-              signature: Uint8Array.from([]),
-            },
-          ],
-          userPublicKey: Uint8Array.from([]),
-        });
-      },
-    });
-
-    const fakeStore: Record<string, string> = {};
-    const storage: AuthClientStorage = {
-      remove: vi.fn(async (k) => {
-        delete fakeStore[k];
-      }),
-      get: vi.fn(async (k) => fakeStore[k] ?? null),
-      set: vi.fn(async (k, v) => {
-        fakeStore[k] = v as unknown as string;
-      }),
-    };
-
-    const client = await AuthClient.create({ storage, keyType: 'Ed25519' });
-
-    const initialKey = fakeStore[KEY_STORAGE_KEY];
-    expect(typeof initialKey).toBe('string');
-
-    // Simulate another tab overwriting the stored key
-    const overwrittenKey = 'overwritten-key-from-another-tab';
-    fakeStore[KEY_STORAGE_KEY] = overwrittenKey;
-
-    await new Promise<void>((resolve, reject) => {
-      client.login({
-        onSuccess: resolve,
-        onError: reject,
-      });
-      idpMock.ready();
-    });
-
-    expect(fakeStore[KEY_STORAGE_KEY]).toEqual(initialKey);
-    expect(fakeStore[KEY_STORAGE_KEY]).not.toEqual(overwrittenKey);
-  });
-
-  it('should overwrite stored ECDSA key pair with in-memory key on login', async () => {
-    setup({
-      onAuthRequest: () => {
-        idpMock.send({
-          kind: 'authorize-client-success',
-          delegations: [
-            {
-              delegation: {
-                pubkey: Uint8Array.from([]),
-                expiration: BigInt(0),
-              },
-              signature: Uint8Array.from([]),
-            },
-          ],
-          userPublicKey: Uint8Array.from([]),
-        });
-      },
-    });
-
-    const fakeStore: Record<string, StoredKey> = {};
-    const storage: AuthClientStorage = {
-      remove: vi.fn(async (k: string) => {
-        delete fakeStore[k];
-      }),
-      get: vi.fn(async (k: string): Promise<StoredKey | null> => fakeStore[k] ?? null),
-      set: vi.fn(async (k: string, v: StoredKey) => {
-        fakeStore[k] = v;
-      }),
-    };
-
-    const client = await AuthClient.create({ storage }); // default ECDSA
-
-    const initialKeyPair = fakeStore[KEY_STORAGE_KEY] as CryptoKeyPair;
-    expect(initialKeyPair).toBeTruthy();
-    expect(initialKeyPair.publicKey).toBeDefined();
-    expect(initialKeyPair.privateKey).toBeDefined();
-
-    // Simulate another tab overwriting the stored key
-    const overwrittenKeyPair = (await ECDSAKeyIdentity.generate()).getKeyPair();
-    fakeStore[KEY_STORAGE_KEY] = overwrittenKeyPair;
-
-    await new Promise<void>((resolve, reject) => {
-      client.login({ onSuccess: resolve, onError: reject });
-      idpMock.ready();
-    });
-
-    const restored = fakeStore[KEY_STORAGE_KEY] as CryptoKeyPair;
-    // Expect the same key references as initially stored
-    expect(restored.publicKey).toBe(initialKeyPair.publicKey);
-    expect(restored.privateKey).toBe(initialKeyPair.privateKey);
-    expect(restored.privateKey).not.toBe(overwrittenKeyPair.privateKey);
-    expect(restored.publicKey).not.toBe(overwrittenKeyPair.publicKey);
-  });
-
-  it('should use the loginOptions passed to the create method', async () => {
-    setup();
-    const client = await AuthClient.create({
-      loginOptions: {
-        identityProvider: 'http://my-local-website.localhost:8080',
-        maxTimeToLive: BigInt(1000),
-        customValues: { test: 'val' },
-      },
-    });
-
-    await client.login();
-
-    idpMock.ready('http://my-local-website.localhost:8080');
-
-    expect(idpWindow.postMessage).toHaveBeenCalledTimes(1);
-    const args = idpWindow.postMessage.mock.calls[0][0];
-
-    expect(globalThis.open).toHaveBeenCalledWith(
-      'http://my-local-website.localhost:8080/#authorize',
-      'idpWindow',
-      undefined,
-    );
-    expect(args.maxTimeToLive).toEqual(BigInt(1000));
-    expect(args.test).toEqual('val');
-  });
-
-  it('should merge the loginOptions passed to the create method and the login method', async () => {
-    setup();
-    const client = await AuthClient.create({
-      loginOptions: {
-        identityProvider: 'http://my-local-website.localhost:8080',
-        derivationOrigin: 'http://another-local-website.localhost:8080',
-        customValues: { test: { inner: 'val' } },
-      },
-    });
-
-    await client.login({
-      identityProvider: 'http://replaced.localhost:8080',
-      customValues: { test: 'another-val' },
-    });
-
-    idpMock.ready('http://replaced.localhost:8080');
-
-    expect(idpWindow.postMessage).toHaveBeenCalledTimes(1);
-    const args = idpWindow.postMessage.mock.calls[0][0];
-
-    expect(globalThis.open).toHaveBeenCalledWith(
-      'http://replaced.localhost:8080/#authorize',
-      'idpWindow',
-      undefined,
-    );
-    expect(args.test).toEqual('another-val');
-    expect(args.derivationOrigin).toEqual('http://another-local-website.localhost:8080');
-  });
-});
-
-describe('Migration from localstorage', () => {
-  it('should proceed normally if no values are stored in localstorage', async () => {
-    const storage: AuthClientStorage = {
-      remove: vi.fn(),
-      get: vi.fn(),
-      set: vi.fn(),
-    };
-
-    await AuthClient.create({ storage });
-
-    // Key is stored during creation when none is provided
-    expect(storage.set).toHaveBeenCalledTimes(1);
-  });
-
-  it('should not attempt to migrate if a delegation is already stored', async () => {
-    const storage: AuthClientStorage = {
-      remove: vi.fn(),
-      get: vi.fn(async (x) => {
-        if (x === KEY_STORAGE_DELEGATION) return 'test';
-        if (x === KEY_STORAGE_KEY) return 'key';
-        return null;
-      }),
-      set: vi.fn(),
-    };
-
-    await AuthClient.create({ storage });
-
-    expect(storage.set).toHaveBeenCalledTimes(1);
-  });
-
-  it('should migrate storage from localstorage', async () => {
-    const localStorage = new LocalStorage();
-    const storage: AuthClientStorage = {
-      remove: vi.fn(),
-      get: vi.fn(),
-      set: vi.fn(),
-    };
-
-    await localStorage.set(KEY_STORAGE_DELEGATION, 'test');
-    await localStorage.set(KEY_STORAGE_KEY, 'key');
-
-    await AuthClient.create({ storage });
-
-    expect(storage.set).toHaveBeenCalledTimes(3);
-  });
-});
-
-describe('Migration from Ed25519Key', () => {
+describe('Session restoration', () => {
   const testSecrets = [
     '302a300506032b6570032100d1fa89134802051c8b5d4e53c08b87381b87097bca4c4f348611eb8ce6c91809',
     '4bbff6b476463558d7be318aa342d1a97778d70833038680187950e9e02486c0d1fa89134802051c8b5d4e53c08b87381b87097bca4c4f348611eb8ce6c91809',
   ];
 
-  it('should continue using an existing Ed25519Key and delegation', async () => {
-    // set the jest timer to a fixed value
+  it('should restore an existing Ed25519Key and delegation', async () => {
     vi.setSystemTime(new Date('2020-01-01T00:00:00.000Z'));
 
-    // two days from now
     const expiration = new Date('2020-01-03T00:00:00.000Z');
-
     const key = Ed25519KeyIdentity.fromJSON(JSON.stringify(testSecrets));
-    const chain = DelegationChain.create(key, key.getPublicKey(), expiration);
+    const chain = await createTestDelegation(key, expiration);
+
     const storage: AuthClientStorage = {
       remove: vi.fn(),
       get: vi.fn(async (x) => {
-        if (x === KEY_STORAGE_DELEGATION) return JSON.stringify((await chain).toJSON());
+        if (x === KEY_STORAGE_DELEGATION) return JSON.stringify(chain.toJSON());
         if (x === KEY_STORAGE_KEY) return JSON.stringify(testSecrets);
         return null;
       }),
       set: vi.fn(),
     };
 
-    const client = await AuthClient.create({ storage });
-
-    const identity = client.getIdentity();
-    expect(identity).toMatchSnapshot();
+    const client = new AuthClient({ storage });
+    const identity = await client.getIdentity();
+    expect(identity.getPrincipal().isAnonymous()).toBe(false);
   });
 
-  it('should continue using an existing Ed25519Key with no delegation', async () => {
-    // set the jest timer to a fixed value
+  it('should remain anonymous with a key but no delegation', async () => {
     vi.setSystemTime(new Date('2020-01-01T00:00:00.000Z'));
 
     const storage: AuthClientStorage = {
@@ -818,95 +402,241 @@ describe('Migration from Ed25519Key', () => {
       set: vi.fn(),
     };
 
-    const client = await AuthClient.create({ storage });
-
-    const identity = client.getIdentity();
+    const client = new AuthClient({ storage });
+    const identity = await client.getIdentity();
     expect(identity.getPrincipal().isAnonymous()).toBe(true);
   });
 
-  it('should continue using an existing Ed25519Key with an expired delegation', async () => {
-    // set the jest timer to a fixed value
+  it('should clear storage when the delegation has expired', async () => {
     vi.setSystemTime(new Date('2020-01-01T00:00:00.000Z'));
 
-    // two days ago
     const expiration = new Date('2019-12-30T00:00:00.000Z');
-
     const key = Ed25519KeyIdentity.fromJSON(JSON.stringify(testSecrets));
+    const chain = await createTestDelegation(key, expiration);
 
-    const chain = DelegationChain.create(key, key.getPublicKey(), expiration);
     const fakeStore: Record<string, string> = {};
-    fakeStore[KEY_STORAGE_DELEGATION] = JSON.stringify((await chain).toJSON());
+    fakeStore[KEY_STORAGE_DELEGATION] = JSON.stringify(chain.toJSON());
     fakeStore[KEY_STORAGE_KEY] = JSON.stringify(testSecrets);
 
     const storage: AuthClientStorage = {
       remove: vi.fn(async (x) => {
         delete fakeStore[x];
       }),
-      get: vi.fn(async (x) => {
-        return fakeStore[x] ?? null;
-      }),
+      get: vi.fn(async (x) => fakeStore[x] ?? null),
       set: vi.fn(),
     };
 
-    const client = await AuthClient.create({ storage });
-
-    const identity = client.getIdentity();
+    const client = new AuthClient({ storage });
+    const identity = await client.getIdentity();
     expect(identity.getPrincipal().isAnonymous()).toBe(true);
-
-    // expect the delegation to be removed
-    expect(storage.remove).toHaveBeenCalledTimes(3);
-    expect(fakeStore).toMatchInlineSnapshot(`{}`);
+    expect(storage.remove).toHaveBeenCalled();
   });
-  it('should generate and store a ECDSAKey if no key is stored', async () => {
-    const fakeStore: Record<string, string> = {};
+});
+
+describe('Migration from localStorage', () => {
+  it('should proceed normally if no values are stored in localStorage', async () => {
     const storage: AuthClientStorage = {
       remove: vi.fn(),
-      get: vi.fn(),
-      set: vi.fn(async (x, y) => {
-        fakeStore[x] = y;
-      }),
+      get: vi.fn().mockResolvedValue(null),
+      set: vi.fn(),
     };
-    await AuthClient.create({ storage });
 
-    // It should have stored a cryptoKey
-    expect(Object.keys(fakeStore[KEY_STORAGE_KEY])).toMatchInlineSnapshot(`
-      [
-        "publicKey",
-        "privateKey",
-      ]
-    `);
+    new AuthClient({ storage });
+    await new Promise((r) => setTimeout(r, 0)); // wait for hydration
+
+    // No migration should have occurred (no set calls for delegation/key)
+    expect(storage.set).not.toHaveBeenCalled();
   });
 
-  it("should generate and store a Ed25519 if no key is stored and keyType is set to Ed25519, and load the same key if it's found in storage", async () => {
-    const fakeStore: Record<string, string> = {};
+  it('should migrate storage from localStorage', async () => {
+    const legacyStorage = new LocalStorage();
     const storage: AuthClientStorage = {
       remove: vi.fn(),
-      get: vi.fn(async (key) => fakeStore[key] ?? null),
-      set: vi.fn(async (x, y) => {
-        fakeStore[x] = y;
-      }),
+      get: vi.fn().mockResolvedValue(null),
+      set: vi.fn(),
     };
 
-    // Mock the ED25519 generate method, only for the first auth client
-    const generate = vi.spyOn(Ed25519KeyIdentity, 'generate');
-    generate.mockImplementationOnce((): Ed25519KeyIdentity => {
-      const key = Ed25519KeyIdentity.fromJSON(JSON.stringify(testSecrets));
-      return key;
+    await legacyStorage.set(KEY_STORAGE_DELEGATION, 'test');
+    await legacyStorage.set(KEY_STORAGE_KEY, 'key');
+
+    new AuthClient({ storage });
+    await new Promise((r) => setTimeout(r, 0)); // wait for hydration
+
+    expect(storage.set).toHaveBeenCalledWith(KEY_STORAGE_DELEGATION, 'test');
+    expect(storage.set).toHaveBeenCalledWith(KEY_STORAGE_KEY, 'key');
+  });
+});
+
+describe('AuthClient requestAttributes', () => {
+  it('should send a JSON-RPC request and return decoded data and signature', async () => {
+    const client = new AuthClient();
+    const transport = FakeTransport.last();
+    handleRequestAttributes(transport);
+
+    const nonce = new Uint8Array(32).fill(1);
+    const result = await client.requestAttributes({
+      keys: ['email', 'name'],
+      nonce: () => Promise.resolve(nonce),
     });
 
-    const client1 = await AuthClient.create({ storage, keyType: 'Ed25519' });
-    const identity1 = client1.getIdentity();
+    const sent = transport.requests[0];
+    expect(sent.method).toBe('ii-icrc3-attributes');
+    expect(sent.params?.keys).toEqual(['email', 'name']);
+    expect(sent.params?.nonce).toBe(btoa(String.fromCharCode(...nonce)));
+    expect(Array.from(result.data)).toEqual(Array.from(new TextEncoder().encode('hello')));
+    expect(Array.from(result.signature)).toEqual(Array.from(new TextEncoder().encode('sig')));
+  });
 
-    // This auth client should find the Ed25519 key in the storage,
-    // and not generate a new one
-    const client2 = await AuthClient.create({ storage, keyType: 'Ed25519' });
-    const identity2 = client2.getIdentity();
+  it('should use a provided nonce', async () => {
+    const client = new AuthClient();
+    const transport = FakeTransport.last();
+    handleRequestAttributes(transport);
 
-    expect(generate).toHaveBeenCalledTimes(1);
-    // It should have stored a cryptoKey
-    expect(fakeStore[KEY_STORAGE_KEY]).toMatchSnapshot();
-    // The first identity, created from testSecrets, should be the same as the second identity,
-    // loaded from the storage
-    expect(identity1.getPrincipal().toString()).toEqual(identity2.getPrincipal().toString());
+    const nonce = new Uint8Array(32).fill(42);
+    await client.requestAttributes({ keys: ['email'], nonce: () => Promise.resolve(nonce) });
+
+    expect(transport.requests[0].params?.nonce).toBe(btoa(String.fromCharCode(...nonce)));
+  });
+
+  it('should forward different nonces as distinct base64 values', async () => {
+    const client = new AuthClient();
+    const transport = FakeTransport.last();
+    handleRequestAttributes(transport);
+
+    await client.requestAttributes({
+      keys: ['email'],
+      nonce: () => Promise.resolve(new Uint8Array(32).fill(1)),
+    });
+    await client.requestAttributes({
+      keys: ['email'],
+      nonce: () => Promise.resolve(new Uint8Array(32).fill(2)),
+    });
+
+    expect(transport.requests[0].params?.nonce).not.toBe(transport.requests[1].params?.nonce);
+  });
+
+  it('should throw when the response contains an error', async () => {
+    const client = new AuthClient();
+    handleRequestAttributes(FakeTransport.last(), {
+      error: { code: -1, message: 'not supported' },
+    });
+
+    const nonce = new Uint8Array(32).fill(1);
+    await expect(
+      client.requestAttributes({ keys: ['email'], nonce: () => Promise.resolve(nonce) }),
+    ).rejects.toThrow('not supported');
+  });
+
+  it('should throw when the response is missing data or signature', async () => {
+    const client = new AuthClient();
+    handleRequestAttributes(FakeTransport.last(), { result: { data: btoa('hello') } });
+
+    const nonce = new Uint8Array(32).fill(1);
+    await expect(
+      client.requestAttributes({ keys: ['email'], nonce: () => Promise.resolve(nonce) }),
+    ).rejects.toThrow('Invalid response: missing data or signature');
+  });
+
+  it('should accept a nonce callback returning a promise and forward the resolved value', async () => {
+    const client = new AuthClient();
+    const transport = FakeTransport.last();
+    handleRequestAttributes(transport);
+
+    const nonceBytes = new Uint8Array(32).fill(7);
+    const result = await client.requestAttributes({
+      keys: ['email'],
+      nonce: () => Promise.resolve(nonceBytes),
+    });
+
+    expect(transport.requests[0].params?.nonce).toBe(btoa(String.fromCharCode(...nonceBytes)));
+    expect(Array.from(result.data)).toEqual(Array.from(new TextEncoder().encode('hello')));
+  });
+
+  it('should open the transport channel before awaiting a nonce promise', async () => {
+    const client = new AuthClient();
+    const transport = FakeTransport.last();
+    handleRequestAttributes(transport);
+
+    const establishOrder: string[] = [];
+    const originalEstablish = transport.establishChannel.bind(transport);
+    transport.establishChannel = async () => {
+      establishOrder.push('establish');
+      return originalEstablish();
+    };
+
+    const nonceBytes = new Uint8Array(32).fill(9);
+    const noncePromise = new Promise<Uint8Array>((resolve) => {
+      // Resolving in a later microtask so the channel has time to open first.
+      queueMicrotask(() => {
+        establishOrder.push('resolve-nonce');
+        resolve(nonceBytes);
+      });
+    });
+
+    await client.requestAttributes({ keys: ['email'], nonce: () => noncePromise });
+
+    expect(establishOrder).toEqual(['establish', 'resolve-nonce']);
+    expect(transport.requests[0].params?.nonce).toBe(btoa(String.fromCharCode(...nonceBytes)));
+  });
+
+  it('should propagate rejection from a nonce promise', async () => {
+    const client = new AuthClient();
+    handleRequestAttributes(FakeTransport.last());
+
+    await expect(
+      client.requestAttributes({ keys: ['email'], nonce: () => Promise.reject(new Error('boom')) }),
+    ).rejects.toThrow('boom');
+  });
+});
+
+describe('AuthClient signIn + requestAttributes', () => {
+  it('should resolve both when issued in parallel', async () => {
+    const client = new AuthClient();
+    const transport = FakeTransport.last();
+    handleSignIn(transport);
+    handleRequestAttributes(transport);
+
+    const [identity, attributes] = await Promise.all([
+      client.signIn(),
+      client.requestAttributes({
+        keys: ['email'],
+        nonce: () => Promise.resolve(new Uint8Array(32).fill(1)),
+      }),
+    ]);
+
+    expect(identity.getPrincipal().isAnonymous()).toBe(false);
+    expect(Array.from(attributes.data)).toEqual(Array.from(new TextEncoder().encode('hello')));
+  });
+
+  it('should resolve requestAttributes after a completed signIn', async () => {
+    const client = new AuthClient();
+    const transport = FakeTransport.last();
+    handleSignIn(transport);
+    handleRequestAttributes(transport);
+
+    const identity = await client.signIn();
+    const attributes = await client.requestAttributes({
+      keys: ['email'],
+      nonce: () => Promise.resolve(new Uint8Array(32).fill(1)),
+    });
+
+    expect(identity.getPrincipal().isAnonymous()).toBe(false);
+    expect(Array.from(attributes.data)).toEqual(Array.from(new TextEncoder().encode('hello')));
+  });
+
+  it('should resolve signIn after a completed requestAttributes', async () => {
+    const client = new AuthClient();
+    const transport = FakeTransport.last();
+    handleSignIn(transport);
+    handleRequestAttributes(transport);
+
+    const attributes = await client.requestAttributes({
+      keys: ['email'],
+      nonce: () => Promise.resolve(new Uint8Array(32).fill(1)),
+    });
+    const identity = await client.signIn();
+
+    expect(Array.from(attributes.data)).toEqual(Array.from(new TextEncoder().encode('hello')));
+    expect(identity.getPrincipal().isAnonymous()).toBe(false);
   });
 });

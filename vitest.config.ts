@@ -1,8 +1,7 @@
-import { defineConfig, mergeConfig } from 'vitest/config';
+import { defineConfig } from 'vitest/config';
 import packageJson from './package.json';
-import viteConfig from './vite.config.ts';
 
-const testConfig = defineConfig({
+export default defineConfig({
   test: {
     name: packageJson.name,
     dir: './tests',
@@ -12,5 +11,3 @@ const testConfig = defineConfig({
     setupFiles: ['./tests/setup-idb.ts'],
   },
 });
-
-export default mergeConfig(viteConfig, testConfig);

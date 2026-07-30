@@ -1,4 +1,95 @@
-## Unreleased
+## 8.0.1 (2026-07-27)
+
+### Fix
+
+- **auth-client**: keep the redirect flow batched and its derivation origin stable (#124)
+
+## 8.0.0 (2026-07-23)
+
+### BREAKING CHANGE
+
+- `AuthClient.requestAttributes` now takes `nonce` as a
+callback `() => Promise<Uint8Array>` instead of a `Uint8Array |
+Promise<Uint8Array>` value. Pass the function that fetches the nonce
+(don't await it at the call site): `nonce: () => fetchNonce()`.
+
+### Feat
+
+- **auth-client**: URL redirect transport (#121)
+
+## 7.1.0 (2026-05-22)
+
+### Feat
+
+- **auth-client**: support Promise<Uint8Array> nonce in requestAttributes (#116)
+
+## 7.0.0 (2026-05-04)
+
+### BREAKING CHANGE
+
+- `AuthClient.logout()` is renamed to
+`AuthClient.signOut()`. Callers must rename `authClient.logout(...)` to
+`authClient.signOut(...)`.
+
+### Refactor
+
+- rename AuthClient.logout to signOut (#112)
+
+## 6.2.2 (2026-04-26)
+
+### Fix
+
+- release `@icp-sdk/signer` v5.3.1 bump (#109)
+
+## 6.2.1 (2026-04-25)
+
+### Fix
+
+- include id in requestAttributes JSON-RPC request (#104)
+
+## 6.2.0 (2026-04-22)
+
+### Feat
+
+- Make @icp-sdk/signer a direct dep and bump its minor version. (#101)
+
+## 6.1.0 (2026-04-17)
+
+### Feat
+
+- add requestAttributes for signed user attributes (#85)
+
+### BREAKING CHANGE
+
+- `login()` is now renamed to `signIn()`
+
+## 6.0.0 (2026-04-16)
+
+### BREAKING CHANGE
+
+- - `AuthClient.create()` removed — use `new AuthClient()` instead
+- `getIdentity()` is now async (returns `Promise<Identity>`)
+- `isAuthenticated()` is now sync (returns `boolean` instead of
+`Promise<boolean>`)
+- - `identityProvider`, `derivationOrigin`, and `windowOpenerFeatures`
+moved from `AuthClientLoginOptions` to `AuthClientCreateOptions`
+- `loginOptions` field removed from `AuthClientCreateOptions`
+- - `allowPinAuthentication` and `customValues` login options removed (not
+supported by the signer protocol)
+- `InternetIdentityAuthResponseSuccess` type removed
+- `ERROR_USER_INTERRUPT` removed
+
+### Feat
+
+- one-click OpenID sign-in (#83)
+- update README and quick-start for new API (#82)
+- fresh session keys, improved error handling, singleton IdleManager (#80)
+
+### Refactor
+
+- reorganize auth-client code structure (#84)
+- sync constructor, sync isAuthenticated, async getIdentity (#81)
+- replace custom postMessage protocol with @icp-sdk/signer (#75)
 
 ## 5.0.0 (2025-12-18)
 
