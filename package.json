@@ -42,6 +42,7 @@
     "internet identity"
   ],
   "scripts": {
+    "prepare": "tsc -p tsconfig.build.json",
     "build": "tsc -p tsconfig.build.json && pnpm lint:package",
     "test": "vitest",
     "codestyle:check": "biome check",
