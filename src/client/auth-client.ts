@@ -522,7 +522,15 @@ export class AuthClient {
         (target.protocol === 'https:' || target.protocol === 'http:') &&
         target.origin === window.location.origin
       ) {
-        window.history.pushState({}, '', target.href);
+        // Best-effort — storage is already cleared, so a pushState failure
+        // (SecurityError/InvalidStateError in some contexts) must not fail
+        // signOut(). Still no `location.href` fallback: that would defeat the
+        // validation above.
+        try {
+          window.history.pushState({}, '', target.href);
+        } catch {
+          // ignore
+        }
       }
     }
   }

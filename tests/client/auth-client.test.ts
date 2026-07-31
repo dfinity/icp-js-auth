@@ -160,6 +160,14 @@ describe('AuthClient', () => {
   });
 
   it('refuses a cross-origin, protocol-relative, or javascript: returnTo', async () => {
+    // A concrete same-origin location so `//evil.example` resolves (to
+    // http://evil.example/) and is rejected on the origin check — not because
+    // the base is undefined.
+    vi.stubGlobal('location', {
+      reload: vi.fn(),
+      href: 'http://localhost/app',
+      origin: 'http://localhost',
+    });
     const client = new AuthClient();
     const pushState = vi.spyOn(window.history, 'pushState');
     for (const returnTo of [
