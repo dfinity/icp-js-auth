@@ -159,6 +159,22 @@ describe('AuthClient', () => {
     pushState.mockRestore();
   });
 
+  it('falls back to a location navigation to the validated target when pushState throws', async () => {
+    vi.stubGlobal('location', {
+      reload: vi.fn(),
+      href: 'http://localhost/app',
+      origin: 'http://localhost',
+    });
+    const client = new AuthClient();
+    const pushState = vi.spyOn(window.history, 'pushState').mockImplementation(() => {
+      throw new Error('pushState unavailable');
+    });
+    await client.signOut({ returnTo: '/logged-out' });
+    // Fallback navigates to the resolved, validated same-origin URL — never the raw string.
+    expect(window.location.href).toBe('http://localhost/logged-out');
+    pushState.mockRestore();
+  });
+
   it('refuses a cross-origin, protocol-relative, or javascript: returnTo', async () => {
     // A concrete same-origin location so `//evil.example` resolves (to
     // http://evil.example/) and is rejected on the origin check — not because
@@ -177,7 +193,10 @@ describe('AuthClient', () => {
     ]) {
       await client.signOut({ returnTo });
     }
+    // Neither sink is reached: no history entry, and the location.href fallback
+    // never navigated away from the current page.
     expect(pushState).not.toHaveBeenCalled();
+    expect(window.location.href).toBe('http://localhost/app');
     pushState.mockRestore();
   });
 

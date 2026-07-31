@@ -509,8 +509,11 @@ export class AuthClient {
     this.#chain = null;
 
     if (options.returnTo !== undefined) {
-      // Same-origin http(s) only, and no `location.href` fallback on rejection:
-      // that fallback is exactly how a javascript:/cross-origin value would run.
+      // Navigate exactly as before (pushState, else location.href), but only to
+      // a validated same-origin http(s) target, and feed that validated
+      // `target.href` to both sinks rather than the raw `returnTo`. An invalid
+      // or cross-origin `returnTo` is ignored, so the fallback can no longer be
+      // turned into an open redirect or a `javascript:` execution.
       let target: URL | undefined;
       try {
         target = new URL(options.returnTo, window.location.href);
@@ -522,14 +525,10 @@ export class AuthClient {
         (target.protocol === 'https:' || target.protocol === 'http:') &&
         target.origin === window.location.origin
       ) {
-        // Best-effort — storage is already cleared, so a pushState failure
-        // (SecurityError/InvalidStateError in some contexts) must not fail
-        // signOut(). Still no `location.href` fallback: that would defeat the
-        // validation above.
         try {
           window.history.pushState({}, '', target.href);
         } catch {
-          // ignore
+          window.location.href = target.href;
         }
       }
     }
