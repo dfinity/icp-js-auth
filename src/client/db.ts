@@ -89,10 +89,8 @@ export class IdbKeyVal {
     private _version: number,
   ) {}
 
-  // Browsers (notably Chrome) can force-close an IndexedDB connection at any
-  // time, independent of anything the page did. The `terminated` hook drops a
-  // connection as soon as the browser reports the abnormal close, so the next
-  // operation opens a fresh one instead of failing on a dead handle.
+  // The browser can force-close the connection at any time; the `terminated`
+  // hook drops it so the next operation opens a fresh one.
   private _openDb(): Promise<Database> {
     if (this._dbPromise === null) {
       const promise = _openDbStore(this._dbName, this._storeName, this._version, () => {
@@ -100,7 +98,6 @@ export class IdbKeyVal {
           this._dbPromise = null;
         }
       }).catch((error) => {
-        // A failed open must not be cached, or every later call would rethrow.
         if (this._dbPromise === promise) {
           this._dbPromise = null;
         }
@@ -111,18 +108,16 @@ export class IdbKeyVal {
     return this._dbPromise;
   }
 
-  // Chrome does not always fire `terminated` when it force-closes a
-  // connection; the first symptom can be an InvalidStateError ("the database
-  // connection is closing") thrown by the next transaction. Treat that as a
-  // dead connection: drop it, reopen, and retry the operation once.
+  // Chrome can force-close a connection without firing `terminated`; the next
+  // transaction then throws an InvalidStateError. Drop the dead connection and
+  // retry once on a fresh one.
   private async _withDb<T>(action: (db: Database) => Promise<T>): Promise<T> {
     const promise = this._openDb();
     const db = await promise;
     try {
       return await action(db);
     } catch (error) {
-      // Checked by name: the error is a DOMException, which predates and does
-      // not inherit from Error.
+      // Matched by name: a DOMException does not inherit from Error.
       const name = error !== null && typeof error === 'object' && 'name' in error && error.name;
       if (name !== 'InvalidStateError') {
         throw error;

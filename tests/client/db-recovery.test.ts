@@ -2,8 +2,8 @@ import type { IDBPDatabase } from 'idb';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { IdbKeyVal } from '../../src/client/db.ts';
 
-// Wrap `openDB` to capture every connection the module opens, so tests can
-// close one out from under IdbKeyVal the way a browser force-close does.
+// Capture every connection `openDB` hands out, so tests can close one out
+// from under IdbKeyVal the way a browser force-close does.
 const opened = vi.hoisted(() => ({ dbs: [] as IDBPDatabase<unknown>[] }));
 
 vi.mock('idb', async (importOriginal) => {
@@ -38,8 +38,6 @@ describe('IdbKeyVal connection recovery', () => {
     await db.set('testKey', 'before');
     expect(opened.dbs.length).toBe(1);
 
-    // Simulate the browser force-closing the connection without the
-    // `terminated` event having fired yet.
     opened.dbs[0].close();
 
     expect(await db.get('testKey')).toBe('before');

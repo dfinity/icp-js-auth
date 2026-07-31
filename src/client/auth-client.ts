@@ -306,14 +306,13 @@ export class AuthClient {
     // rejection and propagates it when reached.
     void sessionKeyPromise.catch(() => undefined);
 
-    // openChannel() must stay the first await: it can open a popup window, so
-    // it has to run in the same tick as the click that called signIn() or the
-    // browser may block the popup as not user-initiated.
+    // openChannel() must stay the first await: it can open a popup window,
+    // which the browser may block unless it happens in the same tick as the
+    // click that called signIn().
     await this.#signer.openChannel();
 
-    // Serialize with the constructor's session restore (#init is memoized, so
-    // this only waits for the one hydration pass): the writes at the end of
-    // this flow must never interleave with hydration's reads.
+    // Wait for the constructor's session restore, so this flow's storage
+    // writes cannot interleave with hydration's reads.
     await this.#init();
 
     const { key, pendingKeySlot } = await sessionKeyPromise;
@@ -535,7 +534,7 @@ export class AuthClient {
    * @param options.returnTo - URL to navigate to after sign-out.
    */
   async signOut(options: { returnTo?: string } = {}): Promise<void> {
-    // Serialize with the constructor's session restore: hydration racing the
+    // Wait for the constructor's session restore: hydration racing the
     // deletion below could re-populate the identity from already-read state.
     await this.#init();
     await deleteStorage(this.#storage);
