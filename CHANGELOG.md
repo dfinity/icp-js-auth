@@ -1,3 +1,9 @@
+## Unreleased
+
+### Fix
+
+- expire and sweep abandoned pending redirect session keys (#129)
+
 ## 8.0.1 (2026-07-27)
 
 ### Fix
