@@ -532,11 +532,28 @@ export class AuthClient {
     this.#identity = new AnonymousIdentity();
     this.#chain = null;
 
-    if (options.returnTo) {
+    if (options.returnTo !== undefined) {
+      // Navigate exactly as before (pushState, else location.href), but only to
+      // a validated same-origin http(s) target, and feed that validated
+      // `target.href` to both sinks rather than the raw `returnTo`. An invalid
+      // or cross-origin `returnTo` is ignored, so the fallback can no longer be
+      // turned into an open redirect or a `javascript:` execution.
+      let target: URL | undefined;
       try {
-        window.history.pushState({}, '', options.returnTo);
+        target = new URL(options.returnTo, window.location.href);
       } catch {
-        window.location.href = options.returnTo;
+        target = undefined;
+      }
+      if (
+        target !== undefined &&
+        (target.protocol === 'https:' || target.protocol === 'http:') &&
+        target.origin === window.location.origin
+      ) {
+        try {
+          window.history.pushState({}, '', target.href);
+        } catch {
+          window.location.href = target.href;
+        }
       }
     }
   }
