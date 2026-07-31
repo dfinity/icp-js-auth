@@ -139,6 +139,43 @@ describe('AuthClient redirect (UrlTransport) sign-in', () => {
     expect(storage.map.has('ic-auth-pending-keys')).toBe(false);
   });
 
+  it('ignores corrupted registry entries (foreign slot, non-finite expiry)', async () => {
+    const storage = createSharedStorage();
+    // A registry corrupted with an entry pointing at an unrelated storage key
+    // and one with a NaN expiry — neither is a valid pending-key entry.
+    storage.map.set('ic-delegation', JSON.stringify({ not: 'a pending key' }));
+    storage.map.set(
+      'ic-auth-pending-keys',
+      JSON.stringify([
+        { slot: 'ic-delegation', expiresAt: Date.now() - 1 }, // foreign slot, "expired"
+        { slot: `${PENDING_KEY_PREFIX}nan`, expiresAt: Number.NaN }, // never-expiring
+      ]),
+    );
+
+    const client = new AuthClient({ transport: 'redirect', storage });
+    handleSignIn(FakeUrlTransport.last());
+    await client.signIn();
+
+    // The sweep must not touch a key that was never a pending slot.
+    expect(storage.map.get('ic-delegation')).toBe(JSON.stringify({ not: 'a pending key' }));
+  });
+
+  it('completes sign-in even if pending-key cleanup fails', async () => {
+    const storage = createSharedStorage();
+    const remove = storage.remove;
+    storage.remove = async (key) => {
+      if (key.startsWith(PENDING_KEY_PREFIX)) throw new Error('storage unavailable');
+      return remove(key);
+    };
+
+    const client = new AuthClient({ transport: 'redirect', storage });
+    handleSignIn(FakeUrlTransport.last());
+    const identity = await client.signIn();
+
+    // Cleanup of the completed flow's pending key failed, but auth succeeded.
+    expect(identity.getPrincipal().isAnonymous()).toBe(false);
+  });
+
   it('journals the derivation origin so it survives the redirect', async () => {
     const storage = createSharedStorage();
     const DERIVATION = 'https://derivation.example.com';

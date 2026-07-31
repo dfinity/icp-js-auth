@@ -336,10 +336,16 @@ export class AuthClient {
     await persistKey(this.#storage, key);
 
     // The flow is complete: the delegation is bound to this key and stored, so
-    // the per-flow pending copy is no longer needed.
+    // the per-flow pending copy is no longer needed. Best-effort — the user is
+    // already signed in, so a cleanup failure must not fail signIn(); a later
+    // flow sweeps whatever is left behind.
     if (pendingKeySlot !== undefined) {
-      await this.#storage.remove(pendingKeySlot);
-      await unregisterPendingKey(this.#storage, pendingKeySlot);
+      try {
+        await this.#storage.remove(pendingKeySlot);
+        await unregisterPendingKey(this.#storage, pendingKeySlot);
+      } catch {
+        // ignore
+      }
     }
 
     return this.#identity;
@@ -393,8 +399,11 @@ export class AuthClient {
       acquired = await restoreKeyAt(this.#storage, pendingKeySlot);
       if (acquired === null) {
         acquired = await generateKey(keyType);
-        await this.#storage.set(pendingKeySlot, serializeKey(acquired));
+        // Register before writing the key: if the write then fails, a stray
+        // registry entry is harmless (swept on expiry), whereas a key with no
+        // registry entry would leak un-sweepably.
         await sweepAndRegisterPendingKey(this.#storage, pendingKeySlot, Date.now());
+        await this.#storage.set(pendingKeySlot, serializeKey(acquired));
       }
       return keyId;
     });
@@ -678,27 +687,26 @@ async function restoreKey(
   }
 }
 
-/**
- * Loads a session key from a specific storage slot, deserializing by stored
- * shape (`CryptoKeyPair` → ECDSA, JSON string → Ed25519). Unlike
- * {@link restoreKey} it does not migrate from localStorage — it reads only the
- * given slot, as used for a redirect flow's per-flow pending key.
- * @param storage - The storage backend.
- * @param storageKey - The slot to read.
- */
+// Reads the pending-key registry, dropping malformed entries. The value comes
+// from storage, so guard against corruption: keep only real pending-key slots
+// with a finite expiry (a NaN expiry compares false forever and never sweeps;
+// a foreign slot would make the sweep remove an unrelated storage key).
 async function readPendingRegistry(storage: AuthClientStorage): Promise<PendingKeyEntry[]> {
   const raw = await storage.get(PENDING_KEYS_REGISTRY_KEY);
   if (typeof raw !== 'string') return [];
   try {
     const parsed: unknown = JSON.parse(raw);
     if (!Array.isArray(parsed)) return [];
-    return parsed.filter(
-      (entry): entry is PendingKeyEntry =>
-        typeof entry === 'object' &&
-        entry !== null &&
-        typeof (entry as PendingKeyEntry).slot === 'string' &&
-        typeof (entry as PendingKeyEntry).expiresAt === 'number',
-    );
+    return parsed.filter((entry): entry is PendingKeyEntry => {
+      if (typeof entry !== 'object' || entry === null) return false;
+      const { slot, expiresAt } = entry as PendingKeyEntry;
+      return (
+        typeof slot === 'string' &&
+        slot.startsWith(PENDING_KEY_PREFIX) &&
+        typeof expiresAt === 'number' &&
+        Number.isFinite(expiresAt)
+      );
+    });
   } catch {
     return [];
   }
@@ -744,6 +752,14 @@ async function unregisterPendingKey(storage: AuthClientStorage, slot: string): P
   }
 }
 
+/**
+ * Loads a session key from a specific storage slot, deserializing by stored
+ * shape (`CryptoKeyPair` → ECDSA, JSON string → Ed25519). Unlike
+ * {@link restoreKey} it does not migrate from localStorage — it reads only the
+ * given slot, as used for a redirect flow's per-flow pending key.
+ * @param storage - The storage backend.
+ * @param storageKey - The slot to read.
+ */
 async function restoreKeyAt(
   storage: AuthClientStorage,
   storageKey: string,
