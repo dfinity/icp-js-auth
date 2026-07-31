@@ -1,3 +1,4 @@
+import type { PublicKey } from '@icp-sdk/core/agent';
 import { DelegationChain, Ed25519KeyIdentity } from '@icp-sdk/core/identity';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { AuthClient } from '../../src/client/auth-client.ts';
@@ -25,6 +26,13 @@ function toBase64(bytes: Uint8Array): string {
   return btoa(binary);
 }
 
+function fromBase64(value: string): Uint8Array {
+  const binary = atob(value);
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+  return bytes;
+}
+
 /** A shared in-memory storage so two "loads" see the same persisted state. */
 function createSharedStorage(): AuthClientStorage & { map: Map<string, StoredKey> } {
   const map = new Map<string, StoredKey>();
@@ -36,9 +44,16 @@ function createSharedStorage(): AuthClientStorage & { map: Map<string, StoredKey
   };
 }
 
-async function delegationBody() {
-  const key = Ed25519KeyIdentity.generate();
-  const chain = await DelegationChain.create(key, key.getPublicKey(), new Date(Date.now() + 3.6e6));
+// A delegation chain delegating to the requested session key, as a conformant
+// signer returns — the signer's returned-chain validation (>= 5.6.1) requires
+// the leaf to match the requested key.
+async function delegationBody(publicKey: string) {
+  const to = { toDer: () => fromBase64(publicKey) } as unknown as PublicKey;
+  const chain = await DelegationChain.create(
+    Ed25519KeyIdentity.generate(),
+    to,
+    new Date(Date.now() + 3.6e6),
+  );
   return {
     result: {
       publicKey: toBase64(new Uint8Array(chain.publicKey)),
@@ -54,12 +69,14 @@ async function delegationBody() {
   };
 }
 
-const SIGN_IN_BODY = await delegationBody();
-
 function handleSignIn(transport: FakeUrlTransport): void {
-  transport.onRequest((req) => {
+  transport.onRequest(async (req) => {
     if (req.method !== 'icrc34_delegation' || req.id == null) return;
-    return { jsonrpc: '2.0', id: req.id, ...SIGN_IN_BODY };
+    return {
+      jsonrpc: '2.0',
+      id: req.id,
+      ...(await delegationBody(req.params?.publicKey as string)),
+    };
   });
 }
 

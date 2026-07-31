@@ -1,3 +1,4 @@
+import type { PublicKey } from '@icp-sdk/core/agent';
 import { DelegationChain, Ed25519KeyIdentity } from '@icp-sdk/core/identity';
 import { Principal } from '@icp-sdk/core/principal';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -29,6 +30,13 @@ function toBase64(bytes: Uint8Array): string {
   return btoa(binary);
 }
 
+function fromBase64(value: string): Uint8Array {
+  const binary = atob(value);
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+  return bytes;
+}
+
 async function createTestDelegation(key: Ed25519KeyIdentity, expiration?: Date) {
   const exp = expiration ?? new Date(Date.now() + 24 * 60 * 60 * 1000); // 1 day from now
   return DelegationChain.create(key, key.getPublicKey(), exp);
@@ -52,26 +60,44 @@ type JsonRpcBody =
   | { result: unknown }
   | { error: { code: number; message: string; data?: unknown } };
 
-// Shared default bodies — declared as constants so both helpers use a
-// parameter-default form consistently. `DelegationChain.create` is async, so
-// top-level `await` is used; `await` isn't allowed inside param defaults.
-const DEFAULT_SIGN_IN_BODY: JsonRpcBody = {
-  result: encodeDelegationChainResponse(await createTestDelegation(Ed25519KeyIdentity.generate())),
-};
-
 const DEFAULT_REQUEST_ATTRIBUTES_BODY: JsonRpcBody = {
   result: { data: btoa('hello'), signature: btoa('sig') },
 };
 
+// A delegation-chain response as a conformant signer would build it: delegating
+// to the requested session key, scoped to any requested targets, and expiring
+// within maxTimeToLive — all of which the signer's returned-chain validation
+// (>= 5.6.1) enforces.
+async function conformantSignInBody(params: {
+  publicKey: string;
+  targets?: string[];
+  maxTimeToLive?: string;
+}): Promise<JsonRpcBody> {
+  const to = { toDer: () => fromBase64(params.publicKey) } as unknown as PublicKey;
+  const targets = params.targets?.map((t) => Principal.fromText(t));
+  const ttlMs =
+    params.maxTimeToLive !== undefined
+      ? Number(BigInt(params.maxTimeToLive) / 1_000_000n)
+      : 60 * 60 * 1000;
+  const chain = await DelegationChain.create(
+    Ed25519KeyIdentity.generate(),
+    to,
+    new Date(Date.now() + ttlMs),
+    targets ? { targets } : undefined,
+  );
+  return { result: encodeDelegationChainResponse(chain) };
+}
+
 /**
- * Registers an `icrc34_delegation` handler that returns the given body.
- * Defaults to a valid delegation chain so `signIn()` resolves successfully.
+ * Registers an `icrc34_delegation` handler. By default it returns a chain that
+ * delegates to the requested key; pass `body` to force a specific response.
  */
-function handleSignIn(transport: FakeTransport, body: JsonRpcBody = DEFAULT_SIGN_IN_BODY): void {
-  transport.onRequest((req) => {
+function handleSignIn(transport: FakeTransport, body?: JsonRpcBody): void {
+  transport.onRequest(async (req) => {
     if (req.method !== 'icrc34_delegation') return;
     if (req.id === undefined || req.id === null) return;
-    return { jsonrpc: '2.0', id: req.id, ...body };
+    const resolved = body ?? (await conformantSignInBody(req.params as never));
+    return { jsonrpc: '2.0', id: req.id, ...resolved };
   });
 }
 
