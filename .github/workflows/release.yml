@@ -24,19 +24,19 @@ jobs:
         uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
 
       - name: Setup Python
-        uses: dfinity/ci-tools/actions/setup-python@main
+        uses: dfinity/ci-tools/actions/setup-python@afeee4fbdc0683a88ec5a74ed7f59a2ce0e833ad # main
 
       - name: Setup Commitizen
-        uses: dfinity/ci-tools/actions/setup-commitizen@main
+        uses: dfinity/ci-tools/actions/setup-commitizen@afeee4fbdc0683a88ec5a74ed7f59a2ce0e833ad # main
 
       - name: Setup PNPM
-        uses: dfinity/ci-tools/actions/setup-pnpm@main
+        uses: dfinity/ci-tools/actions/setup-pnpm@afeee4fbdc0683a88ec5a74ed7f59a2ce0e833ad # main
 
       - name: Determine if Beta Release
         id: is_beta
-        uses: dfinity/ci-tools/actions/is-beta-tag@main
+        uses: dfinity/ci-tools/actions/is-beta-tag@afeee4fbdc0683a88ec5a74ed7f59a2ce0e833ad # main
 
-      - uses: dfinity/ci-tools/actions/extract-version@main
+      - uses: dfinity/ci-tools/actions/extract-version@afeee4fbdc0683a88ec5a74ed7f59a2ce0e833ad # main
         id: extract-version
 
       - name: Prepare version
@@ -63,7 +63,7 @@ jobs:
           $release_cmd
 
       - name: Generate release notes
-        uses: dfinity/ci-tools/actions/generate-release-notes@main
+        uses: dfinity/ci-tools/actions/generate-release-notes@afeee4fbdc0683a88ec5a74ed7f59a2ce0e833ad # main
 
       - name: Create Github release
         uses: ncipollo/release-action@b7eabc95ff50cbeeedec83973935c8f306dfcd0b # v1.20.0
