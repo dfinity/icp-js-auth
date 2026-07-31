@@ -10,6 +10,7 @@ const _openDbStore = async (
   dbName = AUTH_DB_NAME,
   storeName = OBJECT_STORE_NAME,
   version: number,
+  onTerminated?: () => void,
 ) => {
   // Clear legacy stored delegations
   if (globalThis.localStorage?.getItem(KEY_STORAGE_DELEGATION)) {
@@ -23,6 +24,7 @@ const _openDbStore = async (
       }
       database.createObjectStore(storeName);
     },
+    terminated: onTerminated,
   });
 };
 
@@ -72,15 +74,65 @@ export class IdbKeyVal {
       storeName = OBJECT_STORE_NAME,
       version = DB_VERSION,
     } = options ?? {};
-    const db = await _openDbStore(dbName, storeName, version);
-    return new IdbKeyVal(db, storeName);
+    const keyVal = new IdbKeyVal(dbName, storeName, version);
+    // Open eagerly so an unavailable database fails at creation time.
+    await keyVal._openDb();
+    return keyVal;
   }
+
+  private _dbPromise: Promise<Database> | null = null;
 
   // Do not use - instead prefer create
   private constructor(
-    private _db: Database,
+    private _dbName: string,
     private _storeName: string,
+    private _version: number,
   ) {}
+
+  // Browsers (notably Chrome) can force-close an IndexedDB connection at any
+  // time, independent of anything the page did. The `terminated` hook drops a
+  // connection as soon as the browser reports the abnormal close, so the next
+  // operation opens a fresh one instead of failing on a dead handle.
+  private _openDb(): Promise<Database> {
+    if (this._dbPromise === null) {
+      const promise = _openDbStore(this._dbName, this._storeName, this._version, () => {
+        if (this._dbPromise === promise) {
+          this._dbPromise = null;
+        }
+      }).catch((error) => {
+        // A failed open must not be cached, or every later call would rethrow.
+        if (this._dbPromise === promise) {
+          this._dbPromise = null;
+        }
+        throw error;
+      });
+      this._dbPromise = promise;
+    }
+    return this._dbPromise;
+  }
+
+  // Chrome does not always fire `terminated` when it force-closes a
+  // connection; the first symptom can be an InvalidStateError ("the database
+  // connection is closing") thrown by the next transaction. Treat that as a
+  // dead connection: drop it, reopen, and retry the operation once.
+  private async _withDb<T>(action: (db: Database) => Promise<T>): Promise<T> {
+    const promise = this._openDb();
+    const db = await promise;
+    try {
+      return await action(db);
+    } catch (error) {
+      // Checked by name: the error is a DOMException, which predates and does
+      // not inherit from Error.
+      const name = error !== null && typeof error === 'object' && 'name' in error && error.name;
+      if (name !== 'InvalidStateError') {
+        throw error;
+      }
+      if (this._dbPromise === promise) {
+        this._dbPromise = null;
+      }
+      return await action(await this._openDb());
+    }
+  }
 
   /**
    * Basic setter
@@ -89,7 +141,7 @@ export class IdbKeyVal {
    * @returns void
    */
   public async set<T>(key: IDBValidKey, value: T) {
-    return await _setValue<T>(this._db, this._storeName, key, value);
+    return await this._withDb((db) => _setValue<T>(db, this._storeName, key, value));
   }
   /**
    * Basic getter
@@ -100,7 +152,7 @@ export class IdbKeyVal {
    * await get<string>('exampleKey') -> 'exampleValue'
    */
   public async get<T>(key: IDBValidKey): Promise<T | null> {
-    return (await _getValue<T>(this._db, this._storeName, key)) ?? null;
+    return await this._withDb(async (db) => (await _getValue<T>(db, this._storeName, key)) ?? null);
   }
 
   /**
@@ -109,6 +161,6 @@ export class IdbKeyVal {
    * @returns void
    */
   public async remove(key: IDBValidKey) {
-    return await _removeValue(this._db, this._storeName, key);
+    return await this._withDb((db) => _removeValue(db, this._storeName, key));
   }
 }

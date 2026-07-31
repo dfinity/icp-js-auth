@@ -79,21 +79,21 @@ export class IdbStorage implements AuthClientStorage {
     this.#options = options ?? {};
   }
 
-  // Initializes a KeyVal on first request
-  private initializedDb: IdbKeyVal | undefined;
+  // Initializes a KeyVal on first request. The in-flight creation is shared
+  // across concurrent callers so only a single connection is ever opened.
+  #dbPromise: Promise<IdbKeyVal> | null = null;
   get _db(): Promise<IdbKeyVal> {
-    return new Promise((resolve, reject) => {
-      if (this.initializedDb) {
-        resolve(this.initializedDb);
-        return;
-      }
-      IdbKeyVal.create(this.#options)
-        .then((db) => {
-          this.initializedDb = db;
-          resolve(db);
-        })
-        .catch(reject);
-    });
+    if (this.#dbPromise === null) {
+      const promise = IdbKeyVal.create(this.#options).catch((error) => {
+        // A failed open must not be cached, or every later call would rethrow.
+        if (this.#dbPromise === promise) {
+          this.#dbPromise = null;
+        }
+        throw error;
+      });
+      this.#dbPromise = promise;
+    }
+    return this.#dbPromise;
   }
 
   public async get<T = string>(key: string): Promise<T | null> {

@@ -306,6 +306,11 @@ export class AuthClient {
     // rejection and propagates it when reached.
     void sessionKeyPromise.catch(() => undefined);
 
+    // Serialize with the constructor's session restore (#init is memoized, so
+    // this only waits for the one hydration pass): the writes at the end of
+    // this flow must never interleave with hydration's reads.
+    await this.#init();
+
     await this.#signer.openChannel();
 
     const { key, pendingKeySlot } = await sessionKeyPromise;
@@ -527,6 +532,9 @@ export class AuthClient {
    * @param options.returnTo - URL to navigate to after sign-out.
    */
   async signOut(options: { returnTo?: string } = {}): Promise<void> {
+    // Serialize with the constructor's session restore: hydration racing the
+    // deletion below could re-populate the identity from already-read state.
+    await this.#init();
     await deleteStorage(this.#storage);
 
     this.#identity = new AnonymousIdentity();
