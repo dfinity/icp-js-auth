@@ -306,12 +306,15 @@ export class AuthClient {
     // rejection and propagates it when reached.
     void sessionKeyPromise.catch(() => undefined);
 
+    // openChannel() must stay the first await: it can open a popup window, so
+    // it has to run in the same tick as the click that called signIn() or the
+    // browser may block the popup as not user-initiated.
+    await this.#signer.openChannel();
+
     // Serialize with the constructor's session restore (#init is memoized, so
     // this only waits for the one hydration pass): the writes at the end of
     // this flow must never interleave with hydration's reads.
     await this.#init();
-
-    await this.#signer.openChannel();
 
     const { key, pendingKeySlot } = await sessionKeyPromise;
 
