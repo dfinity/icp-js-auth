@@ -399,6 +399,24 @@ describe('AuthClient idle behavior', () => {
     expect(client.isAuthenticated()).toBe(false);
   });
 
+  it('does not reload when idle sign-out fails (would otherwise restore the session)', async () => {
+    const storage: AuthClientStorage = {
+      remove: vi.fn().mockRejectedValue(new Error('storage unavailable')),
+      get: vi.fn().mockResolvedValue(null),
+      set: vi.fn(),
+    };
+    const client = new AuthClient({ storage, idleOptions: { idleTimeout: 1000 } });
+    handleSignIn(FakeTransport.last());
+    await client.signIn();
+
+    await new Promise((r) => setTimeout(r, 1100));
+
+    // Teardown was attempted but failed; reloading now would `#hydrate` the
+    // still-valid session, so the callback must swallow the error and not reload.
+    expect(storage.remove).toHaveBeenCalled();
+    expect(window.location.reload).not.toHaveBeenCalled();
+  });
+
   it('should not reload the page if the default callback is disabled', async () => {
     const storage: AuthClientStorage = {
       remove: vi.fn(),
