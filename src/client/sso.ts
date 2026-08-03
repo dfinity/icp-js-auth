@@ -3,11 +3,8 @@
  * check that a domain actually publishes an SSO configuration.
  */
 
-const MAX_DOMAIN_LENGTH = 253;
-const MAX_LABEL_LENGTH = 63;
-// Dot-separated DNS labels of alphanumerics, hyphens allowed only inside a
-// label. Applied to the lowercased domain, so no uppercase range is needed.
-const DOMAIN_REGEX = /^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)*$/;
+// Matches the identity provider's own cap on the domain it will fetch.
+const MAX_AUTHORITY_LENGTH = 255;
 
 const WELL_KNOWN_PATH = '/.well-known/ii-openid-configuration';
 
@@ -40,57 +37,60 @@ function sleep(ms: number, signal?: AbortSignal): Promise<void> {
 }
 
 /**
- * `localhost` / `127.0.0.1`, optionally with a port. Loopback hosts serve the
- * configuration over plain `http` and are not DNS names, so they take a
- * different scheme and skip the DNS-format check.
+ * `localhost` / `127.0.0.1`, with or without a port. Loopback hosts serve the
+ * configuration over plain `http` and carry no dot.
  */
-function isLoopbackHost(domain: string): boolean {
-  let url: URL;
-  try {
-    // Parsed as a URL authority so an optional `:<port>` is split off for us.
-    url = new URL(`http://${domain}`);
-  } catch {
-    return false;
-  }
-  // A bare `host[:port]` carries nothing else; reject e.g. `localhost/x`.
-  if (url.pathname !== '/' || url.search !== '' || url.hash !== '') {
-    return false;
-  }
-  return url.hostname === 'localhost' || url.hostname === '127.0.0.1';
+function isLoopbackAuthority(authority: string): boolean {
+  const host = authority.split(':')[0];
+  return host === 'localhost' || host === '127.0.0.1';
 }
 
 /**
- * Trims and lowercases an SSO domain, and checks it is a bare DNS name — a
- * host, optionally `host:port`, and nothing else. The identity provider takes
- * the domain as the authority of the discovery URL it fetches, so a value
- * carrying a scheme, path, query, or fragment cannot resolve.
+ * Normalizes an SSO domain to the authority the identity provider will fetch
+ * the discovery document from: lowercased, IDNA-encoded, and carrying nothing
+ * but a host and an optional port.
+ *
+ * The domain is parsed as that authority, so `URL` does the work — a value
+ * carrying a scheme, userinfo, path, query, or fragment cannot be one, and an
+ * internationalized domain becomes the punycode form the identity provider
+ * resolves (`中国.cn` → `xn--fiqs8s.cn`).
  *
  * @param domain - The organization domain.
- * @returns The normalized domain.
- * @throws When `domain` is not a bare DNS name.
+ * @returns The normalized authority.
+ * @throws When `domain` is not a domain with an optional port.
  */
 export function normalizeSsoDomain(domain: string): string {
-  const normalized = domain.trim().toLowerCase();
-  if (normalized.length === 0) {
+  const trimmed = domain.trim();
+  if (trimmed.length === 0) {
     throw new Error('ssoDomain cannot be empty');
   }
-  if (normalized.length > MAX_DOMAIN_LENGTH) {
-    throw new Error(`ssoDomain exceeds ${MAX_DOMAIN_LENGTH} characters`);
+  let url: URL;
+  try {
+    url = new URL(`https://${trimmed}`);
+  } catch {
+    throw new Error(`ssoDomain is not a domain: ${trimmed}`);
   }
-  if (isLoopbackHost(normalized)) {
-    return normalized;
+  if (
+    url.username !== '' ||
+    url.password !== '' ||
+    url.search !== '' ||
+    url.hash !== '' ||
+    (url.pathname !== '' && url.pathname !== '/')
+  ) {
+    throw new Error(`ssoDomain must be a domain and optional port, nothing else: ${trimmed}`);
   }
-  if (!DOMAIN_REGEX.test(normalized)) {
-    throw new Error(`ssoDomain is not a domain name: ${normalized}`);
+  // `host` is the hostname plus a non-default port, which is the authority the
+  // identity provider reconstructs from the same input.
+  const authority = url.host;
+  if (authority.length > MAX_AUTHORITY_LENGTH) {
+    throw new Error(`ssoDomain exceeds ${MAX_AUTHORITY_LENGTH} characters`);
   }
-  const labels = normalized.split('.');
-  if (labels.length < 2) {
-    throw new Error(`ssoDomain must have at least two labels: ${normalized}`);
+  // An organization publishes its configuration under a domain name, so a bare
+  // hostname is a half-typed domain rather than something worth a request.
+  if (!authority.includes('.') && !isLoopbackAuthority(authority)) {
+    throw new Error(`ssoDomain is not a domain name: ${trimmed}`);
   }
-  if (labels.some((label) => label.length > MAX_LABEL_LENGTH)) {
-    throw new Error(`ssoDomain has a label over ${MAX_LABEL_LENGTH} characters`);
-  }
-  return normalized;
+  return authority;
 }
 
 /** Shape of `/.well-known/ii-openid-configuration` this check requires. */
@@ -146,7 +146,7 @@ async function probeSsoDomain(domain: string, signal?: AbortSignal): Promise<boo
     return false;
   }
 
-  const scheme = isLoopbackHost(normalized) ? 'http' : 'https';
+  const scheme = isLoopbackAuthority(normalized) ? 'http' : 'https';
   try {
     const response = await fetch(`${scheme}://${normalized}${WELL_KNOWN_PATH}`, {
       headers: { Accept: 'application/json' },

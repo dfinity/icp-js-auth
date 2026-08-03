@@ -57,6 +57,24 @@ describe('isValidSsoDomain', () => {
     );
   });
 
+  // The identity provider fetches the punycode authority, so an
+  // internationalized domain is usable as typed.
+  it('should encode an internationalized domain', async () => {
+    await expect(check('中国.cn')).resolves.toBe(true);
+    expect(fetchMock).toHaveBeenCalledWith(
+      `https://xn--fiqs8s.cn${WELL_KNOWN_PATH}`,
+      expect.anything(),
+    );
+  });
+
+  it('should keep a non-default port', async () => {
+    await expect(check('sso.dfinity.org:8443')).resolves.toBe(true);
+    expect(fetchMock).toHaveBeenCalledWith(
+      `https://sso.dfinity.org:8443${WELL_KNOWN_PATH}`,
+      expect.anything(),
+    );
+  });
+
   it('should use http for a loopback host', async () => {
     await expect(check('localhost:11107')).resolves.toBe(true);
     expect(fetchMock).toHaveBeenCalledWith(
@@ -67,13 +85,14 @@ describe('isValidSsoDomain', () => {
 
   it.each([
     ['an empty domain', ''],
-    ['a single label', 'org'],
-    ['a trailing dot', 'dfinity.org.'],
+    ['a bare hostname', 'dfinity'],
     ['a domain carrying a scheme', 'https://dfinity.org'],
     ['a domain carrying a path', 'dfinity.org/sso'],
-    ['a domain carrying a port that is not loopback', 'dfinity.org:8080'],
-    ['a label over 63 characters', `${'a'.repeat(64)}.org`],
-    ['a domain over 253 characters', `${'a'.repeat(250)}.org`],
+    ['a domain carrying a query', 'dfinity.org?x=1'],
+    ['a domain carrying a fragment', 'dfinity.org#x'],
+    ['a domain carrying userinfo', 'user:pw@dfinity.org'],
+    ['a domain carrying a space', 'dfinity .org'],
+    ['an authority over 255 characters', `${'a'.repeat(252)}.org`],
   ])('should reject %s without fetching', async (_case, domain) => {
     await expect(check(domain)).resolves.toBe(false);
     expect(fetchMock).not.toHaveBeenCalled();

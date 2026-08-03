@@ -260,9 +260,9 @@ describe('AuthClient', () => {
     expect(url.searchParams.has('sso')).toBe(false);
   });
 
-  it('should throw for an ssoDomain that is not a domain name', () => {
+  it('should throw for an ssoDomain that is not a bare domain', () => {
     expect(() => new AuthClient({ ssoDomain: 'https://dfinity.org' })).toThrow(
-      'ssoDomain is not a domain name',
+      'ssoDomain must be a domain and optional port',
     );
   });
 
@@ -818,9 +818,15 @@ describe('scopedKeys', () => {
     ]);
   });
 
-  it('should throw for an SSO domain that is not a domain name', () => {
+  it('should throw for an SSO domain that is not a bare domain', () => {
     expect(() => scopedKeys({ ssoDomain: 'dfinity.org/sso' })).toThrow(
-      'ssoDomain is not a domain name',
+      'ssoDomain must be a domain and optional port',
     );
+  });
+
+  it('should scope keys to the punycode form of an internationalized domain', () => {
+    expect(scopedKeys({ ssoDomain: '中国.cn', keys: ['email'] })).toEqual([
+      'sso:xn--fiqs8s.cn:email',
+    ]);
   });
 });
