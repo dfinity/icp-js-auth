@@ -5,6 +5,7 @@
 export * from './auth-client.js';
 export { type DBCreateOptions, IdbKeyVal } from './db.js';
 export * from './idle-manager.js';
+export { isValidSsoDomain } from './sso.js';
 export {
   type AuthClientStorage,
   IdbStorage,

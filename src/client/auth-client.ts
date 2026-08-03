@@ -12,6 +12,7 @@ import type { Principal } from '@icp-sdk/core/principal';
 import { Signer } from '@icp-sdk/signer';
 import { PostMessageTransport, UrlTransport } from '@icp-sdk/signer/web';
 import { IdleManager, type IdleManagerOptions } from './idle-manager.js';
+import { normalizeSsoDomain } from './sso.js';
 import {
   type AuthClientStorage,
   IdbStorage,
@@ -65,10 +66,15 @@ export const OPENID_PROVIDER_URLS = {
 
 const DEFAULT_OPENID_SCOPE_KEYS = ['name', 'email', 'verified_email'] as const;
 
+// `verified_email` is absent: the identity provider cannot certify it for an
+// organization SSO, and rejects a request for it.
+const DEFAULT_SSO_SCOPE_KEYS = ['name', 'email'] as const;
+
 /**
- * Options for creating an {@link AuthClient}.
+ * Options for creating an {@link AuthClient}, other than the one-click sign-in
+ * entry point. See {@link AuthClientCreateOptions}.
  */
-export interface AuthClientCreateOptions {
+export interface AuthClientBaseOptions {
   /**
    * An identity to authenticate via delegation.
    */
@@ -135,14 +141,45 @@ export interface AuthClientCreateOptions {
    * @see https://github.com/dfinity/wg-identity-authentication/blob/main/topics/icrc_167_browser_url_transport.md
    */
   transport?: 'window' | 'redirect';
-
-  /**
-   * OpenID provider for one-click sign-in. When set, the identity provider
-   * URL includes an `openid` search param so the user authenticates via
-   * the chosen provider (e.g. Google) instead of seeing Internet Identity directly.
-   */
-  openIdProvider?: OpenIdProvider;
 }
+
+/**
+ * Options for creating an {@link AuthClient}.
+ *
+ * At most one one-click sign-in entry point may be set: `openIdProvider` for a
+ * hardcoded provider, or `ssoDomain` for an organization's own SSO. They select
+ * different providers for the same sign-in, so setting both has no meaning —
+ * the identity provider rejects such a request, and the constructor throws
+ * before it is made.
+ */
+export type AuthClientCreateOptions = AuthClientBaseOptions &
+  (
+    | {
+        /**
+         * OpenID provider for one-click sign-in. When set, the identity provider
+         * URL includes an `openid` search param so the user authenticates via
+         * the chosen provider (e.g. Google) instead of seeing Internet Identity directly.
+         */
+        openIdProvider?: OpenIdProvider;
+        ssoDomain?: never;
+      }
+    | {
+        openIdProvider?: never;
+        /**
+         * Organization domain for one-click SSO sign-in, e.g. `'dfinity.org'`.
+         * When set, the identity provider URL includes an `sso` search param so
+         * the user authenticates via that organization's own provider, which the
+         * identity provider resolves from the domain's
+         * `/.well-known/ii-openid-configuration`.
+         *
+         * The domain is normalized to lowercase; a value that is not a bare
+         * domain name (no scheme, path, query, or fragment) throws. Use
+         * {@link isValidSsoDomain} to check a domain the user typed before
+         * constructing the client.
+         */
+        ssoDomain?: string;
+      }
+  );
 
 export interface IdleOptions extends IdleManagerOptions {
   /**
@@ -208,8 +245,23 @@ export class AuthClient {
     const identityProviderUrl = new URL(
       options.identityProvider?.toString() || IDENTITY_PROVIDER_DEFAULT,
     );
-    if (options.openIdProvider) {
+    if (options.openIdProvider !== undefined && options.ssoDomain !== undefined) {
+      throw new Error('openIdProvider and ssoDomain are mutually exclusive');
+    }
+    if (options.openIdProvider !== undefined) {
       identityProviderUrl.searchParams.set('openid', OPENID_PROVIDER_URLS[options.openIdProvider]);
+    }
+    if (options.ssoDomain !== undefined) {
+      identityProviderUrl.searchParams.set('sso', normalizeSsoDomain(options.ssoDomain));
+      // The SSO ceremony starts before a delegation is requested, so the
+      // identity provider reads the derivation origin from the URL to resolve
+      // the client for this app — the channel carries it too late.
+      if (options.derivationOrigin !== undefined) {
+        identityProviderUrl.searchParams.set(
+          'derivationOrigin',
+          options.derivationOrigin.toString(),
+        );
+      }
     }
 
     const transport =
@@ -919,10 +971,38 @@ export function scopedKeys<
 >(params: {
   openIdProvider: P;
   keys?: readonly K[];
-}): `openid:${(typeof OPENID_PROVIDER_URLS)[P]}:${K}`[] {
-  const provider = OPENID_PROVIDER_URLS[params.openIdProvider];
+}): `openid:${(typeof OPENID_PROVIDER_URLS)[P]}:${K}`[];
+/**
+ * Scopes attribute keys to an organization's SSO.
+ *
+ * When using one-click SSO sign-in, attributes can be scoped to the same
+ * organization so the user grants access in a single step without an additional
+ * prompt.
+ *
+ * @param params.ssoDomain - The organization domain the keys should be scoped to.
+ * @param params.keys - The attribute keys to scope. Defaults to `['name', 'email']`;
+ *   `verified_email` is not available for an organization SSO.
+ * @returns The scoped attribute keys as `sso:<domain>:<key>`.
+ *
+ * @example
+ * scopedKeys({ ssoDomain: 'dfinity.org', keys: ['email'] });
+ * // ['sso:dfinity.org:email']
+ */
+export function scopedKeys<
+  D extends string,
+  K extends string = (typeof DEFAULT_SSO_SCOPE_KEYS)[number],
+>(params: { ssoDomain: D; keys?: readonly K[] }): `sso:${Lowercase<D>}:${K}`[];
+export function scopedKeys(params: {
+  openIdProvider?: OpenIdProvider;
+  ssoDomain?: string;
+  keys?: readonly string[];
+}): string[] {
+  if (params.ssoDomain !== undefined) {
+    const domain = normalizeSsoDomain(params.ssoDomain);
+    const keys = params.keys ?? DEFAULT_SSO_SCOPE_KEYS;
+    return keys.map((key) => `sso:${domain}:${key}`);
+  }
+  const provider = OPENID_PROVIDER_URLS[params.openIdProvider as OpenIdProvider];
   const keys = params.keys ?? DEFAULT_OPENID_SCOPE_KEYS;
-  return keys.map(
-    (key) => `openid:${provider}:${key}` as `openid:${(typeof OPENID_PROVIDER_URLS)[P]}:${K}`,
-  );
+  return keys.map((key) => `openid:${provider}:${key}`);
 }
