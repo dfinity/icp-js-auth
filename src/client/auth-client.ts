@@ -145,10 +145,7 @@ export interface AuthClientBaseOptions {
  * Options for creating an {@link AuthClient}.
  *
  * At most one one-click sign-in entry point may be set: `openIdProvider` for a
- * hardcoded provider, or `ssoDomain` for an organization's own SSO. They select
- * different providers for the same sign-in, so setting both has no meaning —
- * the identity provider rejects such a request, and the constructor throws
- * before it is made.
+ * hardcoded provider, or `ssoDomain` for an organization's own SSO.
  */
 export type AuthClientCreateOptions = AuthClientBaseOptions &
   (
@@ -166,14 +163,10 @@ export type AuthClientCreateOptions = AuthClientBaseOptions &
         /**
          * Organization domain for one-click SSO sign-in, e.g. `'dfinity.org'`.
          * When set, the identity provider URL includes an `sso` search param so
-         * the user authenticates via that organization's own provider, which the
-         * identity provider resolves from the domain's
-         * `/.well-known/ii-openid-configuration`.
+         * the user authenticates via that organization's own provider.
          *
-         * The domain is normalized to lowercase; a value that is not a bare
-         * domain name (no scheme, path, query, or fragment) throws. Use
-         * {@link isValidSsoDomain} to check a domain the user typed before
-         * constructing the client.
+         * A value that is not a domain with an optional port throws. Use
+         * {@link isValidSsoDomain} to check a domain the user typed.
          */
         ssoDomain?: string;
       }
@@ -252,8 +245,7 @@ export class AuthClient {
     if (options.ssoDomain !== undefined) {
       identityProviderUrl.searchParams.set('sso', normalizeSsoDomain(options.ssoDomain));
       // The SSO ceremony starts before a delegation is requested, so the
-      // identity provider reads the derivation origin from the URL to resolve
-      // the client for this app — the channel carries it too late.
+      // channel carries the derivation origin too late to resolve the client.
       if (options.derivationOrigin !== undefined) {
         identityProviderUrl.searchParams.set(
           'derivationOrigin',
@@ -974,8 +966,7 @@ export function scopedKeys<
  * Scopes attribute keys to an organization's SSO.
  *
  * When using one-click SSO sign-in, attributes can be scoped to the same
- * organization so the user grants access in a single step without an additional
- * prompt.
+ * organization so the user grants access in a single step.
  *
  * @param params.ssoDomain - The organization domain the keys should be scoped to.
  * @param params.keys - The attribute keys to scope. Defaults to `['name', 'email']`;

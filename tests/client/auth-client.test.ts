@@ -277,8 +277,6 @@ describe('AuthClient', () => {
     ).toThrow('mutually exclusive');
   });
 
-  // The SSO ceremony starts before the delegation request that carries the
-  // derivation origin, so it has to ride the identity provider URL instead.
   it('should pass derivationOrigin as a search param alongside sso', () => {
     new AuthClient({ ssoDomain: 'dfinity.org', derivationOrigin: 'https://app.example.com' });
     const url = new URL(FakeTransport.last().options.url ?? '');
@@ -797,8 +795,6 @@ describe('scopedKeys', () => {
     ]);
   });
 
-  // `verified_email` is omitted: the identity provider cannot certify it for an
-  // organization SSO.
   it('should scope default keys to an SSO domain', () => {
     expect(scopedKeys({ ssoDomain: 'dfinity.org' })).toEqual([
       'sso:dfinity.org:name',

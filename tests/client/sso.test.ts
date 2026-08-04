@@ -3,8 +3,6 @@ import { isValidSsoDomain } from '../../src/client/sso.ts';
 
 const WELL_KNOWN_PATH = '/.well-known/ii-openid-configuration';
 
-// The check floors its own duration, so every case runs on fake timers and the
-// floor is advanced explicitly.
 const MIN_DURATION_MS = 750;
 
 function jsonResponse(body: unknown, init?: ResponseInit): Response {
@@ -20,7 +18,7 @@ const validConfiguration = {
   openid_configuration: 'https://idp.dfinity.org/.well-known/openid-configuration',
 };
 
-/** Resolves the check with the floor advanced, so a test never waits in real time. */
+/** Resolves the check with its duration floor advanced, so no test waits in real time. */
 async function check(domain: string, signal?: AbortSignal): Promise<boolean> {
   const pending = isValidSsoDomain(domain, signal);
   await vi.advanceTimersByTimeAsync(MIN_DURATION_MS);
@@ -57,8 +55,6 @@ describe('isValidSsoDomain', () => {
     );
   });
 
-  // The identity provider fetches the punycode authority, so an
-  // internationalized domain is usable as typed.
   it('should encode an internationalized domain', async () => {
     await expect(check('中国.cn')).resolves.toBe(true);
     expect(fetchMock).toHaveBeenCalledWith(
@@ -110,7 +106,6 @@ describe('isValidSsoDomain', () => {
   });
 
   it('should reject a domain the request cannot reach', async () => {
-    // A CORS block, a DNS failure, and an offline browser are one rejection.
     fetchMock.mockRejectedValue(new TypeError('Failed to fetch'));
     await expect(check('dfinity.org')).resolves.toBe(false);
   });
