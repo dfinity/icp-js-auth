@@ -108,4 +108,4 @@ scopedKeys({ ssoDomain: 'dfinity.org', keys: ['email'] });
 // ['sso:dfinity.org:email']
 ```
 
-`verified_email` is available under `openid:` but not under `sso:`, where the identity provider cannot certify it.
+`verified_email` is available under `openid:` but not under `sso:`. "Verified" means Internet Identity established that the user actually has access to the address — either by verifying it itself, or through a claim scheme it has hardcoded for a specific provider, such as Google, Apple, or Microsoft. It has no basis to make that claim about an address asserted by an arbitrary organization's SSO server, so the attribute is not offered under `sso:` at all.
