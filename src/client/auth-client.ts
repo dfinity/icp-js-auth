@@ -66,8 +66,6 @@ export const OPENID_PROVIDER_URLS = {
 
 const DEFAULT_OPENID_SCOPE_KEYS = ['name', 'email', 'verified_email'] as const;
 
-// `verified_email` is absent: the identity provider cannot certify it for an
-// organization SSO, and rejects a request for it.
 const DEFAULT_SSO_SCOPE_KEYS = ['name', 'email'] as const;
 
 /**
