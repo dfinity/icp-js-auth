@@ -56,9 +56,9 @@ describe('isValidSsoDomain', () => {
   });
 
   it('should encode an internationalized domain', async () => {
-    await expect(check('zürich.ch')).resolves.toBe(true);
+    await expect(check('zürich.example')).resolves.toBe(true);
     expect(fetchMock).toHaveBeenCalledWith(
-      `https://xn--zrich-kva.ch${WELL_KNOWN_PATH}`,
+      `https://xn--zrich-kva.example${WELL_KNOWN_PATH}`,
       expect.anything(),
     );
   });
