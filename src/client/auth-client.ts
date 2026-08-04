@@ -306,7 +306,14 @@ export class AuthClient {
     // rejection and propagates it when reached.
     void sessionKeyPromise.catch(() => undefined);
 
+    // openChannel() must stay the first await: it can open a popup window,
+    // which the browser may block unless it happens in the same tick as the
+    // click that called signIn().
     await this.#signer.openChannel();
+
+    // Wait for the constructor's session restore, so this flow's storage
+    // writes cannot interleave with hydration's reads.
+    await this.#init();
 
     const { key, pendingKeySlot } = await sessionKeyPromise;
 
@@ -527,6 +534,9 @@ export class AuthClient {
    * @param options.returnTo - URL to navigate to after sign-out.
    */
   async signOut(options: { returnTo?: string } = {}): Promise<void> {
+    // Wait for the constructor's session restore: hydration racing the
+    // deletion below could re-populate the identity from already-read state.
+    await this.#init();
     await deleteStorage(this.#storage);
 
     this.#identity = new AnonymousIdentity();
