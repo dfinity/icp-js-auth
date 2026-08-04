@@ -821,8 +821,8 @@ describe('scopedKeys', () => {
   });
 
   it('should scope keys to the punycode form of an internationalized domain', () => {
-    expect(scopedKeys({ ssoDomain: '中国.cn', keys: ['email'] })).toEqual([
-      'sso:xn--fiqs8s.cn:email',
+    expect(scopedKeys({ ssoDomain: 'zürich.ch', keys: ['email'] })).toEqual([
+      'sso:xn--zrich-kva.ch:email',
     ]);
   });
 });

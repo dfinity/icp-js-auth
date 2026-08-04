@@ -56,9 +56,9 @@ describe('isValidSsoDomain', () => {
   });
 
   it('should encode an internationalized domain', async () => {
-    await expect(check('中国.cn')).resolves.toBe(true);
+    await expect(check('zürich.ch')).resolves.toBe(true);
     expect(fetchMock).toHaveBeenCalledWith(
-      `https://xn--fiqs8s.cn${WELL_KNOWN_PATH}`,
+      `https://xn--zrich-kva.ch${WELL_KNOWN_PATH}`,
       expect.anything(),
     );
   });

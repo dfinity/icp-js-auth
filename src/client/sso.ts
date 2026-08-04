@@ -32,7 +32,7 @@ function isLoopbackAuthority(authority: string): boolean {
 
 /**
  * Normalizes an SSO domain to the authority the identity provider fetches the
- * discovery document from, e.g. `中国.cn` to `xn--fiqs8s.cn`.
+ * discovery document from: lowercased, IDNA-encoded, host and optional port.
  *
  * @param domain - The organization domain.
  * @returns The normalized authority.
