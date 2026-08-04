@@ -49,16 +49,12 @@ export function normalizeSsoDomain(domain: string): string {
   } catch {
     throw new Error(`ssoDomain is not a domain: ${trimmed}`);
   }
-  if (
-    url.username !== '' ||
-    url.password !== '' ||
-    url.search !== '' ||
-    url.hash !== '' ||
-    (url.pathname !== '' && url.pathname !== '/')
-  ) {
+  const authority = url.host;
+  // Rebuilding from the host and port alone has to reproduce what was parsed,
+  // so anything else the domain carried shows up as a difference.
+  if (new URL(`https://${authority}`).href !== url.href) {
     throw new Error(`ssoDomain must be a domain and optional port, nothing else: ${trimmed}`);
   }
-  const authority = url.host;
   if (authority.length > MAX_AUTHORITY_LENGTH) {
     throw new Error(`ssoDomain exceeds ${MAX_AUTHORITY_LENGTH} characters`);
   }
