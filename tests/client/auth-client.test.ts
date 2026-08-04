@@ -820,6 +820,18 @@ describe('scopedKeys', () => {
     );
   });
 
+  it('should throw when neither entry point is given', () => {
+    // @ts-expect-error one of the two entry points is required
+    expect(() => scopedKeys({})).toThrow('requires either openIdProvider or ssoDomain');
+  });
+
+  it('should throw when both entry points are given', () => {
+    // @ts-expect-error the two entry points are mutually exclusive
+    expect(() => scopedKeys({ openIdProvider: 'google', ssoDomain: 'dfinity.org' })).toThrow(
+      'mutually exclusive',
+    );
+  });
+
   it('should scope keys to the punycode form of an internationalized domain', () => {
     expect(scopedKeys({ ssoDomain: 'zürich.example', keys: ['email'] })).toEqual([
       'sso:xn--zrich-kva.example:email',

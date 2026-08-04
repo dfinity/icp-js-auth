@@ -960,6 +960,7 @@ export function scopedKeys<
   K extends string = (typeof DEFAULT_OPENID_SCOPE_KEYS)[number],
 >(params: {
   openIdProvider: P;
+  ssoDomain?: never;
   keys?: readonly K[];
 }): `openid:${(typeof OPENID_PROVIDER_URLS)[P]}:${K}`[];
 /**
@@ -980,18 +981,28 @@ export function scopedKeys<
 export function scopedKeys<
   D extends string,
   K extends string = (typeof DEFAULT_SSO_SCOPE_KEYS)[number],
->(params: { ssoDomain: D; keys?: readonly K[] }): `sso:${Lowercase<D>}:${K}`[];
+>(params: {
+  ssoDomain: D;
+  openIdProvider?: never;
+  keys?: readonly K[];
+}): `sso:${Lowercase<D>}:${K}`[];
 export function scopedKeys(params: {
   openIdProvider?: OpenIdProvider;
   ssoDomain?: string;
   keys?: readonly string[];
 }): string[] {
+  if (params.openIdProvider !== undefined && params.ssoDomain !== undefined) {
+    throw new Error('openIdProvider and ssoDomain are mutually exclusive');
+  }
   if (params.ssoDomain !== undefined) {
     const domain = normalizeSsoDomain(params.ssoDomain);
     const keys = params.keys ?? DEFAULT_SSO_SCOPE_KEYS;
     return keys.map((key) => `sso:${domain}:${key}`);
   }
-  const provider = OPENID_PROVIDER_URLS[params.openIdProvider as OpenIdProvider];
+  if (params.openIdProvider === undefined) {
+    throw new Error('scopedKeys requires either openIdProvider or ssoDomain');
+  }
+  const provider = OPENID_PROVIDER_URLS[params.openIdProvider];
   const keys = params.keys ?? DEFAULT_OPENID_SCOPE_KEYS;
   return keys.map((key) => `openid:${provider}:${key}`);
 }

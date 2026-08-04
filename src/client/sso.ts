@@ -120,7 +120,9 @@ async function probeSsoDomain(domain: string, signal?: AbortSignal): Promise<boo
     if (!response.ok) {
       return false;
     }
-    return publishesSsoConfiguration(await response.json());
+    const valid = publishesSsoConfiguration(await response.json());
+    signal?.throwIfAborted();
+    return valid;
   } catch (error) {
     if (signal?.aborted === true) {
       throw error;
