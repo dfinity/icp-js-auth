@@ -69,6 +69,32 @@ const authClient = new AuthClient({
 });
 ```
 
+### Sharing One Session Across Origins
+
+Serve an application from several origins — `a.example.com`, `b.example.com` — with a single sign-in and a single principal. One origin holds the session and serves it to the others; nothing is stored on them, and the session never travels in an HTTP header.
+
+Deploy a page on the origin that holds it:
+
+```typescript
+import { serveSharedSession } from '@icp-sdk/auth/shared-session';
+
+serveSharedSession({
+  derivationOrigin: 'https://example.com',
+  canisterId: 'rdmx6-jaaaa-aaaaa-aaadq-cai',
+});
+```
+
+Then point the other origins at that page:
+
+```typescript
+const authClient = new AuthClient({
+  sharedSessionHub: { url: 'https://example.com/shared-session.html' },
+  derivationOrigin: 'https://example.com',
+});
+```
+
+Which origins may read the session is decided by the derivation origin's `.well-known/ii-alternative-origins` record — the same record Internet Identity reads when deriving their principal. See the [shared session guide](https://js.icp.build/auth/shared-session) for deployment requirements and browser behaviour.
+
 ### Requesting Identity Attributes
 
 Internet Identity can provide signed identity attributes (e.g., email) alongside authentication. Your backend canister initiates the flow by issuing a nonce tied to the action — this way, even if an attribute bundle is intercepted, it can't be replayed or used for a different action.

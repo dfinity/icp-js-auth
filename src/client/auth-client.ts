@@ -11,6 +11,7 @@ import {
 import type { Principal } from '@icp-sdk/core/principal';
 import { Signer } from '@icp-sdk/signer';
 import { PostMessageTransport, UrlTransport } from '@icp-sdk/signer/web';
+import { type SharedSessionHubOptions, SharedSessionStorage } from '../shared-session/storage.js';
 import { IdleManager, type IdleManagerOptions } from './idle-manager.js';
 import {
   type AuthClientStorage,
@@ -66,19 +67,14 @@ export const OPENID_PROVIDER_URLS = {
 const DEFAULT_OPENID_SCOPE_KEYS = ['name', 'email', 'verified_email'] as const;
 
 /**
- * Options for creating an {@link AuthClient}.
+ * Options for creating an {@link AuthClient}, other than those constrained by
+ * {@link AuthClientCreateOptions}.
  */
-export interface AuthClientCreateOptions {
+export interface AuthClientCreateBaseOptions {
   /**
    * An identity to authenticate via delegation.
    */
   identity?: SignIdentity | PartialIdentity;
-
-  /**
-   * Persistent storage backend. Defaults to IndexedDB.
-   * @default IdbStorage
-   */
-  storage?: AuthClientStorage;
 
   /**
    * Type of session key to generate on each sign-in.
@@ -99,12 +95,6 @@ export interface AuthClientCreateOptions {
    * @default "https://id.ai/authorize"
    */
   identityProvider?: string | URL;
-
-  /**
-   * Derivation origin for the identity provider.
-   * @see https://github.com/dfinity/internet-identity/blob/main/docs/internet-identity-spec.adoc
-   */
-  derivationOrigin?: string | URL;
 
   /**
    * Window features string for the authentication popup.
@@ -143,6 +133,66 @@ export interface AuthClientCreateOptions {
    */
   openIdProvider?: OpenIdProvider;
 }
+
+/**
+ * Options for creating an {@link AuthClient}.
+ *
+ * `sharedSessionHub` requires `derivationOrigin` and excludes `storage`. Sharing
+ * a session without a shared derivation origin would give each origin a
+ * different principal from the same key — a shared store holding an identity
+ * nobody else can use — so the two belong together, and the hub replaces the
+ * local store rather than sitting alongside it.
+ */
+export type AuthClientCreateOptions = AuthClientCreateBaseOptions &
+  (
+    | {
+        /**
+         * Serves the session from another origin, so every origin authorized by
+         * the derivation origin shares one sign-in.
+         *
+         * Point it at a page that calls `serveSharedSession` from
+         * `@icp-sdk/auth/shared-session`. That page's origin holds the session;
+         * this origin stores nothing. Which origins may read it is decided by the
+         * derivation origin's `/.well-known/ii-alternative-origins` record, the
+         * same record Internet Identity checks when deriving the principal.
+         *
+         * @see {@link SharedSessionStorage}
+         * @example
+         * ```ts
+         * new AuthClient({
+         *   sharedSessionHub: { url: 'https://auth.example.com/hub.html' },
+         *   derivationOrigin: 'https://auth.example.com',
+         * });
+         * ```
+         */
+        sharedSessionHub: SharedSessionHubOptions;
+
+        /**
+         * Derivation origin for the identity provider. Required alongside
+         * `sharedSessionHub`, and must match the hub's own configuration.
+         * @see https://github.com/dfinity/internet-identity/blob/main/docs/internet-identity-spec.adoc
+         */
+        derivationOrigin: string | URL;
+
+        /** Not available with `sharedSessionHub`, which supplies the store. */
+        storage?: never;
+      }
+    | {
+        sharedSessionHub?: undefined;
+
+        /**
+         * Derivation origin for the identity provider.
+         * @see https://github.com/dfinity/internet-identity/blob/main/docs/internet-identity-spec.adoc
+         */
+        derivationOrigin?: string | URL;
+
+        /**
+         * Persistent storage backend. Defaults to IndexedDB.
+         * @default IdbStorage
+         */
+        storage?: AuthClientStorage;
+      }
+  );
 
 export interface IdleOptions extends IdleManagerOptions {
   /**
@@ -203,7 +253,7 @@ export class AuthClient {
 
   constructor(options: AuthClientCreateOptions = {}) {
     this.#options = options;
-    this.#storage = options.storage ?? new IdbStorage();
+    this.#storage = createStorage(options);
 
     const identityProviderUrl = new URL(
       options.identityProvider?.toString() || IDENTITY_PROVIDER_DEFAULT,
@@ -594,17 +644,48 @@ export class AuthClient {
     return this.#initPromise;
   }
 
+  // Runs #restore, absorbing a failure so the client stays usable.
+  async #hydrate(): Promise<void> {
+    try {
+      await this.#restore();
+    } catch (error) {
+      // A store on another origin can be unreachable, which IndexedDB
+      // effectively never was. The constructor starts hydration without
+      // awaiting it, so rejecting here would surface as an unhandled rejection
+      // and leave every getIdentity() rejecting for the page's lifetime.
+      // Staying anonymous is recoverable: a signIn() still works.
+      //
+      // The cached expiration is deliberately left alone — a hub that failed to
+      // answer has not told us the session is gone, and clearing it would sign
+      // the user out of this origin on a transient error.
+      console.error(`Failed to restore the session: ${String(error)}`);
+    }
+  }
+
   // Attempts to restore a previous session (key + delegation chain) from
   // storage. If found and still valid, sets #identity and #chain so the
   // client is ready to use without a new signIn().
-  async #hydrate(): Promise<void> {
+  async #restore(): Promise<void> {
     const key =
       this.#options.identity ??
       (await restoreKey(this.#storage, this.#options.keyType ?? ECDSA_KEY_LABEL));
-    if (!key) return;
+    if (!key) {
+      clearCachedExpiration();
+      return;
+    }
 
     const chain = await restoreChain(this.#storage);
-    if (!chain) return;
+    if (!chain) {
+      // A shared session can be signed out from another origin, which cannot
+      // reach this origin's cached expiration. Clearing it here stops
+      // isAuthenticated() reporting a session that is no longer in the store.
+      clearCachedExpiration();
+      return;
+    }
+
+    // This origin may be restoring a session it never signed in for, in which
+    // case it has no cached expiration of its own yet.
+    cacheExpiration(chain);
 
     this.#chain = chain;
     if ('toDer' in key) {
@@ -632,6 +713,30 @@ export class AuthClient {
       });
     }
   }
+}
+
+/**
+ * Resolves the storage backend for a set of create options.
+ *
+ * `sharedSessionHub` wins over `storage` at runtime. The types make the two
+ * mutually exclusive, so reaching the warning means the call came from
+ * JavaScript, where silently reading a store the session was never written to
+ * would look like the user is signed out.
+ * @param options - The create options.
+ */
+function createStorage(options: AuthClientCreateOptions): AuthClientStorage {
+  if (options.sharedSessionHub === undefined) {
+    return options.storage ?? new IdbStorage();
+  }
+  if (options.storage !== undefined) {
+    console.warn(
+      '`storage` is ignored when `sharedSessionHub` is set: the shared session is held by the hub.',
+    );
+  }
+  return new SharedSessionStorage({
+    hub: options.sharedSessionHub,
+    derivationOrigin: options.derivationOrigin,
+  });
 }
 
 /**
@@ -826,7 +931,19 @@ function serializeKey(key: SignIdentity | PartialIdentity): StoredKey {
  */
 async function persistChain(storage: AuthClientStorage, chain: DelegationChain): Promise<void> {
   await storage.set(KEY_STORAGE_DELEGATION, JSON.stringify(chain.toJSON()));
+  cacheExpiration(chain);
+}
 
+/**
+ * Caches a chain's earliest expiration in localStorage, so
+ * {@link AuthClient.isAuthenticated} can answer synchronously.
+ *
+ * The cache is per-origin while a shared session is not, so it is written on
+ * restore as well as on sign-in: an origin that shares a session never signed in
+ * itself and would otherwise report no session at all.
+ * @param chain - The delegation chain being made current.
+ */
+function cacheExpiration(chain: DelegationChain): void {
   let earliest: bigint | null = null;
   for (const { delegation } of chain.delegations) {
     if (earliest === null || delegation.expiration < earliest) {
@@ -869,6 +986,11 @@ async function deleteStorage(storage: AuthClientStorage): Promise<void> {
   await storage.remove(KEY_STORAGE_KEY);
   await storage.remove(KEY_STORAGE_DELEGATION);
   await storage.remove(KEY_VECTOR);
+  clearCachedExpiration();
+}
+
+/** Drops the cached expiration, so {@link AuthClient.isAuthenticated} reports no session. */
+function clearCachedExpiration(): void {
   localStorage.removeItem(KEY_STORAGE_EXPIRATION);
 }
 

@@ -2,6 +2,7 @@
  * @module api/client
  */
 
+export * from '../shared-session/storage.js';
 export * from './auth-client.js';
 export { type DBCreateOptions, IdbKeyVal } from './db.js';
 export * from './idle-manager.js';

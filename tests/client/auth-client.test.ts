@@ -738,3 +738,107 @@ describe('AuthClient signIn + requestAttributes', () => {
     expect(identity.getPrincipal().isAnonymous()).toBe(false);
   });
 });
+
+describe('AuthClient shared session', () => {
+  // Not exported by the module under test; asserted through isAuthenticated().
+  const EXPIRATION_KEY = 'ic-delegation_expiration';
+
+  const fakeStore = (entries: Record<string, string> = {}): AuthClientStorage => ({
+    get: vi.fn(async (key) => entries[key] ?? null),
+    set: vi.fn(async (key, value) => {
+      entries[key] = value as string;
+    }),
+    remove: vi.fn(async (key) => {
+      delete entries[key];
+    }),
+  });
+
+  const futureExpirationNs = () =>
+    ((BigInt(Date.now()) + BigInt(3_600_000)) * BigInt(1_000_000)).toString();
+
+  it('caches the expiration when restoring a session this origin never signed in for', async () => {
+    const key = Ed25519KeyIdentity.generate();
+    const chain = await createTestDelegation(key);
+    const storage = fakeStore({
+      [KEY_STORAGE_KEY]: JSON.stringify(key.toJSON()),
+      [KEY_STORAGE_DELEGATION]: JSON.stringify(chain.toJSON()),
+    });
+
+    const client = new AuthClient({ storage, idleOptions: { disableIdle: true } });
+    // Nothing cached yet: this origin has no sign-in of its own to have written it.
+    expect(client.isAuthenticated()).toBe(false);
+
+    const identity = await client.getIdentity();
+
+    expect(identity.getPrincipal().isAnonymous()).toBe(false);
+    expect(client.isAuthenticated()).toBe(true);
+  });
+
+  it('clears a stale expiration when the session is no longer in the store', async () => {
+    // Another origin signed out, which cannot reach this origin's localStorage.
+    localStorage.setItem(EXPIRATION_KEY, futureExpirationNs());
+    const client = new AuthClient({ storage: fakeStore(), idleOptions: { disableIdle: true } });
+    expect(client.isAuthenticated()).toBe(true);
+
+    await client.getIdentity();
+
+    expect(client.isAuthenticated()).toBe(false);
+  });
+
+  it('stays anonymous and keeps the cached expiration when the store is unreachable', async () => {
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {});
+    localStorage.setItem(EXPIRATION_KEY, futureExpirationNs());
+    const storage: AuthClientStorage = {
+      get: vi.fn().mockRejectedValue(new Error('hub unreachable')),
+      set: vi.fn(),
+      remove: vi.fn(),
+    };
+
+    const client = new AuthClient({ storage, idleOptions: { disableIdle: true } });
+    const identity = await client.getIdentity();
+
+    expect(identity.getPrincipal().isAnonymous()).toBe(true);
+    expect(error.mock.calls[0][0]).toContain('Failed to restore the session');
+    // A hub that failed to answer has not said the session is gone.
+    expect(client.isAuthenticated()).toBe(true);
+  });
+
+  it('stores the session in the hub when sharedSessionHub is set', async () => {
+    // Long enough that the frame is still attached when the assertions run: a
+    // failed handshake removes it.
+    const client = new AuthClient({
+      sharedSessionHub: { url: 'https://auth.example.com/hub.html', timeout: 300 },
+      derivationOrigin: 'https://auth.example.com',
+      idleOptions: { disableIdle: true },
+    });
+
+    const frame = await vi.waitFor(() => {
+      const found = document.querySelector('iframe');
+      expect(found).not.toBeNull();
+      return found as HTMLIFrameElement;
+    });
+    expect(frame.src).toBe('https://auth.example.com/hub.html');
+    expect(frame.hidden).toBe(true);
+
+    // The hub never answers here, so hydration falls back to anonymous.
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    const identity = await client.getIdentity();
+    expect(identity.getPrincipal().isAnonymous()).toBe(true);
+  });
+
+  it('ignores a storage passed alongside sharedSessionHub', () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const storage = fakeStore();
+
+    new AuthClient({
+      sharedSessionHub: { url: 'https://auth.example.com/hub.html', timeout: 30 },
+      derivationOrigin: 'https://auth.example.com',
+      // Only reachable from JavaScript: the types make these mutually exclusive.
+      storage,
+      idleOptions: { disableIdle: true },
+    } as never);
+
+    expect(warn.mock.calls[0][0]).toContain('`storage` is ignored');
+    expect(storage.get).not.toHaveBeenCalled();
+  });
+});

@@ -4,7 +4,8 @@
     "items": [
       { "label": "Overview", "link": "/" },
       { "label": "Installation", "link": "/installation" },
-      { "label": "Quick Start", "link": "/quick-start" }
+      { "label": "Quick Start", "link": "/quick-start" },
+      { "label": "Shared Session", "link": "/shared-session" }
     ]
   },
   {
@@ -16,6 +17,14 @@
         "autogenerate": {
           "collapsed": true,
           "directory": "api/client/"
+        }
+      },
+      {
+        "label": "Shared Session",
+        "collapsed": true,
+        "autogenerate": {
+          "collapsed": true,
+          "directory": "api/shared-session/"
         }
       }
     ]
