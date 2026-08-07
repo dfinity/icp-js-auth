@@ -21,15 +21,6 @@ export interface SharedSessionStorageOptions {
   url: string | URL;
 
   /**
-   * Derivation origin the shared session belongs to.
-   *
-   * The hub authorizes readers from this origin's
-   * `/.well-known/ii-alternative-origins` record, and refuses a client whose
-   * derivation origin differs from the one it was configured with.
-   */
-  derivationOrigin: string | URL;
-
-  /**
    * Time to wait for the hub to load and to answer each operation, in milliseconds.
    * @default 10000
    */
@@ -45,6 +36,11 @@ export interface SharedSessionStorageOptions {
  * and no credential is ever attached to an HTTP request.
  *
  * @see {@link https://js.icp.build/auth/}
+ * Which origins may read it is decided by the hub, from the
+ * `/.well-known/ii-alternative-origins` record of the derivation origin it was
+ * configured with. This origin must be listed there, and must sign in with that
+ * same derivation origin, or it stores a session for a principal the hub's
+ * readers are not authorized for.
  * @example
  * ```ts
  * const derivationOrigin = 'https://auth.example.com';
@@ -52,10 +48,7 @@ export interface SharedSessionStorageOptions {
  * const authClient = new AuthClient({
  *   storage: new SharedSessionStorage({
  *     url: 'https://auth.example.com/shared-session.html',
- *     derivationOrigin,
  *   }),
- *   // The same value, or this client would sign in as a principal the hub's
- *   // store is not authorized for.
  *   derivationOrigin,
  * });
  * ```
@@ -63,7 +56,6 @@ export interface SharedSessionStorageOptions {
 export class SharedSessionStorage implements AuthClientStorage {
   readonly #hubUrl: URL;
   readonly #hubOrigin: string;
-  readonly #derivationOrigin: string;
   readonly #timeout: number;
   #connection: Promise<Window> | null = null;
   #lastId = 0;
@@ -76,7 +68,6 @@ export class SharedSessionStorage implements AuthClientStorage {
       );
     }
     this.#hubOrigin = this.#hubUrl.origin;
-    this.#derivationOrigin = parseAbsoluteUrl(options.derivationOrigin, 'derivationOrigin').origin;
     this.#timeout = options.timeout ?? DEFAULT_TIMEOUT_MS;
   }
 
@@ -102,7 +93,6 @@ export class SharedSessionStorage implements AuthClientStorage {
       op,
       key,
       value,
-      derivationOrigin: this.#derivationOrigin,
     };
 
     return await new Promise<StoredKey | null>((resolve, reject) => {

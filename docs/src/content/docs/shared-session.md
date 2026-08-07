@@ -3,23 +3,15 @@ title: Shared Session
 description: Share one sign-in across several origins of the same application.
 ---
 
-An `AuthClient` keeps its session in the storage of the origin it runs on, so an application served from `https://a.example.com` and `https://b.example.com` asks the user to sign in twice, and each origin receives a different principal.
+By default a session belongs to the origin it was created on, so an application served from `a.example.com` and `b.example.com` asks the user to sign in twice and gives each origin a different principal.
 
-A shared session solves both halves of that. One origin holds the session and serves it to the others over `postMessage`, and a `derivationOrigin` makes every origin derive the same principal.
+A shared session fixes both. One origin hosts the session, the others read it from there, and a `derivationOrigin` keeps the principal the same everywhere.
 
-Nothing is written on the origins that consume the session, and the session never travels in an HTTP header — unlike a cookie, which is sent with every request to the domain and readable by any script on it.
+You need three things: a page that hosts the session, an entry per origin in an Internet Identity record, and a few options on each client.
 
-## What authorizes an origin
+## 1. Host the session
 
-The set of origins allowed to read the session is the derivation origin's [`.well-known/ii-alternative-origins`](https://github.com/dfinity/internet-identity/blob/main/docs/internet-identity-spec.adoc#alternative-frontend-origins) record — the same record Internet Identity reads when it derives a principal for an alternative origin.
-
-Reusing it is deliberate. Every origin in that record can already obtain a delegation for the derivation origin's principal by signing in with `derivationOrigin` set, so being listed there is already full authority over the account. Serving a stored session to exactly that set grants nothing further, and it leaves one list to maintain rather than two that can drift apart.
-
-Adding an entry to that record is therefore a security change, not configuration. Keep it to origins you deploy yourself.
-
-## Serving the session
-
-Deploy a page whose only job is to call `serveSharedSession`. It needs no markup and no user interaction.
+Deploy a page that calls `serveSharedSession`. It needs no markup and no interaction — put it on any origin you control that shares a domain with your app, such as `https://example.com/shared-session.html`.
 
 ```html
 <!doctype html>
@@ -37,71 +29,53 @@ serveSharedSession({
 });
 ```
 
-`derivationOrigin` must match what the clients are configured with; the hub refuses a client that disagrees, because the record it holds would not be the one governing that client's identity.
+| Option | Set it to |
+| --- | --- |
+| `derivationOrigin` | The origin whose principal your users get. Must resolve to a canister. Every client signs in with this same value. |
+| `canisterId` | The canister behind that derivation origin. Optional when this page is served from the derivation origin itself; otherwise set it, so the allow-list is read over a verified route. |
 
-Pass `canisterId` whenever the derivation origin is a different origin than the hub page. The record is then read through `https://<canisterId>.icp0.io`, where a boundary node verifies certification. Without it the record is read over the derivation origin's own domain, where anyone able to tamper with responses can widen the set of readers — a precaution Internet Identity itself takes when validating a derivation origin.
-
-Serve the page with a `frame-ancestors` header so unrelated sites cannot even load it:
+Serve the page with a header naming the origins allowed to embed it:
 
 ```
 Content-Security-Policy: frame-ancestors 'self' https://a.example.com https://b.example.com;
 ```
 
-That is defence in depth. The record above is what authorizes a reader, and it stays authoritative.
+## 2. Authorize each origin
 
-## Consuming the session
+Add every consuming origin to the derivation origin's [`.well-known/ii-alternative-origins`](https://github.com/dfinity/internet-identity/blob/main/docs/internet-identity-spec.adoc#alternative-frontend-origins) record, served with `Access-Control-Allow-Origin: *`:
 
-A shared session is a storage backend, so it is passed as `storage`:
+```json
+{ "alternativeOrigins": ["https://a.example.com", "https://b.example.com"] }
+```
+
+This record is the only thing that decides who may read the session, so treat adding an entry as a security change and keep it to origins you deploy yourself. Internet Identity allows at most 10.
+
+## 3. Point each client at it
 
 ```typescript
-import { AuthClient } from '@icp-sdk/auth/client';
+import { AuthClient, SyncCookieStorage } from '@icp-sdk/auth/client';
 import { SharedSessionStorage } from '@icp-sdk/auth/shared-session';
 
-const DERIVATION_ORIGIN = 'https://example.com';
-
-const sharedSession = new SharedSessionStorage({
-  url: 'https://example.com/shared-session.html',
-  derivationOrigin: DERIVATION_ORIGIN,
-});
-
 const authClient = new AuthClient({
-  storage: sharedSession,
-  derivationOrigin: DERIVATION_ORIGIN,
+  storage: new SharedSessionStorage({ url: 'https://example.com/shared-session.html' }),
+  syncStorage: new SyncCookieStorage({ domain: 'example.com' }),
+  derivationOrigin: 'https://example.com',
 });
 ```
 
-`SharedSessionStorage` requires `derivationOrigin`: without one, the same key yields a different principal on every origin, leaving a shared store holding an identity nobody else can use.
+| Option | Set it to |
+| --- | --- |
+| `storage` | A `SharedSessionStorage` pointing at the page from step 1. |
+| `derivationOrigin` | The same value that page was given. A different one silently stores a session no other origin can use. |
+| `syncStorage` | A `SyncCookieStorage` scoped to the domain your origins share, so `isAuthenticated()` is correct on first load. Optional — see below. |
 
-Pass the **same** derivation origin to both, as above. They are separate options, so nothing stops them differing — and if they do, this client signs in as one principal while its session is stored in a hub authorized for another. Keep it in one constant.
+`domain` must be your own domain or one above the current host, and cannot be a public suffix like `com`. Nothing needs to be served there. Assume one shared session per domain: a second one alongside it would overwrite the first's state, so give a staging deployment its own domain or leave `syncStorage` unset on it.
 
-Signing out on any origin clears the shared store, so every origin loses the session.
+Everything else is unchanged. `signIn()` and `signOut()` work as usual, and signing out on one origin ends the session on all of them.
 
 ## Checking for a session
 
-`isAuthenticated()` answers synchronously, so it cannot read the shared store: that one is asynchronous and belongs to another origin. It reads the delegation's expiration from a separate synchronous store, which defaults to `localStorage` — scoped to one origin, so an origin sharing a session has nothing to read until it has restored once.
-
-A cookie fixes that, being the only store that is both synchronous and visible across origins:
-
-```typescript
-import { SyncCookieStorage } from '@icp-sdk/auth/client';
-
-const authClient = new AuthClient({
-  storage: sharedSession,
-  syncStorage: new SyncCookieStorage({
-    domain: 'example.com',
-    derivationOrigin: DERIVATION_ORIGIN,
-  }),
-  derivationOrigin: DERIVATION_ORIGIN,
-});
-```
-
-`domain` is what the sharing origins have in common, and must be the current host or a domain above it — a browser rejects anything else, including a sibling subdomain, and refuses a public suffix outright. Nothing needs to be served at it: a hub on `auth.example.com` can scope its cookie to `example.com` even if nothing answers there.
-
-`derivationOrigin` becomes part of the cookie's name, so two shared sessions under one domain — a staging deployment beside production — do not write the same cookie and describe each other's state. It is the same constant the other two options take.
-
-The cookie holds one non-secret value, a timestamp, and its `Max-Age` comes from the delegation, so it cannot outlive the session it describes. Signing out on any origin deletes it for all of them.
-
-It is a hint, not authority. Every subdomain can write it and nothing records which one did, so treat `isAuthenticated()` as a synchronous guess suitable for deciding what to render. The identity itself is always fetched from the shared store and verified:
+`isAuthenticated()` is synchronous, so it reads a small cookie rather than the shared session itself. Treat it as a hint for deciding what to render — any script on your domain can change it. Use the identity when it matters:
 
 ```typescript
 const identity = await authClient.getIdentity();
@@ -110,21 +84,10 @@ if (identity.getPrincipal().isAnonymous()) {
 }
 ```
 
-Leave `syncStorage` unset and behaviour is unchanged from a single-origin app: correct on that origin, and correct on the others only once each has restored the session.
+Without `syncStorage`, `isAuthenticated()` returns `false` on an origin's first load until the session has been read once.
 
-## Browser support
+## Good to know
 
-The hub is a same-site iframe, so its storage is not partitioned: Chrome, Firefox, and Safari all key third-party storage on the top-level site, and every origin here shares one registrable domain. Cross-registrable-domain sharing is not supported — that storage is partitioned, and an entry in the record pointing outside your domain simply reads an empty store.
-
-Two consequences of relying on browser storage:
-
-- Safari deletes script-writable storage after seven days without interaction with the site, so a returning user may need to sign in again.
-- Private browsing keeps the session for the tab's lifetime only.
-
-Both surface as "no session", which `signIn()` recovers from.
-
-## Requirements
-
-- The derivation origin must resolve to a canister id, which Internet Identity requires in order to read its record.
-- Its record may list at most 10 origins.
-- Choose the derivation origin before launch. Every principal is derived from it, so changing it later gives every user a new identity with no path back to the old one.
+- Sharing works between origins on one domain. A different domain reads an empty session, even if it is listed in the record.
+- Safari clears browser storage after seven days without a visit, and private windows keep it only for the tab. Both look like no session, which `signIn()` recovers from.
+- Pick the derivation origin before launch. Every principal derives from it, so changing it later gives every user a new identity with no way back to the old one.

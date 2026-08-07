@@ -71,9 +71,9 @@ const authClient = new AuthClient({
 
 ### Sharing One Session Across Origins
 
-Serve an application from several origins — `a.example.com`, `b.example.com` — with a single sign-in and a single principal. One origin holds the session and serves it to the others; nothing is stored on them, and the session never travels in an HTTP header.
+Serve an application from several origins — `a.example.com`, `b.example.com` — with a single sign-in and a single principal.
 
-Deploy a page on the origin that holds it:
+Deploy a page that hosts the session:
 
 ```typescript
 import { serveSharedSession } from '@icp-sdk/auth/shared-session';
@@ -84,21 +84,20 @@ serveSharedSession({
 });
 ```
 
-Then point the other origins at that page, as a storage backend:
+Then point each origin at it:
 
 ```typescript
+import { AuthClient, SyncCookieStorage } from '@icp-sdk/auth/client';
 import { SharedSessionStorage } from '@icp-sdk/auth/shared-session';
 
 const authClient = new AuthClient({
-  storage: new SharedSessionStorage({
-    url: 'https://example.com/shared-session.html',
-    derivationOrigin: 'https://example.com',
-  }),
+  storage: new SharedSessionStorage({ url: 'https://example.com/shared-session.html' }),
+  syncStorage: new SyncCookieStorage({ domain: 'example.com' }),
   derivationOrigin: 'https://example.com',
 });
 ```
 
-Which origins may read the session is decided by the derivation origin's `.well-known/ii-alternative-origins` record — the same record Internet Identity reads when deriving their principal. See the [shared session guide](https://js.icp.build/auth/shared-session) for deployment requirements and browser behaviour.
+Each origin must be listed in the derivation origin's `.well-known/ii-alternative-origins` record. See the [shared session guide](https://js.icp.build/auth/shared-session) for the full setup.
 
 ### Requesting Identity Attributes
 

@@ -56,16 +56,6 @@ export interface SyncCookieStorageOptions {
    * storage and matching key.
    */
   domain: string;
-
-  /**
-   * Derivation origin of the session this store describes.
-   *
-   * It is part of the cookie's name, so two shared sessions below one domain —
-   * a staging deployment beside production — do not write the same cookie and
-   * describe each other's state. Pass the same value given to the session's
-   * storage and to {@link AuthClient}.
-   */
-  derivationOrigin: string | URL;
 }
 
 /**
@@ -78,14 +68,16 @@ export interface SyncCookieStorageOptions {
  * It is readable and writable by every subdomain, and unlike `localStorage` it
  * is not origin-scoped: any of them can overwrite it, and nothing records which
  * one did. Store only values whose authority rests elsewhere.
+ *
+ * The cookie's name is the key it is given, so this assumes one shared session
+ * per domain. Two of them below the same domain would write the same cookie and
+ * describe each other's state.
  * @see implements {@link AuthClientSyncStorage}
  */
 export class SyncCookieStorage implements AuthClientSyncStorage {
   readonly #attributes: string;
-  readonly #suffix: string;
 
   constructor(options: SyncCookieStorageOptions) {
-    this.#suffix = `.${toCookieName(options.derivationOrigin.toString())}`;
     this.#attributes = [
       // Host-only on loopback: browsers reject `Domain=localhost`, and a
       // host-only cookie is already shared across ports, which is what a local
@@ -99,21 +91,17 @@ export class SyncCookieStorage implements AuthClientSyncStorage {
   }
 
   get(key: string): string | null {
-    const name = this.#nameFor(key);
     for (const entry of document.cookie.split(';')) {
       const separator = entry.indexOf('=');
       if (separator === -1) continue;
-      if (decodeURIComponent(entry.slice(0, separator).trim()) !== name) continue;
+      if (decodeURIComponent(entry.slice(0, separator).trim()) !== key) continue;
       return decodeURIComponent(entry.slice(separator + 1).trim());
     }
     return null;
   }
 
   set(key: string, value: string, expiresAt?: number): void {
-    const cookie = [
-      `${encodeURIComponent(this.#nameFor(key))}=${encodeURIComponent(value)}`,
-      this.#attributes,
-    ];
+    const cookie = [`${encodeURIComponent(key)}=${encodeURIComponent(value)}`, this.#attributes];
     if (expiresAt !== undefined) {
       const seconds = Math.floor((expiresAt - Date.now()) / 1000);
       // Already elapsed: writing it would store a value that is untrue on the
@@ -132,26 +120,6 @@ export class SyncCookieStorage implements AuthClientSyncStorage {
 
   remove(key: string): void {
     // biome-ignore lint/suspicious/noDocumentCookie: the Cookie Store API is asynchronous, and this store exists to be read synchronously.
-    document.cookie = `${encodeURIComponent(this.#nameFor(key))}=; ${this.#attributes}; Max-Age=0`;
+    document.cookie = `${encodeURIComponent(key)}=; ${this.#attributes}; Max-Age=0`;
   }
-
-  #nameFor(key: string): string {
-    return `${key}${this.#suffix}`;
-  }
-}
-
-// A cookie name is an RFC 6265 token, so characters an origin may contain — the
-// colon before a port, slashes — are not allowed in one.
-const NON_TOKEN = /[^!#$%&'*+\-.0-9A-Z^_`a-z|~]/g;
-
-function toCookieName(value: string): string {
-  let normalized = value;
-  try {
-    // Reduced to an origin so that a derivation origin written with a trailing
-    // slash or a path does not name a second cookie.
-    normalized = new URL(value).origin;
-  } catch {
-    // Not a URL; used as given.
-  }
-  return normalized.replace(NON_TOKEN, '_');
 }

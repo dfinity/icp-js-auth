@@ -35,7 +35,6 @@ function request(
       id: 1,
       op: 'get',
       key: 'identity',
-      derivationOrigin: DERIVATION_ORIGIN,
       ...overrides,
     },
   });
@@ -158,19 +157,6 @@ describe('serveSharedSession', () => {
     expect((await reply(client)).error).toContain('unsupported protocol version');
   });
 
-  it('denies a client configured with a different derivation origin', async () => {
-    stop = serveSharedSession({
-      derivationOrigin: DERIVATION_ORIGIN,
-      storage: testStorage(),
-      allowedOrigins: async () => [CLIENT_ORIGIN],
-    });
-
-    const client = fakeClient();
-    request(client, { derivationOrigin: 'https://other.example.com' });
-
-    expect((await reply(client)).error).toContain('derivation origin mismatch');
-  });
-
   it('denies an unknown operation', async () => {
     stop = serveSharedSession({
       derivationOrigin: DERIVATION_ORIGIN,
@@ -280,7 +266,7 @@ describe('serveSharedSession allow-list discovery', () => {
     stop = serveSharedSession({ derivationOrigin: HUB_ORIGIN, storage: testStorage() });
 
     const client = fakeClient();
-    request(client, { derivationOrigin: HUB_ORIGIN });
+    request(client);
     await reply(client);
 
     expect(fetchMock).toHaveBeenCalledWith(

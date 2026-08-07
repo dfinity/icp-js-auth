@@ -4,10 +4,8 @@ import { SharedSessionStorage } from '../../src/shared-session/storage.ts';
 
 const HUB_URL = 'https://auth.example.com/hub.html';
 const HUB_ORIGIN = 'https://auth.example.com';
-const DERIVATION_ORIGIN = 'https://example.com';
 
-const testStorage = (timeout = 500) =>
-  new SharedSessionStorage({ url: HUB_URL, derivationOrigin: DERIVATION_ORIGIN, timeout });
+const testStorage = (timeout = 500) => new SharedSessionStorage({ url: HUB_URL, timeout });
 
 /**
  * Stands in for the hub page. jsdom leaves an iframe on `about:blank` because
@@ -58,18 +56,12 @@ describe('SharedSessionStorage', () => {
     ['a relative url', '/hub.html', 'must be an absolute URL'],
     ['plain http', 'http://auth.example.com/hub.html', 'must be served over https'],
   ])('rejects %s for the hub', (_label, url, message) => {
-    expect(() => new SharedSessionStorage({ url, derivationOrigin: DERIVATION_ORIGIN })).toThrow(
-      message,
-    );
+    expect(() => new SharedSessionStorage({ url })).toThrow(message);
   });
 
   it('accepts a loopback hub for local development', () => {
     expect(
-      () =>
-        new SharedSessionStorage({
-          url: 'http://localhost:5174/shared-session.html',
-          derivationOrigin: 'http://localhost:5173',
-        }),
+      () => new SharedSessionStorage({ url: 'http://localhost:5174/shared-session.html' }),
     ).not.toThrow();
   });
 
@@ -86,7 +78,6 @@ describe('SharedSessionStorage', () => {
       type: CHANNEL,
       op: 'get',
       key: 'identity',
-      derivationOrigin: DERIVATION_ORIGIN,
     });
     expect(post).toHaveBeenCalledWith(expect.anything(), HUB_ORIGIN);
     expect(await pending).toBe('stored-key');

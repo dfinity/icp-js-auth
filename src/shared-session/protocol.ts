@@ -33,12 +33,6 @@ export interface SharedSessionRequest {
   op: SharedSessionOp;
   key: string;
   value?: StoredKey;
-  /**
-   * The client's derivation origin. The hub compares it against its own
-   * configuration and refuses a mismatch: the two sides disagreeing means the
-   * hub is enforcing an allow-list belonging to a different identity.
-   */
-  derivationOrigin: string;
 }
 
 /** The hub's answer to a {@link SharedSessionRequest}. */

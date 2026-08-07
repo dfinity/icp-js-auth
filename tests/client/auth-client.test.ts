@@ -769,13 +769,10 @@ describe('AuthClient shared session', () => {
     });
   });
 
-  /**
-   * Seeds the cross-origin expiration hint the way another origin would. The
-   * name carries the derivation origin, so it must match what the store builds.
-   */
+  /** Seeds the cross-origin expiration hint the way another origin would. */
   const setExpirationCookie = (value: string): void => {
     // biome-ignore lint/suspicious/noDocumentCookie: seeding the store the client reads synchronously.
-    document.cookie = `${EXPIRATION_KEY}.https___example.com=${value}; Path=/`;
+    document.cookie = `${EXPIRATION_KEY}=${value}; Path=/`;
   };
 
   afterEach(() => {
@@ -837,7 +834,6 @@ describe('AuthClient shared session', () => {
     const client = new AuthClient({
       storage: new SharedSessionStorage({
         url: 'https://auth.example.com/shared-session.html',
-        derivationOrigin: 'https://auth.example.com',
         timeout: 300,
       }),
       derivationOrigin: 'https://auth.example.com',
@@ -866,10 +862,7 @@ describe('AuthClient shared session', () => {
     expect(localStorage.getItem(EXPIRATION_KEY)).toBeNull();
 
     const client = new AuthClient({
-      syncStorage: new SyncCookieStorage({
-        domain: 'localhost',
-        derivationOrigin: 'https://example.com',
-      }),
+      syncStorage: new SyncCookieStorage({ domain: 'localhost' }),
       idleOptions: { disableIdle: true },
     });
 

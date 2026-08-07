@@ -27,7 +27,9 @@ export interface ServeSharedSessionOptions {
    * Derivation origin whose session this hub holds.
    *
    * Its `/.well-known/ii-alternative-origins` record lists the origins allowed
-   * to read the session. Clients must be configured with the same value.
+   * to read the session. Those origins must sign in with this same derivation
+   * origin, or they store a session for a principal the others are not
+   * authorized for.
    */
   derivationOrigin: string | URL;
 
@@ -143,15 +145,6 @@ export function serveSharedSession(options: ServeSharedSessionOptions): () => vo
     if (request.v !== PROTOCOL_VERSION) {
       reply({
         error: `unsupported protocol version ${String(request.v)}, this hub speaks ${PROTOCOL_VERSION}`,
-      });
-      return;
-    }
-
-    // Denied before the allow-list is consulted, because a mismatch means the
-    // list this hub holds is not the one that governs the client's identity.
-    if (request.derivationOrigin !== derivationOrigin) {
-      reply({
-        error: `derivation origin mismatch: this hub serves ${derivationOrigin}, the client expects ${String(request.derivationOrigin)}`,
       });
       return;
     }
