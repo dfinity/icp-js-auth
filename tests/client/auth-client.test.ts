@@ -756,6 +756,29 @@ describe('AuthClient shared session', () => {
   const futureExpirationNs = () =>
     ((BigInt(Date.now()) + BigInt(3_600_000)) * BigInt(1_000_000)).toString();
 
+  beforeEach(() => {
+    // The global stub drops hostname/protocol, which decide where the
+    // expiration is kept.
+    vi.stubGlobal('location', {
+      reload: vi.fn(),
+      hostname: 'localhost',
+      protocol: 'http:',
+      origin: 'http://localhost:3000',
+    });
+  });
+
+  /** Seeds the cross-origin expiration hint the way another origin would. */
+  const setExpirationCookie = (value: string): void => {
+    // biome-ignore lint/suspicious/noDocumentCookie: seeding the store the client reads synchronously.
+    document.cookie = `${EXPIRATION_KEY}=${value}; Path=/`;
+  };
+
+  afterEach(() => {
+    // Cookies outlive localStorage.clear(), so a leftover expiration would make
+    // a later test look signed in.
+    setExpirationCookie('');
+  });
+
   it('caches the expiration when restoring a session this origin never signed in for', async () => {
     const key = Ed25519KeyIdentity.generate();
     const chain = await createTestDelegation(key);
@@ -840,5 +863,73 @@ describe('AuthClient shared session', () => {
 
     expect(warn.mock.calls[0][0]).toContain('`storage` is ignored');
     expect(storage.get).not.toHaveBeenCalled();
+  });
+
+  it('reads the expiration from a cookie when a shared session hub is set', async () => {
+    // Host-only so it sticks on jsdom's localhost origin, which is also the
+    // derivation origin here.
+    setExpirationCookie(futureExpirationNs());
+    expect(localStorage.getItem(EXPIRATION_KEY)).toBeNull();
+
+    const client = new AuthClient({
+      sharedSessionHub: { url: 'http://localhost:4000/hub.html', timeout: 30 },
+      derivationOrigin: 'http://localhost:3000',
+      idleOptions: { disableIdle: true },
+    });
+
+    expect(client.isAuthenticated()).toBe(true);
+  });
+
+  it('falls back to localStorage when the derivation origin is a sibling domain', async () => {
+    // A cookie for auth.localhost cannot be written from jsdom's localhost
+    // origin, so a cookie-backed store would never read back what it wrote.
+    const client = new AuthClient({
+      sharedSessionHub: { url: 'http://auth.localhost:4000/hub.html', timeout: 30 },
+      derivationOrigin: 'http://auth.localhost:4000',
+      idleOptions: { disableIdle: true },
+    });
+
+    // A cookie is unreachable here, so localStorage is what it reads.
+    localStorage.setItem(EXPIRATION_KEY, futureExpirationNs());
+    expect(client.isAuthenticated()).toBe(true);
+
+    localStorage.clear();
+    setExpirationCookie(futureExpirationNs());
+    expect(client.isAuthenticated()).toBe(false);
+  });
+
+  it('ignores that cookie without a shared session hub', () => {
+    setExpirationCookie(futureExpirationNs());
+
+    const client = new AuthClient({ idleOptions: { disableIdle: true } });
+
+    expect(client.isAuthenticated()).toBe(false);
+  });
+
+  it('prefers an explicitly provided sync storage', () => {
+    const syncStorage = {
+      get: vi.fn().mockReturnValue(futureExpirationNs()),
+      set: vi.fn(),
+      remove: vi.fn(),
+    };
+
+    const client = new AuthClient({ syncStorage, idleOptions: { disableIdle: true } });
+
+    expect(client.isAuthenticated()).toBe(true);
+    expect(syncStorage.get).toHaveBeenCalledWith(EXPIRATION_KEY);
+  });
+
+  it('treats an unparseable expiration as no session', () => {
+    // Any subdomain can write the cookie, so the value may be anything.
+    const syncStorage = {
+      get: vi.fn().mockReturnValue('not-a-number'),
+      set: vi.fn(),
+      remove: vi.fn(),
+    };
+
+    const client = new AuthClient({ syncStorage, idleOptions: { disableIdle: true } });
+
+    expect(() => client.isAuthenticated()).not.toThrow();
+    expect(client.isAuthenticated()).toBe(false);
   });
 });

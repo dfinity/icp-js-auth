@@ -13,3 +13,4 @@ export {
   KEY_STORAGE_KEY,
   LocalStorage,
 } from './storage.js';
+export * from './sync-storage.js';

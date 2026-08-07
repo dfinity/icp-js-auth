@@ -66,7 +66,11 @@ Signing out on any origin clears the shared store, so every origin loses the ses
 
 ## Checking for a session
 
-`isAuthenticated()` answers synchronously from a cache in the local origin's `localStorage`, which a shared session cannot populate before it has been read once. On an origin's first load the cache is empty, so prefer the identity itself:
+`isAuthenticated()` answers synchronously, so it cannot read the shared store: that one is asynchronous and belongs to another origin. It reads the delegation's expiration from a separate synchronous store instead — `localStorage` normally, and a cookie scoped to the derivation origin's domain when `sharedSessionHub` is set.
+
+The cookie is what makes the answer correct across origins. It holds one non-secret value, a timestamp, and its `Max-Age` matches the delegation, so it cannot outlive the session it describes. Signing out on any origin deletes it for all of them.
+
+It is a hint, not authority. Every subdomain can write it and nothing records which one did, so treat `isAuthenticated()` as a synchronous guess suitable for deciding what to render. The identity itself is always fetched from the shared store and verified:
 
 ```typescript
 const identity = await authClient.getIdentity();
@@ -75,7 +79,9 @@ if (identity.getPrincipal().isAnonymous()) {
 }
 ```
 
-After that first restore the cache is written, and `isAuthenticated()` is accurate on subsequent loads of that origin. One case stays approximate: if another origin signs out, this origin reports a session until it next restores and finds the store empty, at which point the cache is cleared.
+A cookie can only be scoped to the current host or a domain above it, so this needs the derivation origin to be a **parent** of the consuming origins — `https://example.com` for clients on `a.example.com` and `b.example.com`. With a sibling derivation origin (`auth.example.com` alongside `a.example.com`) the cookie is unreachable, so `localStorage` is used instead and `isAuthenticated()` is correct only after that origin has restored the session once.
+
+Supply `syncStorage` to override the choice entirely.
 
 ## Browser support
 

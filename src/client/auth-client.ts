@@ -22,7 +22,9 @@ import {
   LocalStorage,
   type StoredKey,
 } from './storage.js';
+import { type AuthClientSyncStorage, SyncCookieStorage, SyncLocalStorage } from './sync-storage.js';
 
+const NANOSECONDS_PER_MILLISECOND = BigInt(1_000_000);
 const NANOSECONDS_PER_SECOND = BigInt(1_000_000_000);
 const SECONDS_PER_HOUR = BigInt(3_600);
 const NANOSECONDS_PER_HOUR = NANOSECONDS_PER_SECOND * SECONDS_PER_HOUR;
@@ -34,8 +36,9 @@ const ECDSA_KEY_LABEL = 'ECDSA';
 const ED25519_KEY_LABEL = 'Ed25519';
 type BaseKeyType = typeof ECDSA_KEY_LABEL | typeof ED25519_KEY_LABEL;
 
-// localStorage key used to cache the delegation expiration so that
-// isAuthenticated() can answer synchronously without hitting IndexedDB.
+// Key the delegation expiration is cached under, so isAuthenticated() can
+// answer synchronously without reading the session store. See
+// AuthClientCreateBaseOptions#syncStorage for where it is kept.
 const KEY_STORAGE_EXPIRATION = 'ic-delegation_expiration';
 
 // Storage key prefix for a redirect flow's session key, held only while the
@@ -89,6 +92,17 @@ export interface AuthClientCreateBaseOptions {
    * @default after 10 minutes, invalidates the identity
    */
   idleOptions?: IdleOptions;
+
+  /**
+   * Synchronous storage for the delegation expiration that
+   * {@link AuthClient.isAuthenticated} reads.
+   *
+   * Defaults to `localStorage`, or to a cookie scoped to the derivation
+   * origin's domain when `sharedSessionHub` is set, so that an origin sharing a
+   * session can answer before it has read the shared store.
+   * @default SyncLocalStorage
+   */
+  syncStorage?: AuthClientSyncStorage;
 
   /**
    * Identity provider URL.
@@ -243,6 +257,7 @@ export class AuthClient {
   #identity: Identity | PartialIdentity = new AnonymousIdentity();
   #chain: DelegationChain | null = null;
   #storage: AuthClientStorage;
+  #syncStorage: AuthClientSyncStorage;
   #signer: Signer;
   // Set only in redirect mode, so the redirect-specific paths (nonce/key
   // journaling) can reach `memoize`. Undefined in the default 'window' mode.
@@ -254,6 +269,7 @@ export class AuthClient {
   constructor(options: AuthClientCreateOptions = {}) {
     this.#options = options;
     this.#storage = createStorage(options);
+    this.#syncStorage = createSyncStorage(options);
 
     const identityProviderUrl = new URL(
       options.identityProvider?.toString() || IDENTITY_PROVIDER_DEFAULT,
@@ -309,7 +325,7 @@ export class AuthClient {
    */
   isAuthenticated(): boolean {
     // Uses a cached expiration in localStorage to avoid an async IndexedDB read.
-    const expiration = getExpirationFlag();
+    const expiration = getExpirationFlag(this.#syncStorage);
     if (expiration === null) return false;
     const nowNs = BigInt(Date.now()) * BigInt(1_000_000);
     return nowNs < expiration;
@@ -389,7 +405,7 @@ export class AuthClient {
     }
 
     // Persist so the session survives page reloads.
-    await persistChain(this.#storage, this.#chain);
+    await persistChain(this.#storage, this.#syncStorage, this.#chain);
     await persistKey(this.#storage, key);
 
     // The flow is complete: the delegation is bound to this key and stored, so
@@ -587,7 +603,7 @@ export class AuthClient {
     // Wait for the constructor's session restore: hydration racing the
     // deletion below could re-populate the identity from already-read state.
     await this.#init();
-    await deleteStorage(this.#storage);
+    await deleteStorage(this.#storage, this.#syncStorage);
 
     this.#identity = new AnonymousIdentity();
     this.#chain = null;
@@ -670,22 +686,22 @@ export class AuthClient {
       this.#options.identity ??
       (await restoreKey(this.#storage, this.#options.keyType ?? ECDSA_KEY_LABEL));
     if (!key) {
-      clearCachedExpiration();
+      clearCachedExpiration(this.#syncStorage);
       return;
     }
 
-    const chain = await restoreChain(this.#storage);
+    const chain = await restoreChain(this.#storage, this.#syncStorage);
     if (!chain) {
       // A shared session can be signed out from another origin, which cannot
       // reach this origin's cached expiration. Clearing it here stops
       // isAuthenticated() reporting a session that is no longer in the store.
-      clearCachedExpiration();
+      clearCachedExpiration(this.#syncStorage);
       return;
     }
 
     // This origin may be restoring a session it never signed in for, in which
     // case it has no cached expiration of its own yet.
-    cacheExpiration(chain);
+    cacheExpiration(this.#syncStorage, chain);
 
     this.#chain = chain;
     if ('toDer' in key) {
@@ -737,6 +753,43 @@ function createStorage(options: AuthClientCreateOptions): AuthClientStorage {
     hub: options.sharedSessionHub,
     derivationOrigin: options.derivationOrigin,
   });
+}
+
+/**
+ * Resolves the synchronous storage for the expiration that
+ * {@link AuthClient.isAuthenticated} reads.
+ *
+ * With a shared session the expiration has to be readable by every origin that
+ * shares it, and synchronously, which rules out both `localStorage` (scoped to
+ * one origin) and the shared store itself (asynchronous, and on another origin).
+ * A cookie scoped to the derivation origin's domain is the remaining option.
+ *
+ * It holds nothing secret — a timestamp the reader compares against the current
+ * time — and the identity it describes is still fetched and verified from the
+ * store, so a cookie written by another subdomain can make
+ * {@link AuthClient.isAuthenticated} briefly wrong but cannot authenticate
+ * anyone.
+ * @param options - The create options.
+ */
+function createSyncStorage(options: AuthClientCreateOptions): AuthClientSyncStorage {
+  if (options.syncStorage !== undefined) {
+    return options.syncStorage;
+  }
+  if (options.sharedSessionHub === undefined) {
+    return new SyncLocalStorage();
+  }
+  // A cookie can only be scoped to this host or a domain above it, so a
+  // derivation origin that is a sibling (auth.example.com next to
+  // a.example.com) cannot be written to and would leave every read empty.
+  // Falling back keeps this origin correct once it has read the shared store.
+  const domain = new URL(options.derivationOrigin.toString()).hostname;
+  // Falls back rather than throwing where the host is unavailable, so a
+  // constructor never fails over a synchronous hint.
+  const hostname = globalThis.location?.hostname ?? '';
+  if (hostname !== domain && !hostname.endsWith(`.${domain}`)) {
+    return new SyncLocalStorage();
+  }
+  return new SyncCookieStorage({ domain });
 }
 
 /**
@@ -929,9 +982,13 @@ function serializeKey(key: SignIdentity | PartialIdentity): StoredKey {
  * @param storage - The storage backend.
  * @param chain - The delegation chain to persist.
  */
-async function persistChain(storage: AuthClientStorage, chain: DelegationChain): Promise<void> {
+async function persistChain(
+  storage: AuthClientStorage,
+  syncStorage: AuthClientSyncStorage,
+  chain: DelegationChain,
+): Promise<void> {
   await storage.set(KEY_STORAGE_DELEGATION, JSON.stringify(chain.toJSON()));
-  cacheExpiration(chain);
+  cacheExpiration(syncStorage, chain);
 }
 
 /**
@@ -943,7 +1000,7 @@ async function persistChain(storage: AuthClientStorage, chain: DelegationChain):
  * itself and would otherwise report no session at all.
  * @param chain - The delegation chain being made current.
  */
-function cacheExpiration(chain: DelegationChain): void {
+function cacheExpiration(syncStorage: AuthClientSyncStorage, chain: DelegationChain): void {
   let earliest: bigint | null = null;
   for (const { delegation } of chain.delegations) {
     if (earliest === null || delegation.expiration < earliest) {
@@ -951,7 +1008,11 @@ function cacheExpiration(chain: DelegationChain): void {
     }
   }
   if (earliest !== null) {
-    localStorage.setItem(KEY_STORAGE_EXPIRATION, earliest.toString());
+    syncStorage.set(
+      KEY_STORAGE_EXPIRATION,
+      earliest.toString(),
+      Number(earliest / NANOSECONDS_PER_MILLISECOND),
+    );
   }
 }
 
@@ -960,20 +1021,23 @@ function cacheExpiration(chain: DelegationChain): void {
  * storage if the chain is expired or corrupted.
  * @param storage - The storage backend.
  */
-async function restoreChain(storage: AuthClientStorage): Promise<DelegationChain | null> {
+async function restoreChain(
+  storage: AuthClientStorage,
+  syncStorage: AuthClientSyncStorage,
+): Promise<DelegationChain | null> {
   try {
     const raw = await storage.get(KEY_STORAGE_DELEGATION);
     if (!raw || typeof raw !== 'string') return null;
 
     const chain = DelegationChain.fromJSON(raw);
     if (!isDelegationValid(chain)) {
-      await deleteStorage(storage);
+      await deleteStorage(storage, syncStorage);
       return null;
     }
     return chain;
   } catch (e) {
     console.error(e);
-    await deleteStorage(storage);
+    await deleteStorage(storage, syncStorage);
     return null;
   }
 }
@@ -982,23 +1046,32 @@ async function restoreChain(storage: AuthClientStorage): Promise<DelegationChain
  * Clears all session data from storage.
  * @param storage - The storage backend.
  */
-async function deleteStorage(storage: AuthClientStorage): Promise<void> {
+async function deleteStorage(
+  storage: AuthClientStorage,
+  syncStorage: AuthClientSyncStorage,
+): Promise<void> {
   await storage.remove(KEY_STORAGE_KEY);
   await storage.remove(KEY_STORAGE_DELEGATION);
   await storage.remove(KEY_VECTOR);
-  clearCachedExpiration();
+  clearCachedExpiration(syncStorage);
 }
 
 /** Drops the cached expiration, so {@link AuthClient.isAuthenticated} reports no session. */
-function clearCachedExpiration(): void {
-  localStorage.removeItem(KEY_STORAGE_EXPIRATION);
+function clearCachedExpiration(syncStorage: AuthClientSyncStorage): void {
+  syncStorage.remove(KEY_STORAGE_EXPIRATION);
 }
 
 /** Reads the cached delegation expiration from localStorage (nanoseconds). */
-function getExpirationFlag(): bigint | null {
-  const value = localStorage.getItem(KEY_STORAGE_EXPIRATION);
+function getExpirationFlag(syncStorage: AuthClientSyncStorage): bigint | null {
+  const value = syncStorage.get(KEY_STORAGE_EXPIRATION);
   if (value === null) return null;
-  return BigInt(value);
+  try {
+    return BigInt(value);
+  } catch {
+    // A cookie-backed store is writable by every subdomain, so the value may be
+    // anything. isAuthenticated() must not throw on it.
+    return null;
+  }
 }
 
 /**
