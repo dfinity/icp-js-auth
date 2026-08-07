@@ -71,7 +71,7 @@ const authClient = new AuthClient({
 
 ### Sharing One Session Across Origins
 
-Give several apps under one custom domain — `docs.example.com`, `chat.example.com` — the same principal and the same sign-in state.
+Give several apps under one custom domain the same principal and the same sign-in state, so that `docs.example.com` and `chat.example.com` sign in once as the same user.
 
 Deploy a page that hosts the session:
 

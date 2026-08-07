@@ -3,7 +3,7 @@ title: Shared Session
 description: Share one principal and one sign-in across several apps on your domain.
 ---
 
-Use a shared session when several apps under one custom domain need the same principal and the same sign-in state — `docs.example.com` and `chat.example.com` signing in once, as the same user.
+Use a shared session when several apps under one custom domain need the same principal and the same sign-in state, so that `docs.example.com` and `chat.example.com` sign in once as the same user.
 
 A `derivationOrigin` alone gives them the same principal, but each app still signs in separately and keeps its own session. The setup below shares the session itself, so signing in or out of one app applies to all of them.
 
@@ -34,13 +34,11 @@ Content-Security-Policy: frame-ancestors 'self' https://docs.example.com https:/
 
 ## 2. Authorize each app
 
-The derivation origin decides which origins may read the session. List them in its [`.well-known/ii-alternative-origins`](https://github.com/dfinity/internet-identity/blob/main/docs/internet-identity-spec.adoc#alternative-frontend-origins) record — `https://auth.example.com/.well-known/ii-alternative-origins` here — served with `Access-Control-Allow-Origin: *`:
+The derivation origin decides which origins may read the session. List them in its [`.well-known/ii-alternative-origins`](https://github.com/dfinity/internet-identity/blob/main/docs/internet-identity-spec.adoc#alternative-frontend-origins) record, served with `Access-Control-Allow-Origin: *`. Here that is `https://auth.example.com/.well-known/ii-alternative-origins`:
 
 ```json
 { "alternativeOrigins": ["https://docs.example.com", "https://chat.example.com"] }
 ```
-
-Internet Identity allows at most 10 entries.
 
 ## 3. Point each app at it
 
