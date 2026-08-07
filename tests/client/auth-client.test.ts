@@ -767,6 +767,16 @@ describe('AuthClient shared session', () => {
     });
   });
 
+  /**
+   * Waits for hydration to finish. A hub that never answers rejects on its
+   * timeout, and a timer left running past the test fires after the environment
+   * is torn down, where the globals it touches no longer exist.
+   */
+  const settleHydration = async (client: AuthClient): Promise<void> => {
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    await client.getIdentity();
+  };
+
   /** Seeds the cross-origin expiration hint the way another origin would. */
   const setExpirationCookie = (value: string): void => {
     // biome-ignore lint/suspicious/noDocumentCookie: seeding the store the client reads synchronously.
@@ -849,11 +859,11 @@ describe('AuthClient shared session', () => {
     expect(identity.getPrincipal().isAnonymous()).toBe(true);
   });
 
-  it('ignores a storage passed alongside sharedSessionHub', () => {
+  it('ignores a storage passed alongside sharedSessionHub', async () => {
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
     const storage = fakeStore();
 
-    new AuthClient({
+    const client = new AuthClient({
       sharedSessionHub: { url: 'https://auth.example.com/hub.html', timeout: 30 },
       derivationOrigin: 'https://auth.example.com',
       // Only reachable from JavaScript: the types make these mutually exclusive.
@@ -863,6 +873,7 @@ describe('AuthClient shared session', () => {
 
     expect(warn.mock.calls[0][0]).toContain('`storage` is ignored');
     expect(storage.get).not.toHaveBeenCalled();
+    await settleHydration(client);
   });
 
   it('reads the expiration from a cookie when a shared session hub is set', async () => {
@@ -878,6 +889,7 @@ describe('AuthClient shared session', () => {
     });
 
     expect(client.isAuthenticated()).toBe(true);
+    await settleHydration(client);
   });
 
   it('falls back to localStorage when the derivation origin is a sibling domain', async () => {
@@ -896,6 +908,7 @@ describe('AuthClient shared session', () => {
     localStorage.clear();
     setExpirationCookie(futureExpirationNs());
     expect(client.isAuthenticated()).toBe(false);
+    await settleHydration(client);
   });
 
   it('ignores that cookie without a shared session hub', () => {
