@@ -84,8 +84,7 @@ serveSharedSession({ derivationOrigin: 'https://auth.example.com' });
 Then point each origin at it:
 
 ```typescript
-import { AuthClient, SyncCookieStorage } from '@icp-sdk/auth/client';
-import { SharedSessionStorage } from '@icp-sdk/auth/shared-session';
+import { AuthClient, SharedSessionStorage, SyncCookieStorage } from '@icp-sdk/auth/client';
 
 const authClient = new AuthClient({
   storage: new SharedSessionStorage({ url: 'https://auth.example.com/shared-session.html' }),

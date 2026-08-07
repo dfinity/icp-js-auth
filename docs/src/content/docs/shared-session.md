@@ -39,8 +39,7 @@ The derivation origin decides which origins may read the session. List them in i
 On `docs.example.com` and `chat.example.com` alike:
 
 ```typescript
-import { AuthClient, SyncCookieStorage } from '@icp-sdk/auth/client';
-import { SharedSessionStorage } from '@icp-sdk/auth/shared-session';
+import { AuthClient, SharedSessionStorage, SyncCookieStorage } from '@icp-sdk/auth/client';
 
 const authClient = new AuthClient({
   storage: new SharedSessionStorage({ url: 'https://auth.example.com/shared-session.html' }),
