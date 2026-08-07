@@ -3,10 +3,10 @@ import { IdbStorage } from '../../src/client/storage.ts';
 import { CHANNEL, PROTOCOL_VERSION } from '../../src/shared-session/protocol.ts';
 import { serveSharedSession } from '../../src/shared-session/serve.ts';
 
-// jsdom serves the tests from this origin, so it doubles as the hub's own origin.
+// jsdom serves the tests from this origin, so it stands in for the hub's own.
 const HUB_ORIGIN = 'http://localhost:3000';
-const DERIVATION_ORIGIN = 'https://example.com';
-const CLIENT_ORIGIN = 'https://a.example.com';
+const DERIVATION_ORIGIN = 'https://auth.example.com';
+const CLIENT_ORIGIN = 'https://docs.example.com';
 const CANISTER_ID = 'rdmx6-jaaaa-aaaaa-aaadq-cai';
 
 let stop: (() => void) | undefined;
@@ -221,16 +221,6 @@ describe('serveSharedSession', () => {
     await new Promise((resolve) => setTimeout(resolve, 0));
     expect(client.postMessage).not.toHaveBeenCalled();
   });
-
-  it('rejects a canister id that is not a principal', () => {
-    expect(() =>
-      serveSharedSession({
-        derivationOrigin: DERIVATION_ORIGIN,
-        canisterId: 'not-a-principal',
-        storage: testStorage(),
-      }),
-    ).toThrow('not a valid principal');
-  });
 });
 
 describe('serveSharedSession allow-list discovery', () => {
@@ -241,26 +231,7 @@ describe('serveSharedSession allow-list discovery', () => {
       json: async () => ({ alternativeOrigins }),
     });
 
-  it('reads the record through the gateway when a canister id is given', async () => {
-    const fetchMock = record([CLIENT_ORIGIN]);
-    vi.stubGlobal('fetch', fetchMock);
-    stop = serveSharedSession({
-      derivationOrigin: DERIVATION_ORIGIN,
-      canisterId: CANISTER_ID,
-      storage: testStorage(),
-    });
-
-    const client = fakeClient();
-    request(client);
-    await reply(client);
-
-    expect(fetchMock).toHaveBeenCalledWith(
-      `https://${CANISTER_ID}.icp0.io/.well-known/ii-alternative-origins`,
-      expect.objectContaining({ redirect: 'error', credentials: 'omit' }),
-    );
-  });
-
-  it('reads the record same-origin when it owns the derivation origin', async () => {
+  it('reads the record same-origin when it is served from the derivation origin', async () => {
     const fetchMock = record([CLIENT_ORIGIN]);
     vi.stubGlobal('fetch', fetchMock);
     stop = serveSharedSession({ derivationOrigin: HUB_ORIGIN, storage: testStorage() });
@@ -275,16 +246,73 @@ describe('serveSharedSession allow-list discovery', () => {
     );
   });
 
-  it('warns when reading a remote record without certification', async () => {
-    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
-    vi.stubGlobal('fetch', record([CLIENT_ORIGIN]));
-    stop = serveSharedSession({ derivationOrigin: DERIVATION_ORIGIN, storage: testStorage() });
+  it('reads the record through the gateway, resolving the canister from the hostname', async () => {
+    const fetchMock = record([CLIENT_ORIGIN]);
+    vi.stubGlobal('fetch', fetchMock);
+    stop = serveSharedSession({
+      derivationOrigin: `https://${CANISTER_ID}.icp0.io`,
+      storage: testStorage(),
+    });
 
     const client = fakeClient();
     request(client);
     await reply(client);
 
-    expect(warn.mock.calls[0][0]).toContain('without certification');
+    expect(fetchMock).toHaveBeenCalledWith(
+      `https://${CANISTER_ID}.icp0.io/.well-known/ii-alternative-origins`,
+      expect.objectContaining({ redirect: 'error', credentials: 'omit' }),
+    );
+  });
+
+  it('asks a custom domain for its canister id, then reads through the gateway', async () => {
+    const fetchMock = vi.fn(async (url: string, init?: RequestInit) => {
+      if (init?.method === 'HEAD') {
+        expect(url).toBe(DERIVATION_ORIGIN);
+        return { ok: true, headers: new Headers({ 'x-ic-canister-id': CANISTER_ID }) };
+      }
+      return { ok: true, status: 200, json: async () => ({ alternativeOrigins: [CLIENT_ORIGIN] }) };
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    stop = serveSharedSession({ derivationOrigin: DERIVATION_ORIGIN, storage: testStorage() });
+
+    const client = fakeClient();
+    request(client);
+    expect(await reply(client)).not.toHaveProperty('error');
+
+    expect(fetchMock).toHaveBeenLastCalledWith(
+      `https://${CANISTER_ID}.icp0.io/.well-known/ii-alternative-origins`,
+      expect.anything(),
+    );
+  });
+
+  it('denies everyone when a custom domain names no canister', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue({ ok: true, headers: new Headers(), status: 200 }),
+    );
+    stop = serveSharedSession({ derivationOrigin: DERIVATION_ORIGIN, storage: testStorage() });
+
+    const client = fakeClient();
+    request(client);
+    expect(await reply(client)).toMatchObject({ error: 'denied' });
+  });
+
+  it('names the canister by query parameter against a local replica', async () => {
+    const fetchMock = record([CLIENT_ORIGIN]);
+    vi.stubGlobal('fetch', fetchMock);
+    stop = serveSharedSession({
+      derivationOrigin: `http://${CANISTER_ID}.localhost:4943`,
+      storage: testStorage(),
+    });
+
+    const client = fakeClient();
+    request(client);
+    await reply(client);
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      `http://${CANISTER_ID}.localhost:4943/.well-known/ii-alternative-origins?canisterId=${CANISTER_ID}`,
+      expect.anything(),
+    );
   });
 
   it('denies everyone when the record lists more origins than II accepts', async () => {
@@ -294,7 +322,6 @@ describe('serveSharedSession allow-list discovery', () => {
     );
     stop = serveSharedSession({
       derivationOrigin: DERIVATION_ORIGIN,
-      canisterId: CANISTER_ID,
       storage: testStorage(),
     });
 
@@ -307,7 +334,6 @@ describe('serveSharedSession allow-list discovery', () => {
     vi.stubGlobal('fetch', record('https://a.example.com'));
     stop = serveSharedSession({
       derivationOrigin: DERIVATION_ORIGIN,
-      canisterId: CANISTER_ID,
       storage: testStorage(),
     });
 

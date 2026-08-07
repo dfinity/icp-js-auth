@@ -71,17 +71,14 @@ const authClient = new AuthClient({
 
 ### Sharing One Session Across Origins
 
-Serve an application from several origins — `a.example.com`, `b.example.com` — with a single sign-in and a single principal.
+Serve an application from several origins — `docs.example.com`, `chat.example.com` — with a single sign-in and a single principal.
 
-Deploy a page that hosts the session:
+Deploy a page that hosts the session on your derivation origin:
 
 ```typescript
 import { serveSharedSession } from '@icp-sdk/auth/shared-session';
 
-serveSharedSession({
-  derivationOrigin: 'https://example.com',
-  canisterId: 'rdmx6-jaaaa-aaaaa-aaadq-cai',
-});
+serveSharedSession();
 ```
 
 Then point each origin at it:
@@ -91,13 +88,13 @@ import { AuthClient, SyncCookieStorage } from '@icp-sdk/auth/client';
 import { SharedSessionStorage } from '@icp-sdk/auth/shared-session';
 
 const authClient = new AuthClient({
-  storage: new SharedSessionStorage({ url: 'https://example.com/shared-session.html' }),
+  storage: new SharedSessionStorage({ url: 'https://auth.example.com/shared-session.html' }),
   syncStorage: new SyncCookieStorage({ domain: 'example.com' }),
-  derivationOrigin: 'https://example.com',
+  derivationOrigin: 'https://auth.example.com',
 });
 ```
 
-Each origin must be listed in the derivation origin's `.well-known/ii-alternative-origins` record. See the [shared session guide](https://js.icp.build/auth/shared-session) for the full setup.
+Each origin must be listed in `https://auth.example.com/.well-known/ii-alternative-origins`. See the [shared session guide](https://js.icp.build/auth/shared-session) for the full setup.
 
 ### Requesting Identity Attributes
 

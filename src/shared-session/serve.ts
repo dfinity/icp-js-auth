@@ -14,35 +14,14 @@ import {
   type SharedSessionResponse,
 } from './protocol.js';
 
-/**
- * The official HTTP gateway.
- *
- * Requests to a canister-id subdomain of this domain pass a boundary node that
- * verifies asset certification; a custom domain does not carry that guarantee.
- */
-const IC_HTTP_GATEWAY_DOMAIN = 'icp0.io';
-
 export interface ServeSharedSessionOptions {
   /**
    * Derivation origin whose session this hub holds.
    *
-   * Its `/.well-known/ii-alternative-origins` record lists the origins allowed
-   * to read the session. Those origins must sign in with this same derivation
-   * origin, or they store a session for a principal the others are not
-   * authorized for.
+   * Its `/.well-known/ii-alternative-origins` record decides which origins may
+   * read the session. Clients must sign in with this same value.
    */
   derivationOrigin: string | URL;
-
-  /**
-   * Canister id serving the derivation origin.
-   *
-   * Only used when the derivation origin is a different origin than this page.
-   * Supplying it makes the allow-list read through the official gateway, which
-   * verifies certification — without it, anyone able to tamper with responses
-   * from the derivation origin can widen the set of readers. Internet Identity
-   * takes the same precaution when it validates a derivation origin.
-   */
-  canisterId?: string;
 
   /**
    * Store holding the shared session.
@@ -61,11 +40,15 @@ export interface ServeSharedSessionOptions {
 }
 
 /**
- * Serves the shared session to the origins authorized by the derivation origin.
+ * Serves the shared session to the origins authorized by this origin.
  *
  * Call this on load from a page deployed at the URL clients pass to
  * `SharedSessionStorage`. The page needs nothing else: no markup, no user
  * interaction, and no state of its own.
+ *
+ * The page may be served from any origin; the derivation origin decides which
+ * origins may read the session, through its
+ * `/.well-known/ii-alternative-origins` record.
  *
  * Serve it with a `Content-Security-Policy: frame-ancestors` header naming the
  * origins allowed to embed it. That is defence in depth — the allow-list below
@@ -79,26 +62,13 @@ export interface ServeSharedSessionOptions {
  * ```ts
  * import { serveSharedSession } from '@icp-sdk/auth/shared-session';
  *
- * serveSharedSession({
- *   derivationOrigin: 'https://auth.example.com',
- *   canisterId: 'rdmx6-jaaaa-aaaaa-aaadq-cai',
- * });
+ * serveSharedSession({ derivationOrigin: 'https://auth.example.com' });
  * ```
  */
 export function serveSharedSession(options: ServeSharedSessionOptions): () => void {
   const storage = options.storage ?? new IdbStorage();
   const derivationOrigin = new URL(options.derivationOrigin.toString()).origin;
-  if (options.canisterId !== undefined) {
-    try {
-      Principal.fromText(options.canisterId);
-    } catch {
-      throw new Error(
-        `Shared session canisterId is not a valid principal: "${options.canisterId}".`,
-      );
-    }
-  }
-  const discover =
-    options.allowedOrigins ?? (() => fetchAlternativeOrigins(derivationOrigin, options.canisterId));
+  const discover = options.allowedOrigins ?? (() => fetchAlternativeOrigins(derivationOrigin));
 
   let discovered: Promise<Set<string>> | null = null;
   // Memoized, but a failure is not cached: a transient error must not deny every
@@ -196,11 +166,8 @@ async function apply(
   }
 }
 
-async function fetchAlternativeOrigins(
-  derivationOrigin: string,
-  canisterId: string | undefined,
-): Promise<string[]> {
-  const url = alternativeOriginsUrl(derivationOrigin, canisterId);
+async function fetchAlternativeOrigins(derivationOrigin: string): Promise<string[]> {
+  const url = await alternativeOriginsUrl(derivationOrigin);
   const response = await fetch(url, {
     // A redirect would move the record to an origin that never vouched for it.
     redirect: 'error',
@@ -223,19 +190,100 @@ async function fetchAlternativeOrigins(
   return record.alternativeOrigins;
 }
 
-function alternativeOriginsUrl(derivationOrigin: string, canisterId: string | undefined): string {
-  // Same origin: the record's integrity is this page's own. Anyone able to
-  // rewrite it can rewrite this bundle, so the gateway adds nothing.
+/**
+ * The official HTTP gateway.
+ *
+ * A request to a canister-id subdomain of it passes a boundary node that
+ * verifies asset certification; a custom domain carries no such guarantee.
+ */
+const IC_HTTP_GATEWAY_DOMAIN = 'icp0.io';
+
+/** Domains where the canister id is the leftmost label of the hostname. */
+const WELL_KNOWN_IC_DOMAINS = [
+  'ic0.app',
+  'icp0.io',
+  'icp.net',
+  'internetcomputer.org',
+  'localhost',
+];
+
+/** Header a boundary node sets to name the canister serving a custom domain. */
+const CANISTER_ID_HEADER = 'x-ic-canister-id';
+
+/**
+ * Where to read the derivation origin's record from.
+ *
+ * Read through the canister-id gateway URL rather than the derivation origin's
+ * own domain, so a boundary node verifies certification — the same precaution
+ * Internet Identity takes when it validates a derivation origin. Reading the
+ * custom domain directly would let anyone able to tamper with its responses
+ * widen the set of origins allowed to read the session.
+ * @param derivationOrigin - Origin whose record is wanted.
+ */
+async function alternativeOriginsUrl(derivationOrigin: string): Promise<string> {
+  // This page's own origin: the record's integrity is already this page's, so
+  // anyone able to rewrite it can rewrite this bundle and the gateway adds
+  // nothing.
   if (derivationOrigin === location.origin) {
     return ALTERNATIVE_ORIGINS_PATH;
   }
-  if (canisterId !== undefined) {
-    return `https://${canisterId}.${IC_HTTP_GATEWAY_DOMAIN}${ALTERNATIVE_ORIGINS_PATH}`;
+
+  const url = new URL(derivationOrigin);
+  const canisterId = await resolveCanisterId(url);
+
+  // A local replica serves every canister from one host, so the canister is
+  // named by query parameter instead of by subdomain.
+  if (isLoopbackHost(url.hostname)) {
+    return `${url.origin}${ALTERNATIVE_ORIGINS_PATH}?canisterId=${canisterId.toText()}`;
   }
-  if (!isLoopbackHost(new URL(derivationOrigin).hostname)) {
-    console.warn(
-      `Reading ${derivationOrigin}${ALTERNATIVE_ORIGINS_PATH} without certification. Pass canisterId so the allow-list is read through ${IC_HTTP_GATEWAY_DOMAIN}, otherwise tampering with that origin's responses can widen who may read the shared session.`,
-    );
+  return `https://${canisterId.toText()}.${IC_HTTP_GATEWAY_DOMAIN}${ALTERNATIVE_ORIGINS_PATH}`;
+}
+
+/**
+ * Resolves the canister serving an origin.
+ *
+ * On a well-known IC domain the canister id is the leftmost label. A custom
+ * domain has to be asked: a boundary node answers with the canister id in a
+ * response header. That header is not certified, so a party able to tamper with
+ * the origin's responses can name a canister of their own — the certified read
+ * that follows then verifies the wrong canister's record. Internet Identity
+ * resolves the same way and inherits the same limit.
+ * @param origin - Origin to resolve.
+ */
+async function resolveCanisterId(origin: URL): Promise<Principal> {
+  const fromHostname = canisterIdFromHostname(origin.hostname);
+  if (fromHostname !== undefined) {
+    return fromHostname;
   }
-  return `${derivationOrigin}${ALTERNATIVE_ORIGINS_PATH}`;
+
+  const response = await fetch(origin.origin, { method: 'HEAD', credentials: 'omit' });
+  const header = response.headers.get(CANISTER_ID_HEADER);
+  if (header === null) {
+    throw new Error(`${origin.origin} did not answer with a ${CANISTER_ID_HEADER} header`);
+  }
+  try {
+    return Principal.fromText(header);
+  } catch {
+    throw new Error(`${origin.origin} answered with an invalid ${CANISTER_ID_HEADER}: "${header}"`);
+  }
+}
+
+function canisterIdFromHostname(hostname: string): Principal | undefined {
+  // Matched on a dot boundary, so a lookalike such as `evil-ic0.app` is not
+  // taken for a well-known IC domain.
+  const wellKnown = WELL_KNOWN_IC_DOMAINS.some(
+    (domain) => hostname === domain || hostname.endsWith(`.${domain}`),
+  );
+  if (!wellKnown) return undefined;
+
+  const [first, ...rest] = hostname.split('.');
+  // No subdomain to read a canister id from.
+  if (rest.length === 0) return undefined;
+  try {
+    return Principal.fromText(first);
+  } catch {
+    // Not a canister id, so the origin is a custom domain on one of these hosts
+    // and has to be asked instead.
+    return undefined;
+  }
 }
