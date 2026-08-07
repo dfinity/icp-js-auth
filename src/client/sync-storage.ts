@@ -52,7 +52,7 @@ export interface SyncCookieStorageOptions {
    * Must be the current host or a domain above it: a browser rejects a cookie
    * scoped to anything else, including a sibling subdomain. It also refuses a
    * public suffix, so an over-broad value fails rather than leaking to
-   * unrelated sites. Nothing needs to be served at the domain — it is only a
+   * unrelated sites. Nothing needs to be served at the domain, which is only a
    * storage and matching key.
    */
   domain: string;

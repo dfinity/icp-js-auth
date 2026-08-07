@@ -627,7 +627,7 @@ export class AuthClient {
       // and leave every getIdentity() rejecting for the page's lifetime.
       // Staying anonymous is recoverable: a signIn() still works.
       //
-      // The cached expiration is deliberately left alone — a hub that failed to
+      // The cached expiration is deliberately left alone: a hub that failed to
       // answer has not told us the session is gone, and clearing it would sign
       // the user out of this origin on a transient error.
       console.error(`Failed to restore the session: ${String(error)}`);

@@ -51,9 +51,9 @@ export interface ServeSharedSessionOptions {
  * `/.well-known/ii-alternative-origins` record.
  *
  * Serve it with a `Content-Security-Policy: frame-ancestors` header naming the
- * origins allowed to embed it. That is defence in depth — the allow-list below
- * is what authorizes a reader — but it stops an unrelated site from loading the
- * page at all.
+ * origins allowed to embed it. That is defence in depth, since the allow-list
+ * below is what authorizes a reader, but it stops an unrelated site from loading
+ * the page at all.
  *
  * @param options - See {@link ServeSharedSessionOptions}.
  * @returns A function that stops serving.
@@ -214,7 +214,7 @@ const CANISTER_ID_HEADER = 'x-ic-canister-id';
  * Where to read the derivation origin's record from.
  *
  * Read through the canister-id gateway URL rather than the derivation origin's
- * own domain, so a boundary node verifies certification — the same precaution
+ * own domain, so a boundary node verifies certification, the same precaution
  * Internet Identity takes when it validates a derivation origin. Reading the
  * custom domain directly would let anyone able to tamper with its responses
  * widen the set of origins allowed to read the session.
@@ -245,8 +245,8 @@ async function alternativeOriginsUrl(derivationOrigin: string): Promise<string> 
  * On a well-known IC domain the canister id is the leftmost label. A custom
  * domain has to be asked: a boundary node answers with the canister id in a
  * response header. That header is not certified, so a party able to tamper with
- * the origin's responses can name a canister of their own — the certified read
- * that follows then verifies the wrong canister's record. Internet Identity
+ * the origin's responses can name a canister of their own, and the certified
+ * read that follows then verifies the wrong canister's record. Internet Identity
  * resolves the same way and inherits the same limit.
  * @param origin - Origin to resolve.
  */
