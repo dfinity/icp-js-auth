@@ -71,14 +71,14 @@ const authClient = new AuthClient({
 
 ### Sharing One Session Across Origins
 
-Serve an application from several origins — `docs.example.com`, `chat.example.com` — with a single sign-in and a single principal.
+Give several apps under one custom domain — `docs.example.com`, `chat.example.com` — the same principal and the same sign-in state.
 
-Deploy a page that hosts the session on your derivation origin:
+Deploy a page that hosts the session:
 
 ```typescript
 import { serveSharedSession } from '@icp-sdk/auth/shared-session';
 
-serveSharedSession();
+serveSharedSession({ derivationOrigin: 'https://auth.example.com' });
 ```
 
 Then point each origin at it:
@@ -94,7 +94,7 @@ const authClient = new AuthClient({
 });
 ```
 
-Each origin must be listed in `https://auth.example.com/.well-known/ii-alternative-origins`. See the [shared session guide](https://js.icp.build/auth/shared-session) for the full setup.
+Each app must be listed in the derivation origin's `.well-known/ii-alternative-origins` record. See the [shared session guide](https://js.icp.build/auth/shared-session) for the full setup.
 
 ### Requesting Identity Attributes
 
