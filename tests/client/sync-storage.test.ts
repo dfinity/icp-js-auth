@@ -132,7 +132,7 @@ describe('SyncCookieStorage', () => {
     expect(attributesOf(writes[0])).toContain('Secure');
   });
 
-  it('omits Secure on loopback, which Safari rejects over http', () => {
+  it('omits Secure on loopback, where it is not reliably accepted', () => {
     const writes = captureCookieWrites();
     testStorage().set(KEY, '123');
 

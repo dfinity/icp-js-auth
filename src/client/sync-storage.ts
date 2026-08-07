@@ -85,7 +85,8 @@ export class SyncCookieStorage implements AuthClientSyncStorage {
       ...(isLoopbackHost(options.domain) ? [] : [`Domain=${options.domain}`]),
       'Path=/',
       'SameSite=Lax',
-      // Loopback is a secure context, but Safari rejects Secure over http.
+      // Loopback is a secure context, but a Secure cookie over http is not
+      // reliably accepted.
       ...(location.protocol === 'https:' ? ['Secure'] : []),
     ].join('; ');
   }
