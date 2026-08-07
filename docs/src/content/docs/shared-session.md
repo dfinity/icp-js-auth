@@ -7,7 +7,7 @@ Use a shared session when several apps under one custom domain need the same pri
 
 A `derivationOrigin` alone gives them the same principal, but each app still signs in separately and keeps its own session. The setup below shares the session itself, so signing in or out of one app applies to all of them.
 
-Throughout, `example.com` is that custom domain and `https://auth.example.com` is the derivation origin: the origin the shared principal is derived for. It must resolve to a canister.
+A shared session requires a derivation origin. The examples below use `example.com` as the custom domain and `https://auth.example.com` as the derivation origin.
 
 ## 1. Host the session
 
@@ -24,12 +24,6 @@ Deploy a page that calls `serveSharedSession`, on any origin you control:
 import { serveSharedSession } from '@icp-sdk/auth/shared-session';
 
 serveSharedSession({ derivationOrigin: 'https://auth.example.com' });
-```
-
-Serve it with a header naming the origins allowed to embed it:
-
-```
-Content-Security-Policy: frame-ancestors 'self' https://docs.example.com https://chat.example.com;
 ```
 
 ## 2. Authorize each app
