@@ -31,9 +31,11 @@ export class SyncLocalStorage implements AuthClientSyncStorage {
     return localStorage.getItem(key);
   }
 
-  // localStorage cannot expire a value, so expiresAt is ignored; the value it
-  // holds is a timestamp the reader compares against the current time anyway.
-  set(key: string, value: string): void {
+  // Declared but ignored: localStorage cannot expire a value, and dropping the
+  // parameter would make this class unusable where the interface is expected.
+  // The value it holds is a timestamp the reader compares against the current
+  // time anyway.
+  set(key: string, value: string, _expiresAt?: number): void {
     localStorage.setItem(key, value);
   }
 
