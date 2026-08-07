@@ -892,7 +892,22 @@ describe('AuthClient shared session', () => {
     await settleHydration(client);
   });
 
-  it('falls back to localStorage when the derivation origin is a sibling domain', async () => {
+  it('scopes the cookie to the hub, not the derivation origin', async () => {
+    // The hub is at-or-above this origin while the derivation origin is an
+    // unrelated domain, so only following the hub reaches a usable cookie.
+    setExpirationCookie(futureExpirationNs());
+    const client = new AuthClient({
+      sharedSessionHub: { url: 'http://localhost:4000/hub.html', timeout: 30 },
+      derivationOrigin: 'https://example2.com',
+      idleOptions: { disableIdle: true },
+    });
+
+    expect(localStorage.getItem(EXPIRATION_KEY)).toBeNull();
+    expect(client.isAuthenticated()).toBe(true);
+    await settleHydration(client);
+  });
+
+  it('falls back to localStorage when the hub is on a sibling domain', async () => {
     // A cookie for auth.localhost cannot be written from jsdom's localhost
     // origin, so a cookie-backed store would never read back what it wrote.
     const client = new AuthClient({

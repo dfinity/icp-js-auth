@@ -66,7 +66,7 @@ Signing out on any origin clears the shared store, so every origin loses the ses
 
 ## Checking for a session
 
-`isAuthenticated()` answers synchronously, so it cannot read the shared store: that one is asynchronous and belongs to another origin. It reads the delegation's expiration from a separate synchronous store instead — `localStorage` normally, and a cookie scoped to the derivation origin's domain when `sharedSessionHub` is set.
+`isAuthenticated()` answers synchronously, so it cannot read the shared store: that one is asynchronous and belongs to another origin. It reads the delegation's expiration from a separate synchronous store instead — `localStorage` normally, and a cookie scoped to the hub's domain when `sharedSessionHub` is set.
 
 The cookie is what makes the answer correct across origins. It holds one non-secret value, a timestamp, and its `Max-Age` matches the delegation, so it cannot outlive the session it describes. Signing out on any origin deletes it for all of them.
 
@@ -79,7 +79,7 @@ if (identity.getPrincipal().isAnonymous()) {
 }
 ```
 
-A cookie can only be scoped to the current host or a domain above it, so this needs the derivation origin to be a **parent** of the consuming origins — `https://example.com` for clients on `a.example.com` and `b.example.com`. With a sibling derivation origin (`auth.example.com` alongside `a.example.com`) the cookie is unreachable, so `localStorage` is used instead and `isAuthenticated()` is correct only after that origin has restored the session once.
+The cookie follows the **hub**, not the derivation origin: the hub is necessarily same-site with the origins it serves, while the derivation origin may be an unrelated domain. A cookie can only be scoped to the current host or a domain above it, so this needs the hub to be a **parent** of the consuming origins — `https://example.com` serving clients on `a.example.com` and `b.example.com`. With a sibling hub (`auth.example.com` alongside `a.example.com`) the cookie is unreachable, so `localStorage` is used instead and `isAuthenticated()` is correct only after that origin has restored the session once.
 
 Supply `syncStorage` to override the choice entirely.
 

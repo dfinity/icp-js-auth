@@ -778,11 +778,15 @@ function createSyncStorage(options: AuthClientCreateOptions): AuthClientSyncStor
   if (options.sharedSessionHub === undefined) {
     return new SyncLocalStorage();
   }
-  // A cookie can only be scoped to this host or a domain above it, so a
-  // derivation origin that is a sibling (auth.example.com next to
-  // a.example.com) cannot be written to and would leave every read empty.
-  // Falling back keeps this origin correct once it has read the shared store.
-  const domain = new URL(options.derivationOrigin.toString()).hostname;
+  // Scoped to the hub, not the derivation origin: the hub has to be same-site
+  // with the origins it serves, or its storage is partitioned and there is
+  // nothing to share, while the derivation origin may be an unrelated domain.
+  //
+  // A cookie can only be scoped to this host or a domain above it, so a hub
+  // that is a sibling (auth.example.com next to a.example.com) cannot be
+  // written to and would leave every read empty. Falling back keeps this origin
+  // correct once it has read the shared store.
+  const domain = new URL(options.sharedSessionHub.url.toString()).hostname;
   // Falls back rather than throwing where the host is unavailable, so a
   // constructor never fails over a synchronous hint.
   const hostname = globalThis.location?.hostname ?? '';
