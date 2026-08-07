@@ -799,13 +799,24 @@ describe('AuthClient shared session', () => {
     expect(client.isAuthenticated()).toBe(true);
   });
 
-  it('clears a stale expiration when the session is no longer in the store', async () => {
-    // Another origin signed out, which cannot reach this origin's localStorage.
+  it('keeps the cached expiration when the store is empty', async () => {
+    // With a shared session the cache is shared too, so an origin that cannot
+    // see the session must not delete the hint the others rely on. The cache
+    // carries the delegation's expiry and lapses on its own.
     localStorage.setItem(EXPIRATION_KEY, futureExpirationNs());
     const client = new AuthClient({ storage: fakeStore(), idleOptions: { disableIdle: true } });
-    expect(client.isAuthenticated()).toBe(true);
 
-    await client.getIdentity();
+    const identity = await client.getIdentity();
+
+    expect(identity.getPrincipal().isAnonymous()).toBe(true);
+    expect(client.isAuthenticated()).toBe(true);
+  });
+
+  it('clears the cached expiration on sign out', async () => {
+    localStorage.setItem(EXPIRATION_KEY, futureExpirationNs());
+    const client = new AuthClient({ storage: fakeStore(), idleOptions: { disableIdle: true } });
+
+    await client.signOut();
 
     expect(client.isAuthenticated()).toBe(false);
   });

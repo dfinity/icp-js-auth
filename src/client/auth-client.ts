@@ -641,19 +641,15 @@ export class AuthClient {
     const key =
       this.#options.identity ??
       (await restoreKey(this.#storage, this.#options.keyType ?? ECDSA_KEY_LABEL));
-    if (!key) {
-      clearCachedExpiration(this.#syncStorage);
-      return;
-    }
+    if (!key) return;
 
     const chain = await restoreChain(this.#storage, this.#syncStorage);
-    if (!chain) {
-      // A shared session can be signed out from another origin, which cannot
-      // reach this origin's cached expiration. Clearing it here stops
-      // isAuthenticated() reporting a session that is no longer in the store.
-      clearCachedExpiration(this.#syncStorage);
-      return;
-    }
+    // An empty store is deliberately not treated as a reason to clear the
+    // cached expiration. With a shared session that cache is shared too, so one
+    // origin that cannot see the session would delete the others' hint. The
+    // cache carries the delegation's own expiry, so it lapses on its own;
+    // signing out and an expired chain both clear it through deleteStorage.
+    if (!chain) return;
 
     // This origin may be restoring a session it never signed in for, in which
     // case it has no cached expiration of its own yet.
