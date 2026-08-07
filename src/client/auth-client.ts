@@ -90,7 +90,7 @@ export interface AuthClientCreateOptions {
 
   /**
    * Derivation origin for the identity provider.
-   * @see https://github.com/dfinity/internet-identity/blob/main/docs/internet-identity-spec.adoc
+   * @see https://docs.internetcomputer.org/references/internet-identity-spec/#alternative-frontend-origins
    */
   derivationOrigin?: string | URL;
 

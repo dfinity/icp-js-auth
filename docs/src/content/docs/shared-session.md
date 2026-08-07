@@ -28,7 +28,7 @@ serveSharedSession({ derivationOrigin: 'https://auth.example.com' });
 
 ## 2. Authorize each app
 
-The derivation origin decides which origins may read the session. List them in its [`.well-known/ii-alternative-origins`](https://github.com/dfinity/internet-identity/blob/main/docs/internet-identity-spec.adoc#alternative-frontend-origins) record:
+The derivation origin decides which origins may read the session. List them in its [`.well-known/ii-alternative-origins`](https://docs.internetcomputer.org/references/internet-identity-spec/#alternative-frontend-origins) record:
 
 ```json
 { "alternativeOrigins": ["https://docs.example.com", "https://chat.example.com"] }
