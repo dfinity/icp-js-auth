@@ -11,26 +11,14 @@ import {
   type SharedSessionResponse,
 } from './protocol.js';
 
-/** Location of the page that calls `serveSharedSession`. */
-export interface SharedSessionHubOptions {
+export interface SharedSessionStorageOptions {
   /**
-   * Absolute URL of the hub page, e.g.
-   * `https://auth.example.com/.well-known/icp-auth-storage.html`.
+   * Absolute URL of the page that calls `serveSharedSession`, e.g.
+   * `https://auth.example.com/shared-session.html`.
    *
    * Must be `https`, except on loopback for local development.
    */
   url: string | URL;
-
-  /**
-   * Time to wait for the hub to load and to answer each operation, in milliseconds.
-   * @default 10000
-   */
-  timeout?: number;
-}
-
-export interface SharedSessionStorageOptions {
-  /** Where the shared session is served from. */
-  hub: SharedSessionHubOptions;
 
   /**
    * Derivation origin the shared session belongs to.
@@ -40,6 +28,12 @@ export interface SharedSessionStorageOptions {
    * derivation origin differs from the one it was configured with.
    */
   derivationOrigin: string | URL;
+
+  /**
+   * Time to wait for the hub to load and to answer each operation, in milliseconds.
+   * @default 10000
+   */
+  timeout?: number;
 }
 
 /**
@@ -57,7 +51,7 @@ export interface SharedSessionStorageOptions {
  *
  * const authClient = new AuthClient({
  *   storage: new SharedSessionStorage({
- *     hub: { url: 'https://auth.example.com/hub.html' },
+ *     url: 'https://auth.example.com/shared-session.html',
  *     derivationOrigin,
  *   }),
  *   // The same value, or this client would sign in as a principal the hub's
@@ -75,7 +69,7 @@ export class SharedSessionStorage implements AuthClientStorage {
   #lastId = 0;
 
   constructor(options: SharedSessionStorageOptions) {
-    this.#hubUrl = parseAbsoluteUrl(options.hub.url, 'hub.url');
+    this.#hubUrl = parseAbsoluteUrl(options.url, 'url');
     if (!isSecureOrigin(this.#hubUrl)) {
       throw new Error(
         `Shared session hub must be served over https (or loopback for local development), got "${this.#hubUrl.origin}".`,
@@ -83,18 +77,7 @@ export class SharedSessionStorage implements AuthClientStorage {
     }
     this.#hubOrigin = this.#hubUrl.origin;
     this.#derivationOrigin = parseAbsoluteUrl(options.derivationOrigin, 'derivationOrigin').origin;
-    this.#timeout = options.hub.timeout ?? DEFAULT_TIMEOUT_MS;
-  }
-
-  /**
-   * Origin serving this shared session.
-   *
-   * Identifies the session among any others under the same domain: pass it as
-   * the `namespace` of a `SyncCookieStorage` so two hubs do not describe each
-   * other's sessions.
-   */
-  get hubOrigin(): string {
-    return this.#hubOrigin;
+    this.#timeout = options.timeout ?? DEFAULT_TIMEOUT_MS;
   }
 
   async get(key: string): Promise<StoredKey | null> {

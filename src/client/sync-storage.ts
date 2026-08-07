@@ -58,18 +58,14 @@ export interface SyncCookieStorageOptions {
   domain: string;
 
   /**
-   * Distinguishes this store's cookies from another's under the same domain.
+   * Derivation origin of the session this store describes.
    *
-   * Two shared sessions below one domain — say two hubs, or a staging deployment
-   * beside production — otherwise write the same cookie name and describe each
-   * other's sessions. Pass something that identifies the session, such as the
-   * hub's host.
-   *
-   * A value that parses as a URL is reduced to its origin, so a hub's URL and
-   * its origin name the same cookie. Characters a cookie name cannot carry are
-   * replaced, so either can be passed as-is.
+   * It is part of the cookie's name, so two shared sessions below one domain —
+   * a staging deployment beside production — do not write the same cookie and
+   * describe each other's state. Pass the same value given to the session's
+   * storage and to {@link AuthClient}.
    */
-  namespace?: string;
+  derivationOrigin: string | URL;
 }
 
 /**
@@ -89,7 +85,7 @@ export class SyncCookieStorage implements AuthClientSyncStorage {
   readonly #suffix: string;
 
   constructor(options: SyncCookieStorageOptions) {
-    this.#suffix = options.namespace === undefined ? '' : `.${toCookieName(options.namespace)}`;
+    this.#suffix = `.${toCookieName(options.derivationOrigin.toString())}`;
     this.#attributes = [
       // Host-only on loopback: browsers reject `Domain=localhost`, and a
       // host-only cookie is already shared across ports, which is what a local
@@ -151,8 +147,8 @@ const NON_TOKEN = /[^!#$%&'*+\-.0-9A-Z^_`a-z|~]/g;
 function toCookieName(value: string): string {
   let normalized = value;
   try {
-    // Reduced to an origin so that a hub's URL and its origin, which identify
-    // the same shared session, do not name two different cookies.
+    // Reduced to an origin so that a derivation origin written with a trailing
+    // slash or a path does not name a second cookie.
     normalized = new URL(value).origin;
   } catch {
     // Not a URL; used as given.

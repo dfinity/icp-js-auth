@@ -769,10 +769,13 @@ describe('AuthClient shared session', () => {
     });
   });
 
-  /** Seeds the cross-origin expiration hint the way another origin would. */
+  /**
+   * Seeds the cross-origin expiration hint the way another origin would. The
+   * name carries the derivation origin, so it must match what the store builds.
+   */
   const setExpirationCookie = (value: string): void => {
     // biome-ignore lint/suspicious/noDocumentCookie: seeding the store the client reads synchronously.
-    document.cookie = `${EXPIRATION_KEY}=${value}; Path=/`;
+    document.cookie = `${EXPIRATION_KEY}.https___example.com=${value}; Path=/`;
   };
 
   afterEach(() => {
@@ -833,8 +836,9 @@ describe('AuthClient shared session', () => {
     // failed handshake removes it.
     const client = new AuthClient({
       storage: new SharedSessionStorage({
-        hub: { url: 'https://auth.example.com/hub.html', timeout: 300 },
+        url: 'https://auth.example.com/shared-session.html',
         derivationOrigin: 'https://auth.example.com',
+        timeout: 300,
       }),
       derivationOrigin: 'https://auth.example.com',
       idleOptions: { disableIdle: true },
@@ -845,7 +849,7 @@ describe('AuthClient shared session', () => {
       expect(found).not.toBeNull();
       return found as HTMLIFrameElement;
     });
-    expect(frame.src).toBe('https://auth.example.com/hub.html');
+    expect(frame.src).toBe('https://auth.example.com/shared-session.html');
     expect(frame.hidden).toBe(true);
 
     // The hub never answers, so hydration ends in the anonymous fallback.
@@ -862,7 +866,10 @@ describe('AuthClient shared session', () => {
     expect(localStorage.getItem(EXPIRATION_KEY)).toBeNull();
 
     const client = new AuthClient({
-      syncStorage: new SyncCookieStorage({ domain: 'localhost' }),
+      syncStorage: new SyncCookieStorage({
+        domain: 'localhost',
+        derivationOrigin: 'https://example.com',
+      }),
       idleOptions: { disableIdle: true },
     });
 

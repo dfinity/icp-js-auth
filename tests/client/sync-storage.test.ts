@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { SyncCookieStorage, SyncLocalStorage } from '../../src/client/sync-storage.ts';
 
 const KEY = 'ic-delegation_expiration';
+const DERIVATION_ORIGIN = 'https://example.com';
 
 /**
  * Records what is assigned to `document.cookie` while still applying it.
@@ -70,7 +71,8 @@ describe('SyncLocalStorage', () => {
 
 describe('SyncCookieStorage', () => {
   // jsdom serves the tests from localhost, so only a matching domain sticks.
-  const testStorage = () => new SyncCookieStorage({ domain: 'localhost' });
+  const testStorage = () =>
+    new SyncCookieStorage({ domain: 'localhost', derivationOrigin: DERIVATION_ORIGIN });
 
   it('round-trips a value', () => {
     const storage = testStorage();
@@ -85,12 +87,13 @@ describe('SyncCookieStorage', () => {
 
   it('reads its own value among other cookies', () => {
     setRawCookie('other=first; Path=/');
-    setRawCookie('another=second; Path=/');
+    // A bare key belongs to no session and must not be mistaken for this one's.
+    setRawCookie(`${KEY}=unnamespaced; Path=/`);
     const storage = testStorage();
     storage.set(KEY, '123');
 
     expect(storage.get(KEY)).toBe('123');
-    expect(storage.get('other')).toBe('first');
+    expect(storage.get('other')).toBeNull();
     expect(storage.get('missing')).toBeNull();
   });
 
@@ -119,7 +122,10 @@ describe('SyncCookieStorage', () => {
 
   it('scopes the cookie to the domain so subdomains share it', () => {
     const writes = captureCookieWrites();
-    new SyncCookieStorage({ domain: 'example.com' }).set(KEY, '123');
+    new SyncCookieStorage({ domain: 'example.com', derivationOrigin: DERIVATION_ORIGIN }).set(
+      KEY,
+      '123',
+    );
 
     expect(attributesOf(writes[0])).toContain('Domain=example.com');
   });
@@ -127,7 +133,10 @@ describe('SyncCookieStorage', () => {
   it('marks the cookie Secure over https', () => {
     vi.stubGlobal('location', { protocol: 'https:' });
     const writes = captureCookieWrites();
-    new SyncCookieStorage({ domain: 'example.com' }).set(KEY, '123');
+    new SyncCookieStorage({ domain: 'example.com', derivationOrigin: DERIVATION_ORIGIN }).set(
+      KEY,
+      '123',
+    );
 
     expect(attributesOf(writes[0])).toContain('Secure');
   });
@@ -140,8 +149,14 @@ describe('SyncCookieStorage', () => {
   });
 
   it('keeps two shared sessions under one domain apart', () => {
-    const first = new SyncCookieStorage({ domain: 'localhost', namespace: 'auth.example.com' });
-    const second = new SyncCookieStorage({ domain: 'localhost', namespace: 'other.example.com' });
+    const first = new SyncCookieStorage({
+      domain: 'localhost',
+      derivationOrigin: 'https://one.example.com',
+    });
+    const second = new SyncCookieStorage({
+      domain: 'localhost',
+      derivationOrigin: 'https://two.example.com',
+    });
 
     first.set(KEY, '111');
     second.set(KEY, '222');
@@ -156,17 +171,20 @@ describe('SyncCookieStorage', () => {
 
   it('replaces characters a cookie name cannot carry', () => {
     const writes = captureCookieWrites();
-    new SyncCookieStorage({ domain: 'localhost', namespace: 'http://localhost:4000' }).set(
-      KEY,
-      '123',
-    );
+    new SyncCookieStorage({
+      domain: 'localhost',
+      derivationOrigin: 'http://localhost:4000',
+    }).set(KEY, '123');
 
     expect(writes[0].split('=')[0]).toBe(`${KEY}.http___localhost_4000`);
   });
 
   it('removes with the same attributes, so the write targets the same cookie', () => {
     const writes = captureCookieWrites();
-    const storage = new SyncCookieStorage({ domain: 'example.com' });
+    const storage = new SyncCookieStorage({
+      domain: 'example.com',
+      derivationOrigin: DERIVATION_ORIGIN,
+    });
     storage.set(KEY, '123');
     storage.remove(KEY);
 
@@ -176,18 +194,18 @@ describe('SyncCookieStorage', () => {
   });
 });
 
-describe('SyncCookieStorage namespace', () => {
-  it('names the same cookie for a hub url and its origin', () => {
-    const fromUrl = new SyncCookieStorage({
+describe('SyncCookieStorage derivation origin', () => {
+  it('names the same cookie however the origin is written', () => {
+    const withPath = new SyncCookieStorage({
       domain: 'localhost',
-      namespace: 'https://auth.example.com/hub.html',
+      derivationOrigin: 'https://example.com/',
     });
-    const fromOrigin = new SyncCookieStorage({
+    const bare = new SyncCookieStorage({
       domain: 'localhost',
-      namespace: 'https://auth.example.com',
+      derivationOrigin: new URL('https://example.com'),
     });
 
-    fromUrl.set(KEY, '123');
-    expect(fromOrigin.get(KEY)).toBe('123');
+    withPath.set(KEY, '123');
+    expect(bare.get(KEY)).toBe('123');
   });
 });

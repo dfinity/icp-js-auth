@@ -60,7 +60,7 @@ import { SharedSessionStorage } from '@icp-sdk/auth/shared-session';
 const DERIVATION_ORIGIN = 'https://example.com';
 
 const sharedSession = new SharedSessionStorage({
-  hub: { url: 'https://example.com/shared-session.html' },
+  url: 'https://example.com/shared-session.html',
   derivationOrigin: DERIVATION_ORIGIN,
 });
 
@@ -89,7 +89,7 @@ const authClient = new AuthClient({
   storage: sharedSession,
   syncStorage: new SyncCookieStorage({
     domain: 'example.com',
-    namespace: sharedSession.hubOrigin,
+    derivationOrigin: DERIVATION_ORIGIN,
   }),
   derivationOrigin: DERIVATION_ORIGIN,
 });
@@ -97,7 +97,7 @@ const authClient = new AuthClient({
 
 `domain` is what the sharing origins have in common, and must be the current host or a domain above it — a browser rejects anything else, including a sibling subdomain, and refuses a public suffix outright. Nothing needs to be served at it: a hub on `auth.example.com` can scope its cookie to `example.com` even if nothing answers there.
 
-`namespace` keeps two shared sessions under one domain from describing each other's state, which matters for a staging deployment beside production. `hubOrigin` identifies the session, since the hub is where it lives.
+`derivationOrigin` becomes part of the cookie's name, so two shared sessions under one domain — a staging deployment beside production — do not write the same cookie and describe each other's state. It is the same constant the other two options take.
 
 The cookie holds one non-secret value, a timestamp, and its `Max-Age` comes from the delegation, so it cannot outlive the session it describes. Signing out on any origin deletes it for all of them.
 

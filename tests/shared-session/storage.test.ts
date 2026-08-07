@@ -7,10 +7,7 @@ const HUB_ORIGIN = 'https://auth.example.com';
 const DERIVATION_ORIGIN = 'https://example.com';
 
 const testStorage = (timeout = 500) =>
-  new SharedSessionStorage({
-    hub: { url: HUB_URL, timeout },
-    derivationOrigin: DERIVATION_ORIGIN,
-  });
+  new SharedSessionStorage({ url: HUB_URL, derivationOrigin: DERIVATION_ORIGIN, timeout });
 
 /**
  * Stands in for the hub page. jsdom leaves an iframe on `about:blank` because
@@ -61,16 +58,16 @@ describe('SharedSessionStorage', () => {
     ['a relative url', '/hub.html', 'must be an absolute URL'],
     ['plain http', 'http://auth.example.com/hub.html', 'must be served over https'],
   ])('rejects %s for the hub', (_label, url, message) => {
-    expect(
-      () => new SharedSessionStorage({ hub: { url }, derivationOrigin: DERIVATION_ORIGIN }),
-    ).toThrow(message);
+    expect(() => new SharedSessionStorage({ url, derivationOrigin: DERIVATION_ORIGIN })).toThrow(
+      message,
+    );
   });
 
   it('accepts a loopback hub for local development', () => {
     expect(
       () =>
         new SharedSessionStorage({
-          hub: { url: 'http://localhost:5174/hub.html' },
+          url: 'http://localhost:5174/shared-session.html',
           derivationOrigin: 'http://localhost:5173',
         }),
     ).not.toThrow();

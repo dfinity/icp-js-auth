@@ -91,7 +91,7 @@ import { SharedSessionStorage } from '@icp-sdk/auth/shared-session';
 
 const authClient = new AuthClient({
   storage: new SharedSessionStorage({
-    hub: { url: 'https://example.com/shared-session.html' },
+    url: 'https://example.com/shared-session.html',
     derivationOrigin: 'https://example.com',
   }),
   derivationOrigin: 'https://example.com',
