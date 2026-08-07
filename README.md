@@ -84,11 +84,16 @@ serveSharedSession({
 });
 ```
 
-Then point the other origins at that page:
+Then point the other origins at that page, as a storage backend:
 
 ```typescript
+import { SharedSessionStorage } from '@icp-sdk/auth/shared-session';
+
 const authClient = new AuthClient({
-  sharedSessionHub: { url: 'https://example.com/shared-session.html' },
+  storage: new SharedSessionStorage({
+    hub: { url: 'https://example.com/shared-session.html' },
+    derivationOrigin: 'https://example.com',
+  }),
   derivationOrigin: 'https://example.com',
 });
 ```

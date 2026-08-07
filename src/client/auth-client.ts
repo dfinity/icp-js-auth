@@ -11,7 +11,6 @@ import {
 import type { Principal } from '@icp-sdk/core/principal';
 import { Signer } from '@icp-sdk/signer';
 import { PostMessageTransport, UrlTransport } from '@icp-sdk/signer/web';
-import { type SharedSessionHubOptions, SharedSessionStorage } from '../shared-session/storage.js';
 import { IdleManager, type IdleManagerOptions } from './idle-manager.js';
 import {
   type AuthClientStorage,
@@ -22,7 +21,7 @@ import {
   LocalStorage,
   type StoredKey,
 } from './storage.js';
-import { type AuthClientSyncStorage, SyncCookieStorage, SyncLocalStorage } from './sync-storage.js';
+import { type AuthClientSyncStorage, SyncLocalStorage } from './sync-storage.js';
 
 const NANOSECONDS_PER_MILLISECOND = BigInt(1_000_000);
 const NANOSECONDS_PER_SECOND = BigInt(1_000_000_000);
@@ -38,7 +37,7 @@ type BaseKeyType = typeof ECDSA_KEY_LABEL | typeof ED25519_KEY_LABEL;
 
 // Key the delegation expiration is cached under, so isAuthenticated() can
 // answer synchronously without reading the session store. See
-// AuthClientCreateBaseOptions#syncStorage for where it is kept.
+// AuthClientCreateOptions#syncStorage for where it is kept.
 const KEY_STORAGE_EXPIRATION = 'ic-delegation_expiration';
 
 // Storage key prefix for a redirect flow's session key, held only while the
@@ -70,14 +69,30 @@ export const OPENID_PROVIDER_URLS = {
 const DEFAULT_OPENID_SCOPE_KEYS = ['name', 'email', 'verified_email'] as const;
 
 /**
- * Options for creating an {@link AuthClient}, other than those constrained by
- * {@link AuthClientCreateOptions}.
+ * Options for creating an {@link AuthClient}.
  */
-export interface AuthClientCreateBaseOptions {
+export interface AuthClientCreateOptions {
   /**
    * An identity to authenticate via delegation.
    */
   identity?: SignIdentity | PartialIdentity;
+
+  /**
+   * Persistent storage backend. Defaults to IndexedDB.
+   *
+   * Set it to a `SharedSessionStorage` from `@icp-sdk/auth/shared-session`
+   * to share one sign-in across several origins of the same application. Pass
+   * the same `derivationOrigin` there as here, or the session would be stored
+   * for a principal other than the one this client signs in as.
+   * @default IdbStorage
+   */
+  storage?: AuthClientStorage;
+
+  /**
+   * Derivation origin for the identity provider.
+   * @see https://github.com/dfinity/internet-identity/blob/main/docs/internet-identity-spec.adoc
+   */
+  derivationOrigin?: string | URL;
 
   /**
    * Type of session key to generate on each sign-in.
@@ -97,9 +112,10 @@ export interface AuthClientCreateBaseOptions {
    * Synchronous storage for the delegation expiration that
    * {@link AuthClient.isAuthenticated} reads.
    *
-   * Defaults to `localStorage`, or to a cookie scoped to the derivation
-   * origin's domain when `sharedSessionHub` is set, so that an origin sharing a
-   * session can answer before it has read the shared store.
+   * Defaults to `localStorage`, which is scoped to one origin. With a shared
+   * session, set it to a `SyncCookieStorage` scoped to the domain the
+   * sharing origins have in common, so each of them can answer before it has
+   * read the shared store.
    * @default SyncLocalStorage
    */
   syncStorage?: AuthClientSyncStorage;
@@ -147,66 +163,6 @@ export interface AuthClientCreateBaseOptions {
    */
   openIdProvider?: OpenIdProvider;
 }
-
-/**
- * Options for creating an {@link AuthClient}.
- *
- * `sharedSessionHub` requires `derivationOrigin` and excludes `storage`. Sharing
- * a session without a shared derivation origin would give each origin a
- * different principal from the same key — a shared store holding an identity
- * nobody else can use — so the two belong together, and the hub replaces the
- * local store rather than sitting alongside it.
- */
-export type AuthClientCreateOptions = AuthClientCreateBaseOptions &
-  (
-    | {
-        /**
-         * Serves the session from another origin, so every origin authorized by
-         * the derivation origin shares one sign-in.
-         *
-         * Point it at a page that calls `serveSharedSession` from
-         * `@icp-sdk/auth/shared-session`. That page's origin holds the session;
-         * this origin stores nothing. Which origins may read it is decided by the
-         * derivation origin's `/.well-known/ii-alternative-origins` record, the
-         * same record Internet Identity checks when deriving the principal.
-         *
-         * @see {@link SharedSessionStorage}
-         * @example
-         * ```ts
-         * new AuthClient({
-         *   sharedSessionHub: { url: 'https://auth.example.com/hub.html' },
-         *   derivationOrigin: 'https://auth.example.com',
-         * });
-         * ```
-         */
-        sharedSessionHub: SharedSessionHubOptions;
-
-        /**
-         * Derivation origin for the identity provider. Required alongside
-         * `sharedSessionHub`, and must match the hub's own configuration.
-         * @see https://github.com/dfinity/internet-identity/blob/main/docs/internet-identity-spec.adoc
-         */
-        derivationOrigin: string | URL;
-
-        /** Not available with `sharedSessionHub`, which supplies the store. */
-        storage?: never;
-      }
-    | {
-        sharedSessionHub?: undefined;
-
-        /**
-         * Derivation origin for the identity provider.
-         * @see https://github.com/dfinity/internet-identity/blob/main/docs/internet-identity-spec.adoc
-         */
-        derivationOrigin?: string | URL;
-
-        /**
-         * Persistent storage backend. Defaults to IndexedDB.
-         * @default IdbStorage
-         */
-        storage?: AuthClientStorage;
-      }
-  );
 
 export interface IdleOptions extends IdleManagerOptions {
   /**
@@ -268,8 +224,8 @@ export class AuthClient {
 
   constructor(options: AuthClientCreateOptions = {}) {
     this.#options = options;
-    this.#storage = createStorage(options);
-    this.#syncStorage = createSyncStorage(options);
+    this.#storage = options.storage ?? new IdbStorage();
+    this.#syncStorage = options.syncStorage ?? new SyncLocalStorage();
 
     const identityProviderUrl = new URL(
       options.identityProvider?.toString() || IDENTITY_PROVIDER_DEFAULT,
@@ -729,71 +685,6 @@ export class AuthClient {
       });
     }
   }
-}
-
-/**
- * Resolves the storage backend for a set of create options.
- *
- * `sharedSessionHub` wins over `storage` at runtime. The types make the two
- * mutually exclusive, so reaching the warning means the call came from
- * JavaScript, where silently reading a store the session was never written to
- * would look like the user is signed out.
- * @param options - The create options.
- */
-function createStorage(options: AuthClientCreateOptions): AuthClientStorage {
-  if (options.sharedSessionHub === undefined) {
-    return options.storage ?? new IdbStorage();
-  }
-  if (options.storage !== undefined) {
-    console.warn(
-      '`storage` is ignored when `sharedSessionHub` is set: the shared session is held by the hub.',
-    );
-  }
-  return new SharedSessionStorage({
-    hub: options.sharedSessionHub,
-    derivationOrigin: options.derivationOrigin,
-  });
-}
-
-/**
- * Resolves the synchronous storage for the expiration that
- * {@link AuthClient.isAuthenticated} reads.
- *
- * With a shared session the expiration has to be readable by every origin that
- * shares it, and synchronously, which rules out both `localStorage` (scoped to
- * one origin) and the shared store itself (asynchronous, and on another origin).
- * A cookie scoped to the derivation origin's domain is the remaining option.
- *
- * It holds nothing secret — a timestamp the reader compares against the current
- * time — and the identity it describes is still fetched and verified from the
- * store, so a cookie written by another subdomain can make
- * {@link AuthClient.isAuthenticated} briefly wrong but cannot authenticate
- * anyone.
- * @param options - The create options.
- */
-function createSyncStorage(options: AuthClientCreateOptions): AuthClientSyncStorage {
-  if (options.syncStorage !== undefined) {
-    return options.syncStorage;
-  }
-  if (options.sharedSessionHub === undefined) {
-    return new SyncLocalStorage();
-  }
-  // Scoped to the hub, not the derivation origin: the hub has to be same-site
-  // with the origins it serves, or its storage is partitioned and there is
-  // nothing to share, while the derivation origin may be an unrelated domain.
-  //
-  // A cookie can only be scoped to this host or a domain above it, so a hub
-  // that is a sibling (auth.example.com next to a.example.com) cannot be
-  // written to and would leave every read empty. Falling back keeps this origin
-  // correct once it has read the shared store.
-  const domain = new URL(options.sharedSessionHub.url.toString()).hostname;
-  // Falls back rather than throwing where the host is unavailable, so a
-  // constructor never fails over a synchronous hint.
-  const hostname = globalThis.location?.hostname ?? '';
-  if (hostname !== domain && !hostname.endsWith(`.${domain}`)) {
-    return new SyncLocalStorage();
-  }
-  return new SyncCookieStorage({ domain });
 }
 
 /**

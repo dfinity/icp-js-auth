@@ -53,9 +53,16 @@ export interface SharedSessionStorageOptions {
  * @see {@link https://js.icp.build/auth/}
  * @example
  * ```ts
+ * const derivationOrigin = 'https://auth.example.com';
+ *
  * const authClient = new AuthClient({
- *   sharedSessionHub: { url: 'https://auth.example.com/hub.html' },
- *   derivationOrigin: 'https://auth.example.com',
+ *   storage: new SharedSessionStorage({
+ *     hub: { url: 'https://auth.example.com/hub.html' },
+ *     derivationOrigin,
+ *   }),
+ *   // The same value, or this client would sign in as a principal the hub's
+ *   // store is not authorized for.
+ *   derivationOrigin,
  * });
  * ```
  */
@@ -77,6 +84,17 @@ export class SharedSessionStorage implements AuthClientStorage {
     this.#hubOrigin = this.#hubUrl.origin;
     this.#derivationOrigin = parseAbsoluteUrl(options.derivationOrigin, 'derivationOrigin').origin;
     this.#timeout = options.hub.timeout ?? DEFAULT_TIMEOUT_MS;
+  }
+
+  /**
+   * Origin serving this shared session.
+   *
+   * Identifies the session among any others under the same domain: pass it as
+   * the `namespace` of a `SyncCookieStorage` so two hubs do not describe each
+   * other's sessions.
+   */
+  get hubOrigin(): string {
+    return this.#hubOrigin;
   }
 
   async get(key: string): Promise<StoredKey | null> {

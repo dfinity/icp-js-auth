@@ -51,24 +51,55 @@ That is defence in depth. The record above is what authorizes a reader, and it s
 
 ## Consuming the session
 
+A shared session is a storage backend, so it is passed as `storage`:
+
 ```typescript
 import { AuthClient } from '@icp-sdk/auth/client';
+import { SharedSessionStorage } from '@icp-sdk/auth/shared-session';
+
+const DERIVATION_ORIGIN = 'https://example.com';
+
+const sharedSession = new SharedSessionStorage({
+  hub: { url: 'https://example.com/shared-session.html' },
+  derivationOrigin: DERIVATION_ORIGIN,
+});
 
 const authClient = new AuthClient({
-  sharedSessionHub: { url: 'https://example.com/shared-session.html' },
-  derivationOrigin: 'https://example.com',
+  storage: sharedSession,
+  derivationOrigin: DERIVATION_ORIGIN,
 });
 ```
 
-`sharedSessionHub` requires `derivationOrigin` and replaces `storage`. Without a shared derivation origin the same key would yield a different principal on every origin, leaving a shared store holding an identity nobody else can use — so the type system requires the two together.
+`SharedSessionStorage` requires `derivationOrigin`: without one, the same key yields a different principal on every origin, leaving a shared store holding an identity nobody else can use.
+
+Pass the **same** derivation origin to both, as above. They are separate options, so nothing stops them differing — and if they do, this client signs in as one principal while its session is stored in a hub authorized for another. Keep it in one constant.
 
 Signing out on any origin clears the shared store, so every origin loses the session.
 
 ## Checking for a session
 
-`isAuthenticated()` answers synchronously, so it cannot read the shared store: that one is asynchronous and belongs to another origin. It reads the delegation's expiration from a separate synchronous store instead — `localStorage` normally, and a cookie scoped to the hub's domain when `sharedSessionHub` is set.
+`isAuthenticated()` answers synchronously, so it cannot read the shared store: that one is asynchronous and belongs to another origin. It reads the delegation's expiration from a separate synchronous store, which defaults to `localStorage` — scoped to one origin, so an origin sharing a session has nothing to read until it has restored once.
 
-The cookie is what makes the answer correct across origins. It holds one non-secret value, a timestamp, and its `Max-Age` matches the delegation, so it cannot outlive the session it describes. Signing out on any origin deletes it for all of them.
+A cookie fixes that, being the only store that is both synchronous and visible across origins:
+
+```typescript
+import { SyncCookieStorage } from '@icp-sdk/auth/client';
+
+const authClient = new AuthClient({
+  storage: sharedSession,
+  syncStorage: new SyncCookieStorage({
+    domain: 'example.com',
+    namespace: sharedSession.hubOrigin,
+  }),
+  derivationOrigin: DERIVATION_ORIGIN,
+});
+```
+
+`domain` is what the sharing origins have in common, and must be the current host or a domain above it — a browser rejects anything else, including a sibling subdomain, and refuses a public suffix outright. Nothing needs to be served at it: a hub on `auth.example.com` can scope its cookie to `example.com` even if nothing answers there.
+
+`namespace` keeps two shared sessions under one domain from describing each other's state, which matters for a staging deployment beside production. `hubOrigin` identifies the session, since the hub is where it lives.
+
+The cookie holds one non-secret value, a timestamp, and its `Max-Age` comes from the delegation, so it cannot outlive the session it describes. Signing out on any origin deletes it for all of them.
 
 It is a hint, not authority. Every subdomain can write it and nothing records which one did, so treat `isAuthenticated()` as a synchronous guess suitable for deciding what to render. The identity itself is always fetched from the shared store and verified:
 
@@ -79,9 +110,7 @@ if (identity.getPrincipal().isAnonymous()) {
 }
 ```
 
-The cookie follows the **hub**, not the derivation origin: the hub is necessarily same-site with the origins it serves, while the derivation origin may be an unrelated domain. A cookie can only be scoped to the current host or a domain above it, so this needs the hub to be a **parent** of the consuming origins — `https://example.com` serving clients on `a.example.com` and `b.example.com`. With a sibling hub (`auth.example.com` alongside `a.example.com`) the cookie is unreachable, so `localStorage` is used instead and `isAuthenticated()` is correct only after that origin has restored the session once.
-
-Supply `syncStorage` to override the choice entirely.
+Leave `syncStorage` unset and behaviour is unchanged from a single-origin app: correct on that origin, and correct on the others only once each has restored the session.
 
 ## Browser support
 

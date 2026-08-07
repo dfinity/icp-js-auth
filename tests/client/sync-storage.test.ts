@@ -139,6 +139,31 @@ describe('SyncCookieStorage', () => {
     expect(attributesOf(writes[0])).not.toContain('Secure');
   });
 
+  it('keeps two shared sessions under one domain apart', () => {
+    const first = new SyncCookieStorage({ domain: 'localhost', namespace: 'auth.example.com' });
+    const second = new SyncCookieStorage({ domain: 'localhost', namespace: 'other.example.com' });
+
+    first.set(KEY, '111');
+    second.set(KEY, '222');
+
+    expect(first.get(KEY)).toBe('111');
+    expect(second.get(KEY)).toBe('222');
+
+    first.remove(KEY);
+    expect(first.get(KEY)).toBeNull();
+    expect(second.get(KEY)).toBe('222');
+  });
+
+  it('replaces characters a cookie name cannot carry', () => {
+    const writes = captureCookieWrites();
+    new SyncCookieStorage({ domain: 'localhost', namespace: 'http://localhost:4000' }).set(
+      KEY,
+      '123',
+    );
+
+    expect(writes[0].split('=')[0]).toBe(`${KEY}.http___localhost_4000`);
+  });
+
   it('removes with the same attributes, so the write targets the same cookie', () => {
     const writes = captureCookieWrites();
     const storage = new SyncCookieStorage({ domain: 'example.com' });
@@ -148,5 +173,21 @@ describe('SyncCookieStorage', () => {
     expect(attributesOf(writes[1])).toEqual(
       expect.arrayContaining(['Domain=example.com', 'Path=/', 'Max-Age=0']),
     );
+  });
+});
+
+describe('SyncCookieStorage namespace', () => {
+  it('names the same cookie for a hub url and its origin', () => {
+    const fromUrl = new SyncCookieStorage({
+      domain: 'localhost',
+      namespace: 'https://auth.example.com/hub.html',
+    });
+    const fromOrigin = new SyncCookieStorage({
+      domain: 'localhost',
+      namespace: 'https://auth.example.com',
+    });
+
+    fromUrl.set(KEY, '123');
+    expect(fromOrigin.get(KEY)).toBe('123');
   });
 });

@@ -61,8 +61,8 @@ export interface ServeSharedSessionOptions {
 /**
  * Serves the shared session to the origins authorized by the derivation origin.
  *
- * Call this on load from a page deployed at the URL clients pass as
- * `sharedSessionHub`. The page needs nothing else: no markup, no user
+ * Call this on load from a page deployed at the URL clients pass to
+ * `SharedSessionStorage`. The page needs nothing else: no markup, no user
  * interaction, and no state of its own.
  *
  * Serve it with a `Content-Security-Policy: frame-ancestors` header naming the

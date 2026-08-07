@@ -11,6 +11,8 @@ import {
   KEY_STORAGE_KEY,
   LocalStorage,
 } from '../../src/client/storage.ts';
+import { SyncCookieStorage } from '../../src/client/sync-storage.ts';
+import { SharedSessionStorage } from '../../src/shared-session/storage.ts';
 import { FakeTransport } from './fake-transport.ts';
 
 // Swap `PostMessageTransport` for `FakeTransport` so `AuthClient` uses the real
@@ -767,16 +769,6 @@ describe('AuthClient shared session', () => {
     });
   });
 
-  /**
-   * Waits for hydration to finish. A hub that never answers rejects on its
-   * timeout, and a timer left running past the test fires after the environment
-   * is torn down, where the globals it touches no longer exist.
-   */
-  const settleHydration = async (client: AuthClient): Promise<void> => {
-    vi.spyOn(console, 'error').mockImplementation(() => {});
-    await client.getIdentity();
-  };
-
   /** Seeds the cross-origin expiration hint the way another origin would. */
   const setExpirationCookie = (value: string): void => {
     // biome-ignore lint/suspicious/noDocumentCookie: seeding the store the client reads synchronously.
@@ -836,11 +828,14 @@ describe('AuthClient shared session', () => {
     expect(client.isAuthenticated()).toBe(true);
   });
 
-  it('stores the session in the hub when sharedSessionHub is set', async () => {
+  it('stores the session in a shared session hub', async () => {
     // Long enough that the frame is still attached when the assertions run: a
     // failed handshake removes it.
     const client = new AuthClient({
-      sharedSessionHub: { url: 'https://auth.example.com/hub.html', timeout: 300 },
+      storage: new SharedSessionStorage({
+        hub: { url: 'https://auth.example.com/hub.html', timeout: 300 },
+        derivationOrigin: 'https://auth.example.com',
+      }),
       derivationOrigin: 'https://auth.example.com',
       idleOptions: { disableIdle: true },
     });
@@ -853,80 +848,28 @@ describe('AuthClient shared session', () => {
     expect(frame.src).toBe('https://auth.example.com/hub.html');
     expect(frame.hidden).toBe(true);
 
-    // The hub never answers here, so hydration falls back to anonymous.
+    // The hub never answers, so hydration ends in the anonymous fallback.
+    // Awaiting it also settles the handshake timeout: a timer left running past
+    // the test fires after the environment is torn down, where the globals its
+    // cleanup touches no longer exist.
     vi.spyOn(console, 'error').mockImplementation(() => {});
     const identity = await client.getIdentity();
     expect(identity.getPrincipal().isAnonymous()).toBe(true);
   });
 
-  it('ignores a storage passed alongside sharedSessionHub', async () => {
-    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
-    const storage = fakeStore();
-
-    const client = new AuthClient({
-      sharedSessionHub: { url: 'https://auth.example.com/hub.html', timeout: 30 },
-      derivationOrigin: 'https://auth.example.com',
-      // Only reachable from JavaScript: the types make these mutually exclusive.
-      storage,
-      idleOptions: { disableIdle: true },
-    } as never);
-
-    expect(warn.mock.calls[0][0]).toContain('`storage` is ignored');
-    expect(storage.get).not.toHaveBeenCalled();
-    await settleHydration(client);
-  });
-
-  it('reads the expiration from a cookie when a shared session hub is set', async () => {
-    // Host-only so it sticks on jsdom's localhost origin, which is also the
-    // derivation origin here.
+  it('reads the expiration from a cookie shared by the sharing origins', () => {
     setExpirationCookie(futureExpirationNs());
     expect(localStorage.getItem(EXPIRATION_KEY)).toBeNull();
 
     const client = new AuthClient({
-      sharedSessionHub: { url: 'http://localhost:4000/hub.html', timeout: 30 },
-      derivationOrigin: 'http://localhost:3000',
+      syncStorage: new SyncCookieStorage({ domain: 'localhost' }),
       idleOptions: { disableIdle: true },
     });
 
     expect(client.isAuthenticated()).toBe(true);
-    await settleHydration(client);
   });
 
-  it('scopes the cookie to the hub, not the derivation origin', async () => {
-    // The hub is at-or-above this origin while the derivation origin is an
-    // unrelated domain, so only following the hub reaches a usable cookie.
-    setExpirationCookie(futureExpirationNs());
-    const client = new AuthClient({
-      sharedSessionHub: { url: 'http://localhost:4000/hub.html', timeout: 30 },
-      derivationOrigin: 'https://example2.com',
-      idleOptions: { disableIdle: true },
-    });
-
-    expect(localStorage.getItem(EXPIRATION_KEY)).toBeNull();
-    expect(client.isAuthenticated()).toBe(true);
-    await settleHydration(client);
-  });
-
-  it('falls back to localStorage when the hub is on a sibling domain', async () => {
-    // A cookie for auth.localhost cannot be written from jsdom's localhost
-    // origin, so a cookie-backed store would never read back what it wrote.
-    const client = new AuthClient({
-      sharedSessionHub: { url: 'http://auth.localhost:4000/hub.html', timeout: 30 },
-      derivationOrigin: 'http://auth.localhost:4000',
-      idleOptions: { disableIdle: true },
-    });
-
-    // A cookie is unreachable here, so localStorage is what it reads.
-    localStorage.setItem(EXPIRATION_KEY, futureExpirationNs());
-    expect(client.isAuthenticated()).toBe(true);
-
-    localStorage.clear();
-    setExpirationCookie(futureExpirationNs());
-    expect(client.isAuthenticated()).toBe(false);
-    await settleHydration(client);
-  });
-
-  it('ignores that cookie without a shared session hub', () => {
+  it('ignores that cookie with the default sync storage', () => {
     setExpirationCookie(futureExpirationNs());
 
     const client = new AuthClient({ idleOptions: { disableIdle: true } });
