@@ -94,7 +94,7 @@ const authClient = new AuthClient({
 });
 ```
 
-Each app must be listed in the derivation origin's `.well-known/ii-alternative-origins` record. See the [shared session guide](https://js.icp.build/auth/shared-session) for the full setup.
+Each app must be listed in the derivation origin's `.well-known/ii-alternative-origins` record. See the [shared session guide](https://js.icp.build/auth/shared-session).
 
 ### Requesting Identity Attributes
 
