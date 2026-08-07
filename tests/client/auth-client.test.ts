@@ -11,6 +11,8 @@ import {
   KEY_STORAGE_KEY,
   LocalStorage,
 } from '../../src/client/storage.ts';
+import { SyncCookieStorage } from '../../src/client/sync-storage.ts';
+import { SharedSessionStorage } from '../../src/shared-session/storage.ts';
 import { FakeTransport } from './fake-transport.ts';
 
 // Swap `PostMessageTransport` for `FakeTransport` so `AuthClient` uses the real
@@ -736,5 +738,180 @@ describe('AuthClient signIn + requestAttributes', () => {
 
     expect(Array.from(attributes.data)).toEqual(Array.from(new TextEncoder().encode('hello')));
     expect(identity.getPrincipal().isAnonymous()).toBe(false);
+  });
+});
+
+describe('AuthClient shared session', () => {
+  // Not exported by the module under test; asserted through isAuthenticated().
+  const EXPIRATION_KEY = 'ic-delegation_expiration';
+
+  const fakeStore = (entries: Record<string, string> = {}): AuthClientStorage => ({
+    get: vi.fn(async (key) => entries[key] ?? null),
+    set: vi.fn(async (key, value) => {
+      entries[key] = value as string;
+    }),
+    remove: vi.fn(async (key) => {
+      delete entries[key];
+    }),
+  });
+
+  const futureExpirationNs = () =>
+    ((BigInt(Date.now()) + BigInt(3_600_000)) * BigInt(1_000_000)).toString();
+
+  beforeEach(() => {
+    // The global stub drops hostname/protocol, which decide where the
+    // expiration is kept.
+    vi.stubGlobal('location', {
+      reload: vi.fn(),
+      hostname: 'localhost',
+      protocol: 'http:',
+      origin: 'http://localhost:3000',
+    });
+  });
+
+  /** Seeds the cross-origin expiration hint the way another origin would. */
+  const setExpirationCookie = (value: string): void => {
+    // biome-ignore lint/suspicious/noDocumentCookie: seeding the store the client reads synchronously.
+    document.cookie = `${EXPIRATION_KEY}=${value}; Path=/`;
+  };
+
+  afterEach(() => {
+    // Cookies outlive localStorage.clear(), so a leftover expiration would make
+    // a later test look signed in.
+    setExpirationCookie('');
+  });
+
+  it('caches the expiration when restoring a session this origin never signed in for', async () => {
+    const key = Ed25519KeyIdentity.generate();
+    const chain = await createTestDelegation(key);
+    const storage = fakeStore({
+      [KEY_STORAGE_KEY]: JSON.stringify(key.toJSON()),
+      [KEY_STORAGE_DELEGATION]: JSON.stringify(chain.toJSON()),
+    });
+
+    const client = new AuthClient({ storage, idleOptions: { disableIdle: true } });
+    // Nothing cached yet: this origin has no sign-in of its own to have written it.
+    expect(client.isAuthenticated()).toBe(false);
+
+    const identity = await client.getIdentity();
+
+    expect(identity.getPrincipal().isAnonymous()).toBe(false);
+    expect(client.isAuthenticated()).toBe(true);
+  });
+
+  it('keeps the cached expiration when the store is empty', async () => {
+    // With a shared session the cache is shared too, so an origin that cannot
+    // see the session must not delete the hint the others rely on. The cache
+    // carries the delegation's expiry and lapses on its own.
+    localStorage.setItem(EXPIRATION_KEY, futureExpirationNs());
+    const client = new AuthClient({ storage: fakeStore(), idleOptions: { disableIdle: true } });
+
+    const identity = await client.getIdentity();
+
+    expect(identity.getPrincipal().isAnonymous()).toBe(true);
+    expect(client.isAuthenticated()).toBe(true);
+  });
+
+  it('clears the cached expiration on sign out', async () => {
+    localStorage.setItem(EXPIRATION_KEY, futureExpirationNs());
+    const client = new AuthClient({ storage: fakeStore(), idleOptions: { disableIdle: true } });
+
+    await client.signOut();
+
+    expect(client.isAuthenticated()).toBe(false);
+  });
+
+  it('stays anonymous and keeps the cached expiration when the store is unreachable', async () => {
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {});
+    localStorage.setItem(EXPIRATION_KEY, futureExpirationNs());
+    const storage: AuthClientStorage = {
+      get: vi.fn().mockRejectedValue(new Error('hub unreachable')),
+      set: vi.fn(),
+      remove: vi.fn(),
+    };
+
+    const client = new AuthClient({ storage, idleOptions: { disableIdle: true } });
+    const identity = await client.getIdentity();
+
+    expect(identity.getPrincipal().isAnonymous()).toBe(true);
+    expect(error.mock.calls[0][0]).toContain('Failed to restore the session');
+    // A hub that failed to answer has not said the session is gone.
+    expect(client.isAuthenticated()).toBe(true);
+  });
+
+  it('stores the session in a shared session hub', async () => {
+    // Long enough that the frame is still attached when the assertions run: a
+    // failed handshake removes it.
+    const client = new AuthClient({
+      storage: new SharedSessionStorage({
+        url: 'https://auth.example.com/shared-session.html',
+        timeout: 300,
+      }),
+      derivationOrigin: 'https://auth.example.com',
+      idleOptions: { disableIdle: true },
+    });
+
+    const frame = await vi.waitFor(() => {
+      const found = document.querySelector('iframe');
+      expect(found).not.toBeNull();
+      return found as HTMLIFrameElement;
+    });
+    expect(frame.src).toBe('https://auth.example.com/shared-session.html');
+    expect(frame.hidden).toBe(true);
+
+    // The hub never answers, so hydration ends in the anonymous fallback.
+    // Awaiting it also settles the handshake timeout: a timer left running past
+    // the test fires after the environment is torn down, where the globals its
+    // cleanup touches no longer exist.
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    const identity = await client.getIdentity();
+    expect(identity.getPrincipal().isAnonymous()).toBe(true);
+  });
+
+  it('reads the expiration from a cookie shared by the sharing origins', () => {
+    setExpirationCookie(futureExpirationNs());
+    expect(localStorage.getItem(EXPIRATION_KEY)).toBeNull();
+
+    const client = new AuthClient({
+      syncStorage: new SyncCookieStorage({ domain: 'localhost' }),
+      idleOptions: { disableIdle: true },
+    });
+
+    expect(client.isAuthenticated()).toBe(true);
+  });
+
+  it('ignores that cookie with the default sync storage', () => {
+    setExpirationCookie(futureExpirationNs());
+
+    const client = new AuthClient({ idleOptions: { disableIdle: true } });
+
+    expect(client.isAuthenticated()).toBe(false);
+  });
+
+  it('prefers an explicitly provided sync storage', () => {
+    const syncStorage = {
+      get: vi.fn().mockReturnValue(futureExpirationNs()),
+      set: vi.fn(),
+      remove: vi.fn(),
+    };
+
+    const client = new AuthClient({ syncStorage, idleOptions: { disableIdle: true } });
+
+    expect(client.isAuthenticated()).toBe(true);
+    expect(syncStorage.get).toHaveBeenCalledWith(EXPIRATION_KEY);
+  });
+
+  it('treats an unparseable expiration as no session', () => {
+    // Any subdomain can write the cookie, so the value may be anything.
+    const syncStorage = {
+      get: vi.fn().mockReturnValue('not-a-number'),
+      set: vi.fn(),
+      remove: vi.fn(),
+    };
+
+    const client = new AuthClient({ syncStorage, idleOptions: { disableIdle: true } });
+
+    expect(() => client.isAuthenticated()).not.toThrow();
+    expect(client.isAuthenticated()).toBe(false);
   });
 });

@@ -1,6 +1,6 @@
 {
   "$schema": "https://typedoc-plugin-markdown.org/schema.json",
-  "entryPoints": ["../src/client/index.ts"],
+  "entryPoints": ["../src/client/index.ts", "../src/shared-session/index.ts"],
   "tsconfig": "../tsconfig.lib.json",
   "readme": "none",
   "out": "src/content/tmp",
