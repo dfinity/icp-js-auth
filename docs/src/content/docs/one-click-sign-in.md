@@ -1,6 +1,6 @@
 ---
 title: One-Click Sign-In
-description: Send users straight to a specific OpenID provider or to their organization's SSO, instead of the identity provider's own chooser.
+description: Send users straight to a specific OpenID provider or to their organization's SSO, instead of the user-chosen provider.
 next:
   label: Client Module
 ---
