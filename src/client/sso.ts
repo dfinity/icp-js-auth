@@ -25,9 +25,25 @@ function sleep(ms: number, signal?: AbortSignal): Promise<void> {
   });
 }
 
-function isLoopbackAuthority(authority: string): boolean {
-  const host = authority.split(':')[0];
-  return host === 'localhost' || host === '127.0.0.1';
+/**
+ * `localhost` / `127.0.0.1`, optionally followed by `:<port>`. IPv6 loopback
+ * (`[::1]`, etc.) is intentionally not handled — the identity provider doesn't
+ * recognise it either, and its e2e setup uses the hostname form.
+ */
+function isLoopbackHost(host: string): boolean {
+  let url: URL;
+  try {
+    // Parse as a URL authority so the optional `:<port>` is split off for us
+    // rather than by hand. Invalid input throws and is treated as non-loopback.
+    url = new URL(`http://${host}`);
+  } catch {
+    return false;
+  }
+  // A bare `host[:port]` has no path/query/fragment; reject e.g. `localhost/x`.
+  if (url.pathname !== '/' || url.search !== '' || url.hash !== '') {
+    return false;
+  }
+  return url.hostname === 'localhost' || url.hostname === '127.0.0.1';
 }
 
 /**
@@ -59,7 +75,7 @@ export function normalizeSsoDomain(domain: string): string {
     throw new Error(`ssoDomain exceeds ${MAX_AUTHORITY_LENGTH} characters`);
   }
   // A bare hostname is a half-typed domain, not something worth a request.
-  if (!authority.includes('.') && !isLoopbackAuthority(authority)) {
+  if (!authority.includes('.') && !isLoopbackHost(authority)) {
     throw new Error(`ssoDomain is not a domain name: ${trimmed}`);
   }
   return authority;
@@ -111,7 +127,7 @@ async function probeSsoDomain(domain: string, signal?: AbortSignal): Promise<boo
     return false;
   }
 
-  const scheme = isLoopbackAuthority(normalized) ? 'http' : 'https';
+  const scheme = isLoopbackHost(normalized) ? 'http' : 'https';
   try {
     const response = await fetch(`${scheme}://${normalized}${WELL_KNOWN_PATH}`, {
       headers: { Accept: 'application/json' },
