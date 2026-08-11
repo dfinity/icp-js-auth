@@ -3,8 +3,6 @@ import { isValidSsoDomain } from '../../src/client/sso.ts';
 
 const WELL_KNOWN_PATH = '/.well-known/ii-openid-configuration';
 
-const MIN_DURATION_MS = 750;
-
 function jsonResponse(body: unknown, init?: ResponseInit): Response {
   return new Response(JSON.stringify(body), {
     status: 200,
@@ -18,24 +16,20 @@ const validConfiguration = {
   openid_configuration: 'https://idp.dfinity.org/.well-known/openid-configuration',
 };
 
-/** Resolves the check with its duration floor advanced, so no test waits in real time. */
-async function check(domain: string, signal?: AbortSignal): Promise<boolean> {
-  const pending = isValidSsoDomain(domain, signal);
-  await vi.advanceTimersByTimeAsync(MIN_DURATION_MS);
-  return pending;
+/** The signal is required, so a check that never aborts still needs one. */
+function check(domain: string, signal = new AbortController().signal): Promise<boolean> {
+  return isValidSsoDomain(domain, signal);
 }
 
 describe('isValidSsoDomain', () => {
   let fetchMock: ReturnType<typeof vi.fn>;
 
   beforeEach(() => {
-    vi.useFakeTimers();
     fetchMock = vi.fn().mockResolvedValue(jsonResponse(validConfiguration));
     vi.stubGlobal('fetch', fetchMock);
   });
 
   afterEach(() => {
-    vi.useRealTimers();
     vi.unstubAllGlobals();
   });
 
@@ -110,15 +104,9 @@ describe('isValidSsoDomain', () => {
     await expect(check('dfinity.org')).resolves.toBe(false);
   });
 
-  it('should not resolve before the minimum duration', async () => {
-    const settled = vi.fn();
-    void isValidSsoDomain('dfin').then(settled);
-
-    await vi.advanceTimersByTimeAsync(MIN_DURATION_MS - 1);
-    expect(settled).not.toHaveBeenCalled();
-
-    await vi.advanceTimersByTimeAsync(1);
-    expect(settled).toHaveBeenCalledWith(false);
+  it('should require a signal', async () => {
+    // @ts-expect-error the caller sets the deadline, so the signal is required
+    await expect(isValidSsoDomain('dfinity.org')).rejects.toThrow();
   });
 
   it('should reject rather than resolve false when aborted', async () => {
@@ -128,7 +116,8 @@ describe('isValidSsoDomain', () => {
     await expect(pending).rejects.toThrow();
   });
 
-  it('should reject an already-aborted check without waiting out the floor', async () => {
+  it('should reject an already-aborted check without fetching', async () => {
     await expect(isValidSsoDomain('dfinity.org', AbortSignal.abort())).rejects.toThrow();
+    expect(fetchMock).not.toHaveBeenCalled();
   });
 });

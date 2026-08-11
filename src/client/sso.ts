@@ -3,28 +3,6 @@ const MAX_AUTHORITY_LENGTH = 255;
 
 const WELL_KNOWN_PATH = '/.well-known/ii-openid-configuration';
 
-// Slower than a keystroke, so a form checking on key entry doesn't flash an
-// error over every partially typed domain.
-const MIN_DURATION_MS = 750;
-
-/** Resolves after `ms`, or rejects if `signal` aborts first. */
-function sleep(ms: number, signal?: AbortSignal): Promise<void> {
-  if (signal?.aborted === true) {
-    return Promise.reject(signal.reason);
-  }
-  return new Promise((resolve, reject) => {
-    const onAbort = (): void => {
-      clearTimeout(timer);
-      reject(signal?.reason);
-    };
-    const timer = setTimeout(() => {
-      signal?.removeEventListener('abort', onAbort);
-      resolve();
-    }, ms);
-    signal?.addEventListener('abort', onAbort, { once: true });
-  });
-}
-
 /**
  * `localhost` / `127.0.0.1`, optionally followed by `:<port>`. IPv6 loopback
  * (`[::1]`, etc.) is intentionally not handled — the identity provider doesn't
@@ -96,30 +74,25 @@ function publishesSsoConfiguration(value: unknown): boolean {
  *
  * The document must be served with `Access-Control-Allow-Origin: *`.
  *
- * Intended for a domain input, so it never resolves in under 750 ms. Debounce
- * the input too: each call is a request to a third-party server.
+ * The check waits on a third-party server and has no deadline of its own, so
+ * `signal` sets one. Pass `AbortSignal.timeout(...)` for a one-shot check, or a
+ * controller you abort per keystroke when checking as the user types.
  *
  * @param domain - The organization domain.
- * @param signal - Aborts the in-flight check, e.g. when the input changes.
+ * @param signal - Bounds the check.
  * @returns Whether the domain is usable for SSO sign-in.
  * @throws When `signal` aborts — an abandoned check is not a verdict on the
  *   domain, so it must not be read as `false`.
  *
  * @example
- * if (await isValidSsoDomain(input.value)) {
+ * if (await isValidSsoDomain(input.value, AbortSignal.timeout(5_000))) {
  *   const authClient = new AuthClient({ ssoDomain: input.value });
  *   await authClient.signIn();
  * }
  */
-export async function isValidSsoDomain(domain: string, signal?: AbortSignal): Promise<boolean> {
-  const [valid] = await Promise.all([
-    probeSsoDomain(domain, signal),
-    sleep(MIN_DURATION_MS, signal),
-  ]);
-  return valid;
-}
+export async function isValidSsoDomain(domain: string, signal: AbortSignal): Promise<boolean> {
+  signal.throwIfAborted();
 
-async function probeSsoDomain(domain: string, signal?: AbortSignal): Promise<boolean> {
   let normalized: string;
   try {
     normalized = normalizeSsoDomain(domain);
@@ -137,10 +110,10 @@ async function probeSsoDomain(domain: string, signal?: AbortSignal): Promise<boo
       return false;
     }
     const valid = publishesSsoConfiguration(await response.json());
-    signal?.throwIfAborted();
+    signal.throwIfAborted();
     return valid;
   } catch (error) {
-    if (signal?.aborted === true) {
+    if (signal.aborted) {
       throw error;
     }
     // A DNS, TLS, CORS, or parse failure all leave the domain unusable.

@@ -51,33 +51,58 @@ const authClient = new AuthClient({
 
 ## Validating a domain the user typed
 
-An app that asks the user for their organization's domain can check it before signing in. `isValidSsoDomain` confirms the domain is well-formed and actually publishes an OpenID configuration:
+An app that asks the user for their organization's domain can check it before
+signing in. `isValidSsoDomain` confirms the domain is well-formed and actually
+publishes an OpenID configuration:
+
+```html
+<form id="sso-form">
+  <input id="sso-domain" type="text" placeholder="acme.com" autocomplete="off" required />
+  <button type="submit">Continue</button>
+</form>
+<p id="sso-status" role="status"></p>
+```
 
 ```typescript
-import { isValidSsoDomain } from '@icp-sdk/auth/client';
+import { AuthClient, isValidSsoDomain } from '@icp-sdk/auth/client';
 
-let controller: AbortController | undefined;
+const form = document.querySelector('#sso-form') as HTMLFormElement;
+const input = document.querySelector('#sso-domain') as HTMLInputElement;
+const status = document.querySelector('#sso-status') as HTMLParagraphElement;
 
-input.addEventListener('input', () => {
-  controller?.abort();
-  controller = new AbortController();
-  const signal = controller.signal;
+form.addEventListener('submit', async (event) => {
+  event.preventDefault();
+  const domain = input.value.trim();
 
-  isValidSsoDomain(input.value, signal)
-    .then((valid) => {
-      status.textContent = valid ? 'Ready to sign in' : 'No SSO configuration found';
-    })
-    .catch(() => {
-      // Superseded by a later keystroke; a fresh check is already running.
-    });
+  if (!(await isValidSsoDomain(domain, AbortSignal.timeout(5_000)))) {
+    status.textContent = `No SSO configuration found for ${domain}`;
+    return;
+  }
+
+  const authClient = new AuthClient({ ssoDomain: domain });
+  await authClient.signIn();
 });
 ```
 
-Three things to know about it:
+Two things to know about it:
 
-- The organization must serve `/.well-known/ii-openid-configuration` with `Access-Control-Allow-Origin: *`. It is a public, unauthenticated document, and a browser that cannot read it cannot check the domain.
-- Aborting rejects the promise rather than resolving `false`, so an abandoned check is never mistaken for an invalid domain.
-- It never resolves in under 750 ms, so checking on every keystroke doesn't flash an error while the user is still typing. Debounce the input as well — each call is a request to a third-party server.
+- The organization must serve `/.well-known/ii-openid-configuration` with
+  `Access-Control-Allow-Origin: *`. It is a public, unauthenticated document, and
+  a browser that cannot read it cannot check the domain.
+- The check waits on that organization's server and has no deadline of its own,
+  which is why the signal is required. Aborting rejects rather than resolving
+  `false`, so an abandoned check is never mistaken for an invalid domain.
+
+To check while the user types instead, abort the previous check on each keystroke
+so a superseded one cannot overwrite a fresher verdict, and debounce as well,
+since every call is a request to the organization's server:
+
+```typescript
+controller?.abort();
+controller = new AbortController();
+const signal = AbortSignal.any([controller.signal, AbortSignal.timeout(5_000)]);
+const valid = await isValidSsoDomain(input.value, signal);
+```
 
 ## Requesting attributes in the same step
 
