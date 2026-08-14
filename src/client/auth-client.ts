@@ -142,6 +142,31 @@ export interface AuthClientCreateOptions {
    * the chosen provider (e.g. Google) instead of seeing Internet Identity directly.
    */
   openIdProvider?: OpenIdProvider;
+
+  /**
+   * Whether Internet Identity may answer without user interaction.
+   *
+   * - `'login'` (the effect of omitting it): run a normal sign-in ceremony.
+   * - `'none'`: Internet Identity answers from a delegation it already holds for
+   *   this app and returns without rendering anything, or fails with an
+   *   `interaction_required` error if it can't. Pair with {@link hint} to name
+   *   which identity to re-issue for. Use it to re-acquire a session on page
+   *   load when another origin's sign-in state says one should exist, without a
+   *   ceremony.
+   *
+   * Sent as a `prompt` query param on the authorize URL. An Internet Identity
+   * extension inspired by OpenID Connect's `prompt`, and not part of any ICRC
+   * standard — which is why it travels on the URL rather than in the request.
+   */
+  prompt?: 'none' | 'login';
+
+  /**
+   * The principal to re-issue a delegation for. Sent (as text) in a `hint` query
+   * param on the authorize URL; Internet Identity uses it to pick which stored
+   * delegation a {@link prompt} `'none'` request resolves to when the user has
+   * more than one for this app. Inspired by OpenID Connect's `login_hint`.
+   */
+  hint?: Principal;
 }
 
 export interface IdleOptions extends IdleManagerOptions {
@@ -210,6 +235,18 @@ export class AuthClient {
     );
     if (options.openIdProvider) {
       identityProviderUrl.searchParams.set('openid', OPENID_PROVIDER_URLS[options.openIdProvider]);
+    }
+    // `prompt` / `hint` are Internet Identity extensions, so they ride on the
+    // authorize URL rather than in the ICRC request. Baking them into the URL
+    // here (like `openid`) means a client is configured for one authorize
+    // intent — construct a separate client for a `prompt: 'none'` re-issue vs an
+    // interactive sign-in; both share this client's storage, so whichever
+    // resolves populates the same session.
+    if (options.prompt) {
+      identityProviderUrl.searchParams.set('prompt', options.prompt);
+    }
+    if (options.hint) {
+      identityProviderUrl.searchParams.set('hint', options.hint.toText());
     }
 
     const transport =

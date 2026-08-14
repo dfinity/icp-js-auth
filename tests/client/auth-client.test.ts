@@ -248,6 +248,28 @@ describe('AuthClient', () => {
     expect(url.searchParams.has('openid')).toBe(false);
   });
 
+  it.each(['none', 'login'] as const)(
+    'should pass prompt=%s search param to the transport',
+    (prompt) => {
+      new AuthClient({ prompt });
+      const url = new URL(FakeTransport.last().options.url ?? '');
+      expect(url.searchParams.get('prompt')).toBe(prompt);
+    },
+  );
+
+  it('should pass the hint principal as text in the search param', () => {
+    new AuthClient({ hint: Principal.fromText('2vxsx-fae') });
+    const url = new URL(FakeTransport.last().options.url ?? '');
+    expect(url.searchParams.get('hint')).toBe('2vxsx-fae');
+  });
+
+  it('should include neither prompt nor hint when they are not set', () => {
+    new AuthClient();
+    const url = new URL(FakeTransport.last().options.url ?? '');
+    expect(url.searchParams.has('prompt')).toBe(false);
+    expect(url.searchParams.has('hint')).toBe(false);
+  });
+
   it('should forward windowOpenerFeatures to the transport', () => {
     new AuthClient({ windowOpenerFeatures: 'width=500,height=600' });
     expect(FakeTransport.last().options.windowOpenerFeatures).toBe('width=500,height=600');
