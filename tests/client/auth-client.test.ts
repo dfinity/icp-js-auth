@@ -11,6 +11,7 @@ import {
   KEY_STORAGE_KEY,
   LocalStorage,
 } from '../../src/client/storage.ts';
+import type { AuthClientSyncStorage } from '../../src/client/sync-storage.ts';
 import { FakeTransport } from './fake-transport.ts';
 
 // Swap `PostMessageTransport` for `FakeTransport` so `AuthClient` uses the real
@@ -151,15 +152,10 @@ describe('AuthClient', () => {
   it('should use a provided identity as the key for hydration', async () => {
     const identity = Ed25519KeyIdentity.generate();
     const chain = await createTestDelegation(identity);
-    const storage: AuthClientStorage = {
-      remove: vi.fn(),
-      get: vi.fn(async (x) => {
-        if (x === KEY_STORAGE_DELEGATION) return JSON.stringify(chain.toJSON());
-        return null;
-      }),
-      set: vi.fn(),
-    };
-    const client = new AuthClient({ identity, storage });
+    // The delegation lives in sync storage (localStorage by default); the key is
+    // supplied via `identity`.
+    localStorage.setItem(KEY_STORAGE_DELEGATION, JSON.stringify(chain.toJSON()));
+    const client = new AuthClient({ identity });
     const resolved = await client.getIdentity();
     expect(resolved.getPrincipal().isAnonymous()).toBe(false);
   });
@@ -348,18 +344,27 @@ describe('AuthClient signIn', () => {
     expect(transport.requests[0].params?.icrc95DerivationOrigin).toBe('https://example.com');
   });
 
-  it('should persist delegation and key after sign-in', async () => {
+  it('should persist the key to async storage and the delegation to sync storage after sign-in', async () => {
     const storage: AuthClientStorage = {
       remove: vi.fn(),
       get: vi.fn().mockResolvedValue(null),
       set: vi.fn(),
     };
-    const client = new AuthClient({ storage });
+    const syncStorage: AuthClientSyncStorage = {
+      get: vi.fn(() => null),
+      set: vi.fn(),
+      remove: vi.fn(),
+      subscribe: vi.fn(() => () => {}),
+    };
+    const client = new AuthClient({ storage, syncStorage });
     handleSignIn(FakeTransport.last());
     await client.signIn();
 
-    expect(storage.set).toHaveBeenCalledWith(KEY_STORAGE_DELEGATION, expect.any(String));
+    // The delegation is not secret and goes to sync storage; the key pair goes
+    // to async storage and never to sync.
+    expect(syncStorage.set).toHaveBeenCalledWith(KEY_STORAGE_DELEGATION, expect.any(String));
     expect(storage.set).toHaveBeenCalledWith(KEY_STORAGE_KEY, expect.anything());
+    expect(storage.set).not.toHaveBeenCalledWith(KEY_STORAGE_DELEGATION, expect.anything());
   });
 
   it('should generate a fresh key for each sign-in', async () => {
@@ -380,7 +385,7 @@ describe('AuthClient signIn', () => {
     expect(storedKeys[0]).not.toEqual(storedKeys[1]);
   });
 
-  it('should set the localStorage expiration flag after sign-in', async () => {
+  it('reports authenticated once the delegation is in sync storage after sign-in', async () => {
     const client = new AuthClient({ idleOptions: { disableIdle: true } });
     handleSignIn(FakeTransport.last());
     expect(client.isAuthenticated()).toBe(false);
@@ -388,7 +393,7 @@ describe('AuthClient signIn', () => {
     expect(client.isAuthenticated()).toBe(true);
   });
 
-  it('should clear the localStorage expiration flag on sign-out', async () => {
+  it('reports unauthenticated once the delegation is cleared from sync storage on sign-out', async () => {
     const client = new AuthClient({ idleOptions: { disableIdle: true } });
     handleSignIn(FakeTransport.last());
     await client.signIn();
@@ -495,10 +500,11 @@ describe('Session restoration', () => {
     const key = Ed25519KeyIdentity.fromJSON(JSON.stringify(testSecrets));
     const chain = await createTestDelegation(key, expiration);
 
+    // Key pair in async storage, delegation in sync storage (localStorage).
+    localStorage.setItem(KEY_STORAGE_DELEGATION, JSON.stringify(chain.toJSON()));
     const storage: AuthClientStorage = {
       remove: vi.fn(),
       get: vi.fn(async (x) => {
-        if (x === KEY_STORAGE_DELEGATION) return JSON.stringify(chain.toJSON());
         if (x === KEY_STORAGE_KEY) return JSON.stringify(testSecrets);
         return null;
       }),
@@ -534,22 +540,20 @@ describe('Session restoration', () => {
     const key = Ed25519KeyIdentity.fromJSON(JSON.stringify(testSecrets));
     const chain = await createTestDelegation(key, expiration);
 
-    const fakeStore: Record<string, string> = {};
-    fakeStore[KEY_STORAGE_DELEGATION] = JSON.stringify(chain.toJSON());
-    fakeStore[KEY_STORAGE_KEY] = JSON.stringify(testSecrets);
-
+    // Expired delegation in sync storage; the key pair in async storage.
+    localStorage.setItem(KEY_STORAGE_DELEGATION, JSON.stringify(chain.toJSON()));
     const storage: AuthClientStorage = {
-      remove: vi.fn(async (x) => {
-        delete fakeStore[x];
-      }),
-      get: vi.fn(async (x) => fakeStore[x] ?? null),
+      remove: vi.fn(),
+      get: vi.fn(async (x) => (x === KEY_STORAGE_KEY ? JSON.stringify(testSecrets) : null)),
       set: vi.fn(),
     };
 
     const client = new AuthClient({ storage });
     const identity = await client.getIdentity();
     expect(identity.getPrincipal().isAnonymous()).toBe(true);
-    expect(storage.remove).toHaveBeenCalled();
+    // The expired chain is dropped from sync storage rather than left to be
+    // re-checked on every read.
+    expect(localStorage.getItem(KEY_STORAGE_DELEGATION)).toBeNull();
   });
 });
 

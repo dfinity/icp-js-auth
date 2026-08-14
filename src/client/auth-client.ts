@@ -21,6 +21,7 @@ import {
   LocalStorage,
   type StoredKey,
 } from './storage.js';
+import { type AuthClientSyncStorage, SyncLocalStorage } from './sync-storage.js';
 
 const NANOSECONDS_PER_SECOND = BigInt(1_000_000_000);
 const SECONDS_PER_HOUR = BigInt(3_600);
@@ -32,10 +33,6 @@ const DEFAULT_MAX_TIME_TO_LIVE = BigInt(8) * NANOSECONDS_PER_HOUR;
 const ECDSA_KEY_LABEL = 'ECDSA';
 const ED25519_KEY_LABEL = 'Ed25519';
 type BaseKeyType = typeof ECDSA_KEY_LABEL | typeof ED25519_KEY_LABEL;
-
-// localStorage key used to cache the delegation expiration so that
-// isAuthenticated() can answer synchronously without hitting IndexedDB.
-const KEY_STORAGE_EXPIRATION = 'ic-delegation_expiration';
 
 // Storage key prefix for a redirect flow's session key, held only while the
 // flow is in progress (keyed by a per-flow id) and removed once the delegation
@@ -75,10 +72,30 @@ export interface AuthClientCreateOptions {
   identity?: SignIdentity | PartialIdentity;
 
   /**
-   * Persistent storage backend. Defaults to IndexedDB.
+   * Async storage backend for the session key pair.
+   *
+   * Holds only the key pair now: it must be async because a non-extractable
+   * `CryptoKey` can only be persisted by structured clone (IndexedDB), and
+   * keeping it here is what preserves its non-extractability. The delegation
+   * lives in {@link syncStorage} instead.
    * @default IdbStorage
    */
   storage?: AuthClientStorage;
+
+  /**
+   * Synchronous storage backend for the delegation chain.
+   *
+   * The chain is not secret (it is in every call envelope), so it lives in a
+   * synchronous, observable store: {@link AuthClient.isAuthenticated} reads it
+   * without an async hop, and a sign-in or sign-out in another tab or sibling
+   * subdomain reaches this client through the store's change event.
+   *
+   * Defaults to `localStorage` (cross-tab, one origin). For a session shared
+   * across sibling subdomains, use a `SyncCookieStorage` scoped to the common
+   * domain.
+   * @default SyncLocalStorage
+   */
+  syncStorage?: AuthClientSyncStorage;
 
   /**
    * Type of session key to generate on each sign-in.
@@ -218,6 +235,12 @@ export class AuthClient {
   #identity: Identity | PartialIdentity = new AnonymousIdentity();
   #chain: DelegationChain | null = null;
   #storage: AuthClientStorage;
+  #syncStorage: AuthClientSyncStorage;
+  // The raw delegation last seen in sync storage, so a change event can tell an
+  // actual change from a no-op (our own write echoing back, a duplicate event).
+  #syncChainRaw: string | null = null;
+  #unsubscribeSync: (() => void) | undefined;
+  #changeListeners = new Set<() => void>();
   #signer: Signer;
   // Set only in redirect mode, so the redirect-specific paths (nonce/key
   // journaling) can reach `memoize`. Undefined in the default 'window' mode.
@@ -229,6 +252,7 @@ export class AuthClient {
   constructor(options: AuthClientCreateOptions = {}) {
     this.#options = options;
     this.#storage = options.storage ?? new IdbStorage();
+    this.#syncStorage = options.syncStorage ?? new SyncLocalStorage();
 
     const identityProviderUrl = new URL(
       options.identityProvider?.toString() || IDENTITY_PROVIDER_DEFAULT,
@@ -278,9 +302,45 @@ export class AuthClient {
 
     this.#registerDefaultIdleCallback();
 
+    // React to a sign-in or sign-out that happened elsewhere — another tab on
+    // this origin, or a sibling subdomain via the shared cookie. The delegation
+    // lives in sync storage precisely so this is observable.
+    this.#unsubscribeSync = this.#syncStorage.subscribe(KEY_STORAGE_DELEGATION, () => {
+      void this.#reconcileFromSyncStorage();
+    });
+
     // Eagerly start restoring a previous session from storage.
     // The result is awaited in getIdentity() before returning.
     this.#init();
+  }
+
+  /**
+   * Subscribes to session changes driven from outside this client — a sign-in
+   * or sign-out in another tab or sibling subdomain. The listener fires after
+   * this client's identity has been updated, so a consumer can re-render.
+   * Returns a function that unsubscribes.
+   *
+   * A cross-tab sign-in is adopted automatically (the delegation is shared);
+   * a cross-subdomain sign-in cannot be (its delegation is per-origin and needs
+   * a `prompt: 'none'` re-issue), so there the listener signals that a session
+   * is available to acquire while {@link isAuthenticated} stays false.
+   */
+  subscribe(listener: () => void): () => void {
+    this.#changeListeners.add(listener);
+    return () => {
+      this.#changeListeners.delete(listener);
+    };
+  }
+
+  /**
+   * Releases the cross-tab / cross-subdomain subscription and drops all
+   * {@link subscribe} listeners. Call it when discarding a client whose page
+   * outlives it, so its listener does not linger.
+   */
+  dispose(): void {
+    this.#unsubscribeSync?.();
+    this.#unsubscribeSync = undefined;
+    this.#changeListeners.clear();
   }
 
   /**
@@ -295,11 +355,10 @@ export class AuthClient {
    * Checks whether the user has an active, non-expired session.
    */
   isAuthenticated(): boolean {
-    // Uses a cached expiration in localStorage to avoid an async IndexedDB read.
-    const expiration = getExpirationFlag();
-    if (expiration === null) return false;
-    const nowNs = BigInt(Date.now()) * BigInt(1_000_000);
-    return nowNs < expiration;
+    // The delegation lives in sync storage, so this reads and validates it
+    // directly — no async hop, no separately cached expiry to keep in step.
+    // The chain carries its own expiry, which `isDelegationValid` checks.
+    return loadChain(this.#syncStorage) !== null;
   }
 
   /**
@@ -375,9 +434,11 @@ export class AuthClient {
       this.#registerDefaultIdleCallback();
     }
 
-    // Persist so the session survives page reloads.
-    await persistChain(this.#storage, this.#chain);
+    // Persist so the session survives page reloads: the key pair in async
+    // storage, the delegation in sync storage. Record the raw delegation we
+    // wrote so our own write doesn't later read back as an external change.
     await persistKey(this.#storage, key);
+    this.#syncChainRaw = persistChain(this.#syncStorage, this.#chain);
 
     // The flow is complete: the delegation is bound to this key and stored, so
     // the per-flow pending copy is no longer needed. Best-effort — the user is
@@ -574,10 +635,11 @@ export class AuthClient {
     // Wait for the constructor's session restore: hydration racing the
     // deletion below could re-populate the identity from already-read state.
     await this.#init();
-    await deleteStorage(this.#storage);
+    await deleteStorage(this.#storage, this.#syncStorage);
 
     this.#identity = new AnonymousIdentity();
     this.#chain = null;
+    this.#syncChainRaw = null;
 
     if (options.returnTo !== undefined) {
       // Navigate exactly as before (pushState, else location.href), but only to
@@ -640,7 +702,8 @@ export class AuthClient {
       (await restoreKey(this.#storage, this.#options.keyType ?? ECDSA_KEY_LABEL));
     if (!key) return;
 
-    const chain = await restoreChain(this.#storage);
+    this.#syncChainRaw = this.#syncStorage.get(KEY_STORAGE_DELEGATION);
+    const chain = loadChain(this.#syncStorage);
     if (!chain) return;
 
     this.#chain = chain;
@@ -654,6 +717,47 @@ export class AuthClient {
       this.idleManager = IdleManager.create(this.#options.idleOptions);
       this.#registerDefaultIdleCallback();
     }
+  }
+
+  // Handles a delegation change in sync storage made outside this client.
+  async #reconcileFromSyncStorage(): Promise<void> {
+    await this.#init();
+
+    const raw = this.#syncStorage.get(KEY_STORAGE_DELEGATION);
+    // Ignore the echo of our own write, or a duplicate event: nothing changed.
+    if (raw === this.#syncChainRaw) return;
+    this.#syncChainRaw = raw;
+
+    const chain = loadChain(this.#syncStorage);
+    if (chain === null) {
+      // Signed out elsewhere (or the shared session ended / expired). Drop the
+      // local identity. Not authenticated afterwards either way.
+      const wasSignedIn = this.#chain !== null;
+      this.#identity = new AnonymousIdentity();
+      this.#chain = null;
+      if (wasSignedIn) this.#emitChange();
+      return;
+    }
+
+    // A delegation appeared or changed. Adopt it if the matching key pair is in
+    // async storage — the cross-tab case, where both share this origin's stores.
+    // Cross-subdomain has no local key yet (its delegation is per-origin), so
+    // the key is absent and we simply signal that a session is acquirable.
+    const key =
+      this.#options.identity ??
+      (await restoreKey(this.#storage, this.#options.keyType ?? ECDSA_KEY_LABEL));
+    if (key) {
+      this.#chain = chain;
+      this.#identity =
+        'toDer' in key
+          ? PartialDelegationIdentity.fromDelegation(key, chain)
+          : DelegationIdentity.fromDelegation(key, chain);
+    }
+    this.#emitChange();
+  }
+
+  #emitChange(): void {
+    for (const listener of this.#changeListeners) listener();
   }
 
   #registerDefaultIdleCallback() {
@@ -856,64 +960,53 @@ function serializeKey(key: SignIdentity | PartialIdentity): StoredKey {
 }
 
 /**
- * Saves the delegation chain and caches its earliest expiration
- * in localStorage so {@link AuthClient.isAuthenticated} can check it synchronously.
- * @param storage - The storage backend.
+ * Writes the delegation chain to sync storage and returns the raw value stored,
+ * so the caller can tell its own write apart from a later external change.
+ * @param syncStorage - The sync storage backend.
  * @param chain - The delegation chain to persist.
  */
-async function persistChain(storage: AuthClientStorage, chain: DelegationChain): Promise<void> {
-  await storage.set(KEY_STORAGE_DELEGATION, JSON.stringify(chain.toJSON()));
-
-  let earliest: bigint | null = null;
-  for (const { delegation } of chain.delegations) {
-    if (earliest === null || delegation.expiration < earliest) {
-      earliest = delegation.expiration;
-    }
-  }
-  if (earliest !== null) {
-    localStorage.setItem(KEY_STORAGE_EXPIRATION, earliest.toString());
-  }
+function persistChain(syncStorage: AuthClientSyncStorage, chain: DelegationChain): string {
+  const raw = JSON.stringify(chain.toJSON());
+  syncStorage.set(KEY_STORAGE_DELEGATION, raw);
+  return raw;
 }
 
 /**
- * Loads the delegation chain from storage. Returns `null` and wipes
- * storage if the chain is expired or corrupted.
- * @param storage - The storage backend.
+ * Reads a valid delegation chain from sync storage, or `null` when there is
+ * none, it is expired, or it does not parse. A stored-but-invalid chain is
+ * dropped so a later read does not keep re-checking it.
+ * @param syncStorage - The sync storage backend.
  */
-async function restoreChain(storage: AuthClientStorage): Promise<DelegationChain | null> {
+function loadChain(syncStorage: AuthClientSyncStorage): DelegationChain | null {
+  const raw = syncStorage.get(KEY_STORAGE_DELEGATION);
+  if (!raw) return null;
   try {
-    const raw = await storage.get(KEY_STORAGE_DELEGATION);
-    if (!raw || typeof raw !== 'string') return null;
-
     const chain = DelegationChain.fromJSON(raw);
     if (!isDelegationValid(chain)) {
-      await deleteStorage(storage);
+      syncStorage.remove(KEY_STORAGE_DELEGATION);
       return null;
     }
     return chain;
   } catch (e) {
     console.error(e);
-    await deleteStorage(storage);
+    syncStorage.remove(KEY_STORAGE_DELEGATION);
     return null;
   }
 }
 
 /**
- * Clears all session data from storage.
- * @param storage - The storage backend.
+ * Clears all session data: the key pair from async storage, the delegation from
+ * sync storage.
+ * @param storage - The async storage backend (key pair).
+ * @param syncStorage - The sync storage backend (delegation).
  */
-async function deleteStorage(storage: AuthClientStorage): Promise<void> {
+async function deleteStorage(
+  storage: AuthClientStorage,
+  syncStorage: AuthClientSyncStorage,
+): Promise<void> {
   await storage.remove(KEY_STORAGE_KEY);
-  await storage.remove(KEY_STORAGE_DELEGATION);
   await storage.remove(KEY_VECTOR);
-  localStorage.removeItem(KEY_STORAGE_EXPIRATION);
-}
-
-/** Reads the cached delegation expiration from localStorage (nanoseconds). */
-function getExpirationFlag(): bigint | null {
-  const value = localStorage.getItem(KEY_STORAGE_EXPIRATION);
-  if (value === null) return null;
-  return BigInt(value);
+  syncStorage.remove(KEY_STORAGE_DELEGATION);
 }
 
 /**

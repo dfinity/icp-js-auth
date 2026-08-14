@@ -12,3 +12,10 @@ export {
   KEY_STORAGE_KEY,
   LocalStorage,
 } from './storage.js';
+export {
+  type AuthClientSyncStorage,
+  type SessionHint,
+  SyncCookieStorage,
+  type SyncCookieStorageOptions,
+  SyncLocalStorage,
+} from './sync-storage.js';
