@@ -1,10 +1,11 @@
 import { type IDBPDatabase, openDB } from 'idb';
-import { DB_VERSION, KEY_STORAGE_DELEGATION, KEY_STORAGE_KEY } from './storage.js';
 
 type Database = IDBPDatabase<unknown>;
 type IDBValidKey = string | number | Date | BufferSource | IDBValidKey[];
 const AUTH_DB_NAME = 'auth-client-db';
 const OBJECT_STORE_NAME = 'ic-keyval';
+// Increment if the stored shape changes.
+export const DB_VERSION = 1;
 
 const _openDbStore = async (
   dbName = AUTH_DB_NAME,
@@ -12,11 +13,6 @@ const _openDbStore = async (
   version: number,
   onTerminated?: () => void,
 ) => {
-  // Clear legacy stored delegations
-  if (globalThis.localStorage?.getItem(KEY_STORAGE_DELEGATION)) {
-    globalThis.localStorage.removeItem(KEY_STORAGE_DELEGATION);
-    globalThis.localStorage.removeItem(KEY_STORAGE_KEY);
-  }
   return await openDB(dbName, version, {
     upgrade: (database) => {
       if (database.objectStoreNames.contains(storeName)) {

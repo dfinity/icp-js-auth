@@ -4,7 +4,10 @@
 
 export * from './auth-client.js';
 export { type DBCreateOptions, IdbKeyVal } from './db.js';
+export { IdbIdentityStorage } from './idb-identity-storage.js';
+export type { IdentityStorage } from './identity-storage.js';
 export * from './idle-manager.js';
+export { LocalIdentityStorage } from './local-identity-storage.js';
 export {
   type AuthClientStorage,
   IdbStorage,
