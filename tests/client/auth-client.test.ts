@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { AuthClient } from '../../src/client/auth-client.ts';
 import type { IdentityStorage } from '../../src/client/identity-storage.ts';
 import { IdleManager } from '../../src/client/idle-manager.ts';
+import type { SessionIdentity } from '../../src/client/session-identity.ts';
 import type { Session, SessionStorage } from '../../src/client/session-storage.ts';
 import { FakeTransport } from './fake-transport.ts';
 
@@ -453,6 +454,53 @@ describe('AuthClient signIn', () => {
     const identity = await client.signIn();
 
     expect(identity.getPrincipal().toText()).toBe(minted.accountKey?.getPrincipal().toText());
+  });
+
+  it('mints when the tab comes back, if one is due', async () => {
+    const client = new AuthClient();
+    handleSignIn(FakeTransport.last());
+    const identity = (await client.signIn()) as SessionIdentity;
+    const held = identity.getDelegation();
+
+    // The clock moves while the tab is in the background; its own timers do not
+    // run, which is the case this trigger exists for.
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date(Date.now() + 4 * 60 * 1000 + 50_000));
+    document.dispatchEvent(new Event('visibilitychange'));
+    await vi.advanceTimersByTimeAsync(0);
+    vi.useRealTimers();
+
+    expect(identity.getDelegation()).not.toBe(held);
+    client.dispose();
+  });
+
+  it('costs nothing to glance at a tab whose delegation is healthy', async () => {
+    const client = new AuthClient();
+    handleSignIn(FakeTransport.last());
+    const identity = (await client.signIn()) as SessionIdentity;
+    const held = identity.getDelegation();
+
+    document.dispatchEvent(new Event('visibilitychange'));
+    await Promise.resolve();
+
+    expect(identity.getDelegation()).toBe(held);
+    client.dispose();
+  });
+
+  it('hooks nothing when foreground refresh is turned off', async () => {
+    const client = new AuthClient({ disableForegroundRefresh: true });
+    handleSignIn(FakeTransport.last());
+    const identity = (await client.signIn()) as SessionIdentity;
+    const held = identity.getDelegation();
+
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date(Date.now() + 4 * 60 * 1000 + 50_000));
+    document.dispatchEvent(new Event('visibilitychange'));
+    await vi.advanceTimersByTimeAsync(0);
+    vi.useRealTimers();
+
+    expect(identity.getDelegation()).toBe(held);
+    client.dispose();
   });
 
   it('ends the session at the canister before clearing what it holds', async () => {
