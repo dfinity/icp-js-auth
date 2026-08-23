@@ -810,8 +810,19 @@ export class AuthClient {
       source,
       initial,
       onSessionGone: () => {
-        // The canister no longer has this session, so what is stored is worthless.
-        // Clearing it is what makes isAuthenticated() agree with the canister.
+        // Storage is shared by every tab of this origin, so what is stored is not
+        // necessarily the session that just died. Signing in again replaces a
+        // browser's session, so a tab still holding the old one is refused while
+        // the tab that signed in is working fine — and clearing here would take
+        // its session with it.
+        const stored = this.#sessionStorage.get();
+        if (stored !== null && !isSameSession(stored, session)) {
+          // A newer session is stored, and it belongs to the same person in the
+          // same browser. Adopt it rather than destroying it.
+          void this.#reconcile();
+          return;
+        }
+
         this.#sessionStorage.remove();
         this.#identity = new AnonymousIdentity();
         this.#notify();
@@ -928,4 +939,14 @@ function earliestExpiryMs(chain: DelegationChain): number {
   const expirations = chain.delegations.map(({ delegation }) => delegation.expiration);
   if (expirations.length === 0) return 0;
   return Number(expirations.reduce((a, b) => (a < b ? a : b)) / 1_000_000n);
+}
+
+/**
+ * Whether two sessions are the same one.
+ *
+ * Compared by chain, since a sign-in mints a fresh one: the account key is equal
+ * for every session at the same account and says nothing about which this is.
+ */
+function isSameSession(a: Session, b: Session): boolean {
+  return JSON.stringify(a.chain.toJSON()) === JSON.stringify(b.chain.toJSON());
 }

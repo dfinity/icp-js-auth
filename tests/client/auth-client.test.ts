@@ -93,6 +93,7 @@ const II_CANISTER = Principal.fromText('rdmx6-jaaaa-aaaaa-aaadq-cai');
 // is that AuthClient mints once at sign-in and stores what came back. The mock
 // fills in `minted.accountKey` so assertions can name the principal it roots at.
 const minted = vi.hoisted(() => ({
+  refuse: false,
   accountKey: undefined as SignIdentity | undefined,
   count: 0,
   revoked: 0,
@@ -110,6 +111,10 @@ vi.mock('../../src/client/session-minter.ts', async () => {
       create: async () => ({
         mint: async (appPublicKey: Uint8Array) => {
           minted.count += 1;
+          if (minted.refuse) {
+            const { SessionGoneError } = await import('../../src/client/app-delegation-source.ts');
+            throw new SessionGoneError();
+          }
           return Chain.create(
             accountKey,
             { toDer: () => appPublicKey } as unknown as PublicKey,
@@ -501,6 +506,40 @@ describe('AuthClient signIn', () => {
 
     expect(identity.getDelegation()).toBe(held);
     client.dispose();
+  });
+
+  it('does not clear a session another tab signed in with', async () => {
+    // Both tabs share localStorage and IndexedDB, so both share the session.
+    const identityStorage = createIdentityStorage();
+    const sessionStorage = createSessionStorage();
+
+    const tabB = new AuthClient({ identityStorage, sessionStorage });
+    handleSignIn(FakeTransport.last());
+    const identityB = (await tabB.signIn()) as SessionIdentity;
+
+    // Signing in replaces whatever this browser held, so tab B's session is now
+    // gone at the canister and storage carries the one tab A just obtained.
+    const tabA = new AuthClient({ identityStorage, sessionStorage });
+    handleSignIn(FakeTransport.last());
+    await tabA.signIn();
+    const sessionA = sessionStorage.get();
+
+    // Tab B keeps using the identity it holds. Past the life of the delegation it
+    // was left with, so the request has to mint, and the mint is refused.
+    minted.refuse = true;
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date(Date.now() + 10 * 60 * 1000));
+    await identityB
+      .transformRequest({ body: { arg: new Uint8Array() } } as never)
+      .catch(() => undefined);
+    vi.useRealTimers();
+    minted.refuse = false;
+
+    // Tab B being refused must not take tab A's session with it.
+    expect(sessionStorage.get()).toEqual(sessionA);
+    expect(tabA.isAuthenticated()).toBe(true);
+    tabA.dispose();
+    tabB.dispose();
   });
 
   it('ends the session at the canister before clearing what it holds', async () => {
