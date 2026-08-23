@@ -2,6 +2,7 @@
  * @module api/client
  */
 
+export { type AppDelegationSource, SessionGoneError } from './app-delegation-source.js';
 export * from './auth-client.js';
 export {
   CookieSessionStorage,
@@ -14,4 +15,5 @@ export type { IdentityStorage } from './identity-storage.js';
 export * from './idle-manager.js';
 export { LocalIdentityStorage } from './local-identity-storage.js';
 export { LocalSessionStorage } from './local-session-storage.js';
+export { SessionIdentity, type SessionIdentityOptions } from './session-identity.js';
 export type { Session, SessionStorage } from './session-storage.js';
