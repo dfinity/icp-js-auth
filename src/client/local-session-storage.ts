@@ -1,4 +1,6 @@
+import type { DerEncodedPublicKey } from '@icp-sdk/core/agent';
 import { DelegationChain } from '@icp-sdk/core/identity';
+import { fromBase64, toBase64 } from './base64.js';
 import type { Session, SessionStorage } from './session-storage.js';
 
 // Default storage slot the serialized session lives under. Owned by
@@ -29,14 +31,24 @@ export class LocalSessionStorage implements SessionStorage {
     const raw = this.#ls().getItem(this.key);
     if (raw === null) return null;
     try {
-      return { chain: DelegationChain.fromJSON(raw) };
+      const { chain, accountKey } = JSON.parse(raw) as { chain: string; accountKey: string };
+      return {
+        chain: DelegationChain.fromJSON(chain),
+        accountKey: fromBase64(accountKey) as DerEncodedPublicKey,
+      };
     } catch {
       return null;
     }
   }
 
   public set(session: Session): void {
-    this.#ls().setItem(this.key, JSON.stringify(session.chain.toJSON()));
+    this.#ls().setItem(
+      this.key,
+      JSON.stringify({
+        chain: JSON.stringify(session.chain.toJSON()),
+        accountKey: toBase64(session.accountKey),
+      }),
+    );
     this.#fire();
   }
 

@@ -1,17 +1,11 @@
 import { Principal } from '@icp-sdk/core/principal';
 import { LocalSessionStorage } from './local-session-storage.js';
+import { isLoopbackHost } from './loopback.js';
 import type { Session, SessionStorage } from './session-storage.js';
 
 // Default storage slot for the session and the name of the hint cookie.
 // Owned by this implementation; override per instance via the options.
 const DEFAULT_KEY = 'ic-delegation';
-
-/** Whether a hostname is loopback, which browsers treat as a secure context. */
-const isLoopbackHost = (hostname: string): boolean =>
-  hostname === 'localhost' ||
-  hostname.endsWith('.localhost') ||
-  hostname === '127.0.0.1' ||
-  hostname === '[::1]';
 
 export interface CookieSessionStorageOptions {
   /**

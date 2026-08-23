@@ -1,26 +1,25 @@
 import { AnonymousIdentity, type Identity, type SignIdentity } from '@icp-sdk/core/agent';
 import {
   type DelegationChain,
-  DelegationIdentity,
+  Ed25519KeyIdentity,
   isDelegationValid,
-  PartialDelegationIdentity,
   type PartialIdentity,
 } from '@icp-sdk/core/identity';
 import type { Principal } from '@icp-sdk/core/principal';
 import { Signer } from '@icp-sdk/signer';
 import { PostMessageTransport, UrlTransport } from '@icp-sdk/signer/web';
+import { fromBase64, toBase64 } from './base64.js';
 import { IdbIdentityStorage } from './idb-identity-storage.js';
 import type { IdentityStorage } from './identity-storage.js';
 import { IdleManager, type IdleManagerOptions } from './idle-manager.js';
 import { LocalSessionStorage } from './local-session-storage.js';
-import type { SessionStorage } from './session-storage.js';
-
-const NANOSECONDS_PER_SECOND = BigInt(1_000_000_000);
-const SECONDS_PER_HOUR = BigInt(3_600);
-const NANOSECONDS_PER_HOUR = NANOSECONDS_PER_SECOND * SECONDS_PER_HOUR;
+import { isLoopbackHost } from './loopback.js';
+import { requestSessionDelegation } from './session-delegation.js';
+import { SessionIdentity } from './session-identity.js';
+import { SessionMinter } from './session-minter.js';
+import type { Session, SessionStorage } from './session-storage.js';
 
 const IDENTITY_PROVIDER_DEFAULT = 'https://id.ai/authorize';
-const DEFAULT_MAX_TIME_TO_LIVE = BigInt(8) * NANOSECONDS_PER_HOUR;
 
 export type OpenIdProvider = 'google' | 'apple' | 'microsoft';
 
@@ -39,7 +38,7 @@ export interface AuthClientCreateOptions {
   /**
    * An identity to authenticate via delegation.
    */
-  identity?: SignIdentity | PartialIdentity;
+  identity?: SignIdentity;
 
   /**
    * Where the session signing identity (key pair) is persisted. The
@@ -159,15 +158,17 @@ export interface IdleOptions extends IdleManagerOptions {
  */
 export interface AuthClientSignInOptions {
   /**
-   * Maximum lifetime of the delegation in nanoseconds.
-   * @default 8 hours
+   * The longest this session may last, in nanoseconds.
+   *
+   * A ceiling rather than a request: what the user chooses at consent wins over
+   * it, an organization's policy may narrow it further, and Internet Identity
+   * clamps the result to between ten minutes and thirty days. Omit it to accept
+   * whatever the user is offered.
+   *
+   * The app delegations minted from the session are five minutes regardless, and
+   * are not requestable.
    */
   maxTimeToLive?: bigint;
-
-  /**
-   * Restrict the delegation to specific canisters.
-   */
-  targets?: Principal[];
 
   /**
    * URL to navigate to once sign-in completes, ignored unless it is a
@@ -202,6 +203,13 @@ export class AuthClient {
   // journaling) can reach `memoize`. Undefined in the default 'window' mode.
   #urlTransport: UrlTransport | undefined;
   #options: AuthClientCreateOptions;
+  // Where mint calls go. The Internet Identity canister is served by the gateway
+  // that serves its frontend, so the identity provider's origin is the host.
+  #identityProviderOrigin: string;
+  // Signs the application's own calls. Per client and in memory only: a reload
+  // mints against a fresh one, which costs a round trip and leaves nothing on
+  // disk that can sign for the application.
+  #appKey: SignIdentity;
   #initPromise: Promise<void> | null = null;
   // Listeners registered via subscribe(), and the live subscription to the
   // delegation storage that drives them. The storage subscription is opened
@@ -218,6 +226,8 @@ export class AuthClient {
     const identityProviderUrl = new URL(
       options.identityProvider?.toString() || IDENTITY_PROVIDER_DEFAULT,
     );
+    this.#identityProviderOrigin = identityProviderUrl.origin;
+    this.#appKey = Ed25519KeyIdentity.generate();
     if (options.openIdProvider) {
       identityProviderUrl.searchParams.set('openid', OPENID_PROVIDER_URLS[options.openIdProvider]);
     }
@@ -331,8 +341,6 @@ export class AuthClient {
    * Opens the identity provider, requests a delegation, and returns the authenticated identity.
    *
    * @param options - Sign-in options.
-   * @param options.maxTimeToLive - Maximum lifetime of the delegation in nanoseconds.
-   * @param options.targets - Restrict the delegation to specific canisters.
    * @returns The authenticated identity.
    * @throws When authentication fails.
    *
@@ -344,8 +352,6 @@ export class AuthClient {
    * }
    */
   async signIn(options?: AuthClientSignInOptions): Promise<Identity> {
-    const maxTimeToLive = options?.maxTimeToLive ?? DEFAULT_MAX_TIME_TO_LIVE;
-
     // Journal returnTo up front so it survives a 'redirect' round-trip, and only
     // when provided so the flow's journal is unchanged for callers that omit it.
     // Validate to a same-origin URL *inside* the producer, so only a safe href
@@ -385,13 +391,29 @@ export class AuthClient {
 
     const key = await identityPromise;
 
-    const delegationChain = await this.#signer.requestDelegation({
-      publicKey: key.getPublicKey(),
-      targets: options?.targets,
-      maxTimeToLive,
+    if (!('sign' in key)) {
+      // Unreachable for a typed caller, since `identity` is a SignIdentity.
+      // Minting is a canister call signed by the session key, so a key that
+      // cannot sign cannot hold a session, and failing here beats handing back
+      // an identity whose first request fails for a reason nothing explains.
+      throw new Error('A session needs a key that can sign');
+    }
+
+    const sessionChain = await requestSessionDelegation(this.#signer, {
+      sessionPublicKey: key.getPublicKey().toDer(),
+      maxTimeToLive: options?.maxTimeToLive,
+      derivationOrigin: this.#options.derivationOrigin?.toString(),
     });
 
-    this.#setIdentity(key, delegationChain);
+    // Mint inside the ceremony the user is already waiting through, so the first
+    // request after signing in does not wait. This is also where the account key
+    // comes from: the chain above is rooted at the session's own key, and only a
+    // mint reports the key an application's canisters will see.
+    const minter = await this.#minterFor(key, sessionChain);
+    const appDelegation = await minter.mint(this.#appKey.getPublicKey().toDer());
+    const session: Session = { chain: sessionChain, accountKey: appDelegation.publicKey };
+
+    this.#identity = this.#sessionIdentity(minter, session, appDelegation);
 
     const idleOptions = this.#options?.idleOptions;
     if (!this.idleManager && !idleOptions?.disableIdle) {
@@ -410,7 +432,7 @@ export class AuthClient {
       // `identityStorage.create()`, which returns a full SignIdentity.
       await this.#identityStorage.set(key as SignIdentity);
     }
-    this.#sessionStorage.set({ chain: delegationChain });
+    this.#sessionStorage.set(session);
 
     if (typeof returnTo === 'string') {
       // Leave the (possibly transient) sign-in page for the already-validated
@@ -654,8 +676,9 @@ export class AuthClient {
       this.#sessionStorage.remove();
       return;
     }
-
-    this.#setIdentity(key, session.chain);
+    // No mint here: the account key was stored with the session, so who is
+    // signed in is known without one, and the first request mints.
+    this.#identity = this.#sessionIdentity(await this.#minterFor(key, session.chain), session);
 
     if (!this.#options.idleOptions?.disableIdle && !this.idleManager) {
       this.idleManager = IdleManager.create(this.#options.idleOptions);
@@ -683,15 +706,15 @@ export class AuthClient {
       return;
     }
     if (!keyMatchesChain(key, session.chain)) {
-      // Key and delegation are from different sign-ins; they can't be assembled
-      // into a usable session. Unlike #hydrate this doesn't mutate storage —
+      // Key and session are from different sign-ins; they can't be assembled
+      // into a usable identity. Unlike #hydrate this doesn't mutate storage —
       // reconcile only reflects external state.
       this.#identity = new AnonymousIdentity();
       this.#notify();
       return;
     }
 
-    this.#setIdentity(key, session.chain);
+    this.#identity = this.#sessionIdentity(await this.#minterFor(key, session.chain), session);
     this.#notify();
   }
 
@@ -703,12 +726,46 @@ export class AuthClient {
 
   // Derives #identity from a signing key and delegation chain. A PartialIdentity
   // (public key only, no signing capability) yields a PartialDelegationIdentity.
-  #setIdentity(key: SignIdentity | PartialIdentity, chain: DelegationChain): void {
-    if ('toDer' in key) {
-      this.#identity = PartialDelegationIdentity.fromDelegation(key, chain);
-    } else {
-      this.#identity = DelegationIdentity.fromDelegation(key, chain);
-    }
+  /** An agent pointed at Internet Identity, signing as the session. */
+  #minterFor(sessionKey: SignIdentity, sessionChain: DelegationChain): Promise<SessionMinter> {
+    return SessionMinter.create({
+      sessionKey,
+      sessionChain,
+      host: this.#identityProviderOrigin,
+      fetchRootKey: isLoopbackHost(new URL(this.#identityProviderOrigin).hostname),
+    });
+  }
+
+  #sessionIdentity(
+    source: SessionMinter,
+    session: Session,
+    initial?: DelegationChain,
+  ): SessionIdentity {
+    return new SessionIdentity({
+      appKey: this.#appKey,
+      accountKey: session.accountKey,
+      sessionExpiresAtMs: earliestExpiryMs(session.chain),
+      source,
+      initial,
+      onSessionGone: () => {
+        // Storage is shared by every tab of this origin, so what is stored is not
+        // necessarily the session that just died. Signing in again replaces a
+        // browser's session, so a tab still holding the old one is refused while
+        // the tab that signed in is working fine — and clearing here would take
+        // its session with it.
+        const stored = this.#sessionStorage.get();
+        if (stored !== null && !isSameSession(stored, session)) {
+          // A newer session is stored, and it belongs to the same person in the
+          // same browser. Adopt it rather than destroying it.
+          void this.#reconcile();
+          return;
+        }
+
+        this.#sessionStorage.remove();
+        this.#identity = new AnonymousIdentity();
+        this.#notify();
+      },
+    });
   }
 
   #registerDefaultIdleCallback() {
@@ -781,32 +838,11 @@ function bytesEqual(a: Uint8Array, b: Uint8Array): boolean {
  * Encodes a Uint8Array to a base64 string.
  * @param bytes - The bytes to encode.
  */
-function toBase64(bytes: Uint8Array): string {
-  if ('toBase64' in bytes && typeof bytes.toBase64 === 'function') {
-    return bytes.toBase64();
-  }
-  let binary = '';
-  for (let i = 0; i < bytes.byteLength; i++) {
-    binary += String.fromCharCode(bytes[i]);
-  }
-  return globalThis.btoa(binary);
-}
 
 /**
  * Decodes a base64 string to a Uint8Array.
  * @param str - The base64-encoded string.
  */
-function fromBase64(str: string): Uint8Array {
-  if ('fromBase64' in Uint8Array && typeof Uint8Array.fromBase64 === 'function') {
-    return Uint8Array.fromBase64(str);
-  }
-  const binary = globalThis.atob(str);
-  const bytes = new Uint8Array(binary.length);
-  for (let i = 0; i < binary.length; i++) {
-    bytes[i] = binary.charCodeAt(i);
-  }
-  return bytes;
-}
 
 /**
  * Scopes attribute keys to an OpenID provider.
@@ -834,4 +870,21 @@ export function scopedKeys<
   return keys.map(
     (key) => `openid:${provider}:${key}` as `openid:${(typeof OPENID_PROVIDER_URLS)[P]}:${K}`,
   );
+}
+
+/** When a chain stops being usable, which for a session chain is the session's end. */
+function earliestExpiryMs(chain: DelegationChain): number {
+  const expirations = chain.delegations.map(({ delegation }) => delegation.expiration);
+  if (expirations.length === 0) return 0;
+  return Number(expirations.reduce((a, b) => (a < b ? a : b)) / 1_000_000n);
+}
+
+/**
+ * Whether two sessions are the same one.
+ *
+ * Compared by chain, since a sign-in mints a fresh one: the account key is equal
+ * for every session at the same account and says nothing about which this is.
+ */
+function isSameSession(a: Session, b: Session): boolean {
+  return JSON.stringify(a.chain.toJSON()) === JSON.stringify(b.chain.toJSON());
 }

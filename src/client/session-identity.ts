@@ -43,6 +43,14 @@ export interface SessionIdentityOptions {
   source: AppDelegationSource;
 
   /**
+   * A delegation already minted for this session, adopted as the current one.
+   *
+   * Signing in mints before it resolves, so the identity it produces starts with
+   * one rather than minting again on the first request.
+   */
+  initial?: DelegationChain;
+
+  /**
    * Called once when the session turns out to be gone, so the client can drop
    * what it stored and tell its subscribers. Ending a session is the client's to
    * do; this only reports it.
@@ -80,6 +88,7 @@ export class SessionIdentity extends DelegationIdentity {
     this.#source = options.source;
     this.#onSessionGone = options.onSessionGone;
     this.#sessionExpiresAtMs = options.sessionExpiresAtMs;
+    if (options.initial) this.#adopt(options.initial);
   }
 
   override getDelegation(): DelegationChain {

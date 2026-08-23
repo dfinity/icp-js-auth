@@ -1,14 +1,26 @@
+import type { DerEncodedPublicKey } from '@icp-sdk/core/agent';
 import type { DelegationChain } from '@icp-sdk/core/identity';
 
 /**
  * What a signed-in application holds.
  *
  * A record rather than a bare chain because a session is not a delegation: it is
- * what an application is given at sign-in, and what its access is derived from.
+ * what an application is given at sign-in, what its access is derived from, and
+ * what outlives any one delegation minted from it.
  */
 export interface Session {
   /** The chain the identity provider signed to this application's key. */
   chain: DelegationChain;
+
+  /**
+   * The account's key: what the application's canisters see as the caller, and
+   * what every delegation minted from this session is rooted at.
+   *
+   * Stored rather than derived because the chain is rooted at the session's own
+   * key, not the account's, so this is the only record of who is signed in until
+   * something mints.
+   */
+  accountKey: DerEncodedPublicKey;
 }
 
 /**
