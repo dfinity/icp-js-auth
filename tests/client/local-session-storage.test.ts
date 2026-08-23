@@ -1,7 +1,10 @@
 import { DelegationChain, Ed25519KeyIdentity } from '@icp-sdk/core/identity';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-
 import { LocalSessionStorage } from '../../src/client/local-session-storage.ts';
+import type { Session } from '../../src/client/session-storage.ts';
+
+/** A session over a chain, using the chain's own root as the account key. */
+const session = (chain: DelegationChain): Session => ({ chain, accountKey: chain.publicKey });
 
 async function testChain(): Promise<DelegationChain> {
   const key = Ed25519KeyIdentity.generate();
@@ -19,7 +22,7 @@ describe('LocalSessionStorage', () => {
     const storage = new LocalSessionStorage();
     const chain = await testChain();
 
-    storage.set({ chain: chain });
+    storage.set(session(chain));
     const restored = storage.get();
 
     expect(restored).not.toBeNull();
@@ -28,13 +31,13 @@ describe('LocalSessionStorage', () => {
 
   it('writes under the configured key', async () => {
     const storage = new LocalSessionStorage();
-    storage.set({ chain: await testChain() });
+    storage.set(session(await testChain()));
     expect(localStorage.getItem(new LocalSessionStorage().key)).not.toBeNull();
   });
 
   it('removes the stored delegation', async () => {
     const storage = new LocalSessionStorage();
-    storage.set({ chain: await testChain() });
+    storage.set(session(await testChain()));
 
     storage.remove();
 
@@ -51,7 +54,7 @@ describe('LocalSessionStorage', () => {
     const listener = vi.fn();
     storage.subscribe(listener);
 
-    storage.set({ chain: await testChain() });
+    storage.set(session(await testChain()));
     expect(listener).toHaveBeenCalledTimes(1);
 
     storage.remove();
@@ -75,7 +78,7 @@ describe('LocalSessionStorage', () => {
 
   it('notifies when the whole store is cleared (null key)', async () => {
     const storage = new LocalSessionStorage();
-    storage.set({ chain: await testChain() });
+    storage.set(session(await testChain()));
     const listener = vi.fn();
     storage.subscribe(listener);
 

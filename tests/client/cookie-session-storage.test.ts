@@ -2,6 +2,11 @@ import { DelegationChain, Ed25519KeyIdentity } from '@icp-sdk/core/identity';
 import { Principal } from '@icp-sdk/core/principal';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { CookieSessionStorage } from '../../src/client/cookie-session-storage.ts';
+import { LocalSessionStorage } from '../../src/client/local-session-storage.ts';
+import type { Session } from '../../src/client/session-storage.ts';
+
+/** A session over a chain, using the chain's own root as the account key. */
+const session = (chain: DelegationChain): Session => ({ chain, accountKey: chain.publicKey });
 
 async function testChain(): Promise<DelegationChain> {
   const key = Ed25519KeyIdentity.generate();
@@ -45,7 +50,7 @@ describe('CookieSessionStorage', () => {
     const storage = newStorage();
     const chain = await testChain();
 
-    storage.set({ chain: chain });
+    storage.set(session(chain));
     const restored = storage.get();
 
     expect(restored?.chain.toJSON()).toEqual(chain.toJSON());
@@ -55,7 +60,7 @@ describe('CookieSessionStorage', () => {
     const storage = newStorage();
     const chain = await testChain();
 
-    storage.set({ chain: chain });
+    storage.set(session(chain));
     const hint = storage.readHint();
 
     expect(hint?.principal.toText()).toBe(principalOf(chain).toText());
@@ -66,7 +71,7 @@ describe('CookieSessionStorage', () => {
     const chain = await testChain();
     // A chain in localStorage but no cookie: a sibling subdomain never announced
     // a session (or signed out), so this origin's chain is stale.
-    localStorage.setItem(storage.key, JSON.stringify(chain.toJSON()));
+    new LocalSessionStorage(storage.key).set(session(chain));
 
     expect(storage.get()).toBeNull();
     expect(localStorage.getItem(storage.key)).toBeNull();
@@ -75,12 +80,12 @@ describe('CookieSessionStorage', () => {
   it('returns null and clears the chain when the hint names a different principal', async () => {
     const storage = newStorage();
     const chainA = await testChain();
-    storage.set({ chain: chainA }); // cookie now names principal A
+    storage.set(session(chainA)); // cookie now names principal A
 
     // Another chain (principal B) lands in localStorage without updating the
     // cookie — the cookie is authoritative, so the mismatch is treated as stale.
     const chainB = await testChain();
-    localStorage.setItem(storage.key, JSON.stringify(chainB.toJSON()));
+    new LocalSessionStorage(storage.key).set(session(chainB));
 
     expect(storage.get()).toBeNull();
     expect(localStorage.getItem(storage.key)).toBeNull();
@@ -88,7 +93,7 @@ describe('CookieSessionStorage', () => {
 
   it('removes both the chain and the hint cookie', async () => {
     const storage = newStorage();
-    storage.set({ chain: await testChain() });
+    storage.set(session(await testChain()));
 
     storage.remove();
 
@@ -105,7 +110,7 @@ describe('CookieSessionStorage', () => {
     // A same-origin other tab wrote the delegation; the `storage` event carries
     // that change into this tab.
     const chain = await testChain();
-    localStorage.setItem(storage.key, JSON.stringify(chain.toJSON()));
+    new LocalSessionStorage(storage.key).set(session(chain));
     globalThis.dispatchEvent(
       new StorageEvent('storage', { key: storage.key, storageArea: localStorage }),
     );
@@ -149,7 +154,7 @@ describe('CookieSessionStorage', () => {
     // A same-origin sign-in writes both localStorage and the hint cookie, so the
     // change arrives via both the `storage` event and the cookie watchers. The
     // snapshot comparison collapses them into a single notification.
-    storage.set({ chain: await testChain() });
+    storage.set(session(await testChain()));
     globalThis.dispatchEvent(
       new StorageEvent('storage', { key: storage.key, storageArea: localStorage }),
     );
@@ -178,7 +183,7 @@ describe('CookieSessionStorage', () => {
     const unsubscribe = storage.subscribe(listener);
 
     unsubscribe();
-    storage.set({ chain: await testChain() });
+    storage.set(session(await testChain()));
     globalThis.dispatchEvent(
       new StorageEvent('storage', { key: storage.key, storageArea: localStorage }),
     );

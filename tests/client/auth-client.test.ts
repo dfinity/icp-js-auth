@@ -38,7 +38,8 @@ function createIdentityStorage(
 // Takes a chain rather than a Session so the tests below read as what they are
 // about; the session wrapper is this helper's business.
 function createSessionStorage(initial: DelegationChain | null = null): SessionStorage {
-  let current: Session | null = initial === null ? null : { chain: initial };
+  let current: Session | null =
+    initial === null ? null : { chain: initial, accountKey: initial.publicKey };
   return {
     get: vi.fn(() => current),
     set: vi.fn((session: Session) => {
@@ -58,7 +59,8 @@ function controllableSessionStorage(initial: DelegationChain | null = null): {
   storage: SessionStorage;
   external(chain: DelegationChain | null): void;
 } {
-  let current: Session | null = initial === null ? null : { chain: initial };
+  let current: Session | null =
+    initial === null ? null : { chain: initial, accountKey: initial.publicKey };
   let listener: (() => void) | null = null;
   return {
     storage: {
@@ -77,11 +79,42 @@ function controllableSessionStorage(initial: DelegationChain | null = null): {
       },
     },
     external(chain: DelegationChain | null) {
-      current = chain === null ? null : { chain };
+      current = chain === null ? null : { chain, accountKey: chain.publicKey };
       listener?.();
     },
   };
 }
+
+const II_CANISTER = Principal.fromText('rdmx6-jaaaa-aaaaa-aaadq-cai');
+
+// Minting is a canister call, so the source is replaced rather than the network.
+// The timing it drives is covered in session-identity.test.ts; what matters here
+// is that AuthClient mints once at sign-in and stores what came back. The mock
+// fills in `minted.accountKey` so assertions can name the principal it roots at.
+const minted = vi.hoisted(() => ({ accountKey: undefined as SignIdentity | undefined, count: 0 }));
+
+vi.mock('../../src/client/session-minter.ts', async () => {
+  const { DelegationChain: Chain, Ed25519KeyIdentity: Key } = await import(
+    '@icp-sdk/core/identity'
+  );
+  const accountKey = Key.generate();
+  minted.accountKey = accountKey;
+  return {
+    SessionMinter: {
+      create: async () => ({
+        mint: async (appPublicKey: Uint8Array) => {
+          minted.count += 1;
+          return Chain.create(
+            accountKey,
+            { toDer: () => appPublicKey } as unknown as PublicKey,
+            new Date(Date.now() + 5 * 60 * 1000),
+          );
+        },
+        revoke: async () => {},
+      }),
+    },
+  };
+});
 
 // Swap `PostMessageTransport` for `FakeTransport` so `AuthClient` uses the real
 // `Signer` over an in-memory transport — no window is opened and nothing about
@@ -134,37 +167,27 @@ const DEFAULT_REQUEST_ATTRIBUTES_BODY: JsonRpcBody = {
   result: { data: btoa('hello'), signature: btoa('sig') },
 };
 
-// A delegation-chain response as a conformant signer would build it: delegating
-// to the requested session key, scoped to any requested targets, and expiring
-// within maxTimeToLive — all of which the signer's returned-chain validation
-// (>= 5.6.1) enforces.
-async function conformantSignInBody(params: {
-  publicKey: string;
-  targets?: string[];
-  maxTimeToLive?: string;
-}): Promise<JsonRpcBody> {
-  const to = { toDer: () => fromBase64(params.publicKey) } as unknown as PublicKey;
-  const targets = params.targets?.map((t) => Principal.fromText(t));
-  const ttlMs =
-    params.maxTimeToLive !== undefined
-      ? Number(BigInt(params.maxTimeToLive) / 1_000_000n)
-      : 60 * 60 * 1000;
+// A session-chain response as Internet Identity builds it: a chain to the
+// requested session key, restricted to the Internet Identity canister, and
+// lasting as long as the session the user consented to.
+async function conformantSignInBody(params: { sessionPublicKey: string }): Promise<JsonRpcBody> {
+  const to = { toDer: () => fromBase64(params.sessionPublicKey) } as unknown as PublicKey;
   const chain = await DelegationChain.create(
     Ed25519KeyIdentity.generate(),
     to,
-    new Date(Date.now() + ttlMs),
-    targets ? { targets } : undefined,
+    new Date(Date.now() + 60 * 60 * 1000),
+    { targets: [II_CANISTER] },
   );
   return { result: encodeDelegationChainResponse(chain) };
 }
 
 /**
- * Registers an `icrc34_delegation` handler. By default it returns a chain that
- * delegates to the requested key; pass `body` to force a specific response.
+ * Registers an `ii_session_delegation` handler. By default it returns a session
+ * chain to the requested key; pass `body` to force a specific response.
  */
 function handleSignIn(transport: FakeTransport, body?: JsonRpcBody): void {
   transport.onRequest(async (req) => {
-    if (req.method !== 'icrc34_delegation') return;
+    if (req.method !== 'ii_session_delegation') return;
     if (req.id === undefined || req.id === null) return;
     const resolved = body ?? (await conformantSignInBody(req.params as never));
     return { jsonrpc: '2.0', id: req.id, ...resolved };
@@ -386,18 +409,115 @@ describe('AuthClient signIn', () => {
     await expect(client.signIn()).rejects.toThrow('connection failed');
   });
 
-  it('should forward targets and maxTimeToLive to the delegation request', async () => {
+  it('mints inside the ceremony, so the first request after it does not wait', async () => {
+    minted.count = 0;
+    const client = new AuthClient();
+    handleSignIn(FakeTransport.last());
+
+    const identity = await client.signIn();
+    expect(minted.count).toBe(1);
+
+    // The identity already holds a delegation, so signing a request needs no
+    // second mint.
+    await identity.transformRequest({ body: { arg: new Uint8Array() } } as never);
+
+    expect(minted.count).toBe(1);
+  });
+
+  it('stores the account key from the mint, not the session chain root', async () => {
+    const sessionStorage = createSessionStorage();
+    const client = new AuthClient({ sessionStorage });
+    handleSignIn(FakeTransport.last());
+
+    await client.signIn();
+
+    const stored = sessionStorage.get();
+    // The chain is rooted at the session's own key; the account key comes back
+    // from the mint and is the only record of who an app sees as the caller.
+    expect(stored?.accountKey).toEqual(minted.accountKey?.getPublicKey().toDer());
+    expect(stored?.accountKey).not.toEqual(stored?.chain.publicKey);
+  });
+
+  it('hands back an identity whose principal is the account', async () => {
+    const client = new AuthClient();
+    handleSignIn(FakeTransport.last());
+
+    const identity = await client.signIn();
+
+    expect(identity.getPrincipal().toText()).toBe(minted.accountKey?.getPrincipal().toText());
+  });
+
+  it('reports a restored session synchronously, before anything async runs', async () => {
+    const identityStorage = createIdentityStorage();
+    const sessionStorage = createSessionStorage();
+    const first = new AuthClient({ identityStorage, sessionStorage });
+    handleSignIn(FakeTransport.last());
+    await first.signIn();
+    minted.count = 0;
+
+    // A second client over the same storage is a reload. isAuthenticated() reads
+    // the stored session and nothing else: no mint, no network, no IndexedDB.
+    const reloaded = new AuthClient({ identityStorage, sessionStorage });
+
+    expect(reloaded.isAuthenticated()).toBe(true);
+    expect(minted.count).toBe(0);
+  });
+
+  it('stops reporting a session the canister has dropped', async () => {
+    const sessionStorage = createSessionStorage();
+    const client = new AuthClient({ sessionStorage });
+    handleSignIn(FakeTransport.last());
+    const identity = await client.signIn();
+    expect(client.isAuthenticated()).toBe(true);
+
+    // Past the session's own end, so the next mint is refused as terminal. A
+    // revocation reaches the client the same way: through a failed mint.
+    vi.setSystemTime(new Date(Date.now() + 2 * 60 * 60 * 1000));
+    await identity.transformRequest({ body: { arg: new Uint8Array() } } as never).catch(() => {});
+
+    expect(client.isAuthenticated()).toBe(false);
+  });
+
+  it('answers for a restored session without minting', async () => {
+    const identityStorage = createIdentityStorage();
+    const sessionStorage = createSessionStorage();
+    const first = new AuthClient({ identityStorage, sessionStorage });
+    handleSignIn(FakeTransport.last());
+    await first.signIn();
+
+    // A second client over the same storage is a reload.
+    const restored = new AuthClient({ identityStorage, sessionStorage });
+    const identity = await restored.getIdentity();
+
+    expect(identity.getPrincipal().toText()).toBe(minted.accountKey?.getPrincipal().toText());
+  });
+
+  it('asks for a session, and not for what it cannot be given', async () => {
     const client = new AuthClient();
     const transport = FakeTransport.last();
     handleSignIn(transport);
 
-    const target = Principal.fromText('aaaaa-aa');
-    await client.signIn({ targets: [target], maxTimeToLive: 1_000_000n });
+    await client.signIn();
 
     const req = transport.requests[0];
-    expect(req.method).toBe('icrc34_delegation');
-    expect(req.params?.targets).toEqual([target.toText()]);
-    expect(req.params?.maxTimeToLive).toBe('1000000');
+    expect(req.method).toBe('ii_session_delegation');
+    expect(req.params?.sessionPublicKey).toBeTypeOf('string');
+    // An access level is the user's alone, and an app delegation's targets are
+    // the canister's, so neither is something to ask for here.
+    expect(req.params?.targets).toBeUndefined();
+  });
+
+  it('forwards a requested session ceiling, and omits it when absent', async () => {
+    const client = new AuthClient();
+    handleSignIn(FakeTransport.last());
+    await client.signIn({ maxTimeToLive: 3_600_000_000_000n });
+    expect(FakeTransport.last().requests[0]?.params?.maxTimeToLive).toBe('3600000000000');
+
+    FakeTransport.reset();
+    const plain = new AuthClient();
+    handleSignIn(FakeTransport.last());
+    await plain.signIn();
+    expect(FakeTransport.last().requests[0]?.params?.maxTimeToLive).toBeUndefined();
   });
 
   it('should forward derivationOrigin on every request as icrc95DerivationOrigin', async () => {
@@ -418,7 +538,9 @@ describe('AuthClient signIn', () => {
     await client.signIn();
 
     expect(identityStorage.create).toHaveBeenCalledTimes(1);
-    expect(sessionStorage.set).toHaveBeenCalledWith({ chain: expect.any(DelegationChain) });
+    expect(sessionStorage.set).toHaveBeenCalledWith(
+      expect.objectContaining({ chain: expect.any(DelegationChain) }),
+    );
   });
 
   it('should create a fresh identity for each sign-in', async () => {

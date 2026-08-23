@@ -9,6 +9,27 @@ import { FakeUrlTransport } from './fake-url-transport.ts';
 // Redirect mode selects `UrlTransport` from `@icp-sdk/signer/web`; swap it for
 // an in-memory fake so the flow can be driven without a real page navigation.
 // `PostMessageTransport` is left as the real export — these tests never use it.
+// Minting is a canister call; the source is replaced rather than the network.
+vi.mock('../../src/client/session-minter.ts', async () => {
+  const { DelegationChain: Chain, Ed25519KeyIdentity: Key } = await import(
+    '@icp-sdk/core/identity'
+  );
+  const accountKey = Key.generate();
+  return {
+    SessionMinter: {
+      create: async () => ({
+        mint: async (appPublicKey: Uint8Array) =>
+          Chain.create(
+            accountKey,
+            { toDer: () => appPublicKey } as unknown as PublicKey,
+            new Date(Date.now() + 5 * 60 * 1000),
+          ),
+        revoke: async () => {},
+      }),
+    },
+  };
+});
+
 vi.mock('@icp-sdk/signer/web', async (importOriginal) => {
   const actual = await importOriginal<typeof import('@icp-sdk/signer/web')>();
   const { FakeUrlTransport } = await import('./fake-url-transport.ts');
@@ -76,11 +97,11 @@ async function delegationBody(publicKey: string) {
 
 function handleSignIn(transport: FakeUrlTransport): void {
   transport.onRequest(async (req) => {
-    if (req.method !== 'icrc34_delegation' || req.id == null) return;
+    if (req.method !== 'ii_session_delegation' || req.id == null) return;
     return {
       jsonrpc: '2.0',
       id: req.id,
-      ...(await delegationBody(req.params?.publicKey as string)),
+      ...(await delegationBody(req.params?.sessionPublicKey as string)),
     };
   });
 }
@@ -131,7 +152,7 @@ describe('AuthClient redirect (UrlTransport) sign-in', () => {
     const identity = await client.signIn();
 
     expect(identity.getPrincipal().isAnonymous()).toBe(false);
-    expect(FakeUrlTransport.last().requests[0]?.method).toBe('icrc34_delegation');
+    expect(FakeUrlTransport.last().requests[0]?.method).toBe('ii_session_delegation');
     // The flow journals values that replay across the redirect: the (unset)
     // derivation origin from construction, then the create-once marker that
     // holds the batch while the session identity is generated and persisted so
@@ -206,7 +227,7 @@ describe('AuthClient redirect (UrlTransport) sign-in', () => {
     await flush();
 
     const load1 = FakeUrlTransport.last();
-    expect(load1.requests[0]?.method).toBe('icrc34_delegation');
+    expect(load1.requests[0]?.method).toBe('ii_session_delegation');
     // The session identity was persisted for the return load to restore.
     expect(await identityStorage.get()).not.toBeNull();
     const publicKey1 = load1.requests[0]?.params?.publicKey;
