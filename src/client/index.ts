@@ -9,7 +9,9 @@ export { IdbIdentityStorage } from './idb-identity-storage.js';
 export type { IdentityStorage } from './identity-storage.js';
 export * from './idle-manager.js';
 export { LocalIdentityStorage } from './local-identity-storage.js';
+export { LocalSessionStorage } from './local-session-storage.js';
 export { SessionIdentity, type SessionIdentityOptions } from './session-identity.js';
+export type { Session, SessionStorage } from './session-storage.js';
 export {
   type AuthClientStorage,
   IdbStorage,
