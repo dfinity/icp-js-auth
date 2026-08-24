@@ -35,6 +35,10 @@ function createIdentityStorage(
   };
 }
 
+/** The key a stored session's chain is rooted at, matching the mock's naming. */
+const rootKeyOf = (storage: SessionStorage): string =>
+  Array.from(new Uint8Array(storage.get()?.chain.publicKey ?? [])).join(',');
+
 // In-memory delegation storage with spies on every method.
 // Takes a chain rather than a Session so the tests below read as what they are
 // about; the session wrapper is this helper's business.
@@ -101,8 +105,11 @@ const II_CANISTER = Principal.fromText('rdmx6-jaaaa-aaaaa-aaadq-cai');
 const minted = vi.hoisted(() => ({
   accountKey: undefined as SignIdentity | undefined,
   createdWith: [] as { canisterId?: unknown; agentOptions?: unknown }[],
+  revokedSessions: [] as string[],
   count: 0,
   refuse: false,
+  revoked: 0,
+  revokeFails: false,
 }));
 
 vi.mock('../../src/client/session-minter.ts', async () => {
@@ -111,9 +118,17 @@ vi.mock('../../src/client/session-minter.ts', async () => {
   );
   const accountKey = Key.generate();
   minted.accountKey = accountKey;
+  // Names a session by the key its chain is rooted at, so an assertion can count
+  // revocations of its own session rather than of whatever else is still alive.
+  const rootOf = ({ publicKey }: { publicKey: Uint8Array }): string =>
+    Array.from(new Uint8Array(publicKey)).join(',');
   return {
     SessionMinter: {
-      create: async (options: { canisterId?: unknown; agentOptions?: unknown }) => ({
+      create: async (options: {
+        canisterId?: unknown;
+        agentOptions?: unknown;
+        sessionChain: { publicKey: Uint8Array };
+      }) => ({
         mint: async (appPublicKey: Uint8Array) => {
           minted.createdWith.push({
             canisterId: options.canisterId,
@@ -130,7 +145,11 @@ vi.mock('../../src/client/session-minter.ts', async () => {
             new Date(Date.now() + 5 * 60 * 1000),
           );
         },
-        revoke: async () => {},
+        revoke: async () => {
+          if (minted.revokeFails) throw new Error('offline');
+          minted.revoked += 1;
+          minted.revokedSessions.push(rootOf(options.sessionChain));
+        },
       }),
     },
   };
@@ -514,6 +533,49 @@ describe('AuthClient signIn', () => {
     const identity = await client.signIn();
 
     expect(identity.getPrincipal().toText()).toBe(minted.accountKey?.getPrincipal().toText());
+  });
+
+  it('ends the session at the canister before clearing what it holds', async () => {
+    const sessionStorage = createSessionStorage();
+    const client = new AuthClient({ sessionStorage });
+    handleSignIn(FakeTransport.last());
+    await client.signIn();
+    // Counted per session: undisposed clients from other tests can sign out at
+    // any moment, and a shared tally would pick their revocations up as this one.
+    const mine = rootKeyOf(sessionStorage);
+
+    await client.signOut();
+
+    expect(minted.revokedSessions.filter((root) => root === mine)).toHaveLength(1);
+    expect(sessionStorage.get()).toBeNull();
+    expect(client.isAuthenticated()).toBe(false);
+  });
+
+  it('signs out locally even when the canister cannot be reached', async () => {
+    minted.revokeFails = true;
+    const sessionStorage = createSessionStorage();
+    const client = new AuthClient({ sessionStorage });
+    handleSignIn(FakeTransport.last());
+    await client.signIn();
+
+    // A user who pressed sign out has to end up signed out on this device,
+    // whatever the network did.
+    await expect(client.signOut()).resolves.toBeUndefined();
+
+    expect(sessionStorage.get()).toBeNull();
+    expect(client.isAuthenticated()).toBe(false);
+    minted.revokeFails = false;
+  });
+
+  it('has nothing to revoke when no session is held', async () => {
+    const before = minted.revokedSessions.length;
+    const client = new AuthClient({ sessionStorage: createSessionStorage() });
+
+    await client.signOut();
+
+    // No session, so no call. Compared against a snapshot rather than zero,
+    // because another test's client may revoke while this one runs.
+    expect(minted.revokedSessions).toHaveLength(before);
   });
 
   it('reports a restored session synchronously, before anything async runs', async () => {
