@@ -12,10 +12,3 @@ export { LocalIdentityStorage } from './local-identity-storage.js';
 export { LocalSessionStorage } from './local-session-storage.js';
 export { SessionIdentity, type SessionIdentityOptions } from './session-identity.js';
 export type { Session, SessionStorage } from './session-storage.js';
-export {
-  type AuthClientStorage,
-  IdbStorage,
-  KEY_STORAGE_DELEGATION,
-  KEY_STORAGE_KEY,
-  LocalStorage,
-} from './storage.js';

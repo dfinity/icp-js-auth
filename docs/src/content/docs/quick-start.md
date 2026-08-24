@@ -16,14 +16,19 @@ import { AttributesIdentity } from '@icp-sdk/core/identity';
 import { Principal } from '@icp-sdk/core/principal';
 
 const network = 'ic'; // typically, this value is read from the environment (e.g. process.env.DFX_NETWORK)
-const identityProvider =
-  network === 'ic'
-    ? 'https://id.ai/authorize' // Mainnet
-    : 'http://id.ai.localhost:8000'; // default name mapping set by icp-cli when ii is enabled
+const local = network !== 'ic';
 
 const internetIdentityCanisterId = Principal.fromText('rdmx6-jaaaa-aaaaa-aaadq-cai');
 
-const authClient = new AuthClient({ identityProvider });
+const authClient = new AuthClient({
+  identityProvider: {
+    // default name mapping set by icp-cli when ii is enabled
+    authorizeUrl: local ? 'http://id.ai.localhost:8000' : 'https://id.ai/authorize',
+    canisterId: internetIdentityCanisterId,
+  },
+  // A local replica signs with a root key the agent has to fetch.
+  ...(local && { agentOptions: { host: 'http://localhost:8000', shouldFetchRootKey: true } }),
+});
 
 // Check for an existing session (synchronous)
 if (authClient.isAuthenticated()) {

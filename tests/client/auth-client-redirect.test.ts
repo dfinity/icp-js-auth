@@ -1,14 +1,35 @@
-import type { PublicKey } from '@icp-sdk/core/agent';
+import type { PublicKey, SignIdentity } from '@icp-sdk/core/agent';
 import { DelegationChain, Ed25519KeyIdentity } from '@icp-sdk/core/identity';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { AuthClient } from '../../src/client/auth-client.ts';
+import type { IdentityStorage } from '../../src/client/identity-storage.ts';
 import { IdleManager } from '../../src/client/idle-manager.ts';
-import type { AuthClientStorage, StoredKey } from '../../src/client/storage.ts';
 import { FakeUrlTransport } from './fake-url-transport.ts';
 
 // Redirect mode selects `UrlTransport` from `@icp-sdk/signer/web`; swap it for
 // an in-memory fake so the flow can be driven without a real page navigation.
 // `PostMessageTransport` is left as the real export — these tests never use it.
+// Minting is a canister call; the source is replaced rather than the network.
+vi.mock('../../src/client/session-minter.ts', async () => {
+  const { DelegationChain: Chain, Ed25519KeyIdentity: Key } = await import(
+    '@icp-sdk/core/identity'
+  );
+  const accountKey = Key.generate();
+  return {
+    SessionMinter: {
+      create: async () => ({
+        mint: async (appPublicKey: Uint8Array) =>
+          Chain.create(
+            accountKey,
+            { toDer: () => appPublicKey } as unknown as PublicKey,
+            new Date(Date.now() + 5 * 60 * 1000),
+          ),
+        revoke: async () => {},
+      }),
+    },
+  };
+});
+
 vi.mock('@icp-sdk/signer/web', async (importOriginal) => {
   const actual = await importOriginal<typeof import('@icp-sdk/signer/web')>();
   const { FakeUrlTransport } = await import('./fake-url-transport.ts');
@@ -18,7 +39,6 @@ vi.mock('@icp-sdk/signer/web', async (importOriginal) => {
 const CALLBACK_ORIGIN = 'https://relying.example.com';
 const CALLBACK_PATH = '/connect';
 const CALLBACK_URL = `${CALLBACK_ORIGIN}${CALLBACK_PATH}`;
-const PENDING_KEY_PREFIX = 'ic-auth-pending-key:';
 
 function toBase64(bytes: Uint8Array): string {
   let binary = '';
@@ -33,14 +53,20 @@ function fromBase64(value: string): Uint8Array {
   return bytes;
 }
 
-/** A shared in-memory storage so two "loads" see the same persisted state. */
-function createSharedStorage(): AuthClientStorage & { map: Map<string, StoredKey> } {
-  const map = new Map<string, StoredKey>();
+// A single-value identity storage shared across two "loads" so the return load
+// restores the same session identity the first load persisted. create() only
+// mints; set() persists — the redirect flow persists on the outbound load.
+function createSharedIdentityStorage(): IdentityStorage {
+  let current: SignIdentity | null = null;
   return {
-    map,
-    get: async (key) => map.get(key) ?? null,
-    set: async (key, value) => void map.set(key, value),
-    remove: async (key) => void map.delete(key),
+    create: async () => Ed25519KeyIdentity.generate(),
+    set: async (identity: SignIdentity) => {
+      current = identity;
+    },
+    get: async () => current,
+    remove: async () => {
+      current = null;
+    },
   };
 }
 
@@ -71,11 +97,11 @@ async function delegationBody(publicKey: string) {
 
 function handleSignIn(transport: FakeUrlTransport): void {
   transport.onRequest(async (req) => {
-    if (req.method !== 'icrc34_delegation' || req.id == null) return;
+    if (req.method !== 'ii_session_delegation' || req.id == null) return;
     return {
       jsonrpc: '2.0',
       id: req.id,
-      ...(await delegationBody(req.params?.publicKey as string)),
+      ...(await delegationBody(req.params?.sessionPublicKey as string)),
     };
   });
 }
@@ -90,9 +116,6 @@ function handleAttributes(transport: FakeUrlTransport): void {
 const flush = async () => {
   for (let i = 0; i < 15; i++) await new Promise((r) => setTimeout(r, 0));
 };
-
-const pendingSlots = (storage: ReturnType<typeof createSharedStorage>) =>
-  [...storage.map.keys()].filter((k) => k.startsWith(PENDING_KEY_PREFIX));
 
 beforeEach(() => {
   vi.unstubAllGlobals();
@@ -119,82 +142,27 @@ afterEach(async () => {
 });
 
 describe('AuthClient redirect (UrlTransport) sign-in', () => {
-  it('routes sign-in through the URL transport and cleans up the pending key', async () => {
-    const storage = createSharedStorage();
-    const client = new AuthClient({ transport: 'redirect', storage });
+  it('routes sign-in through the URL transport', async () => {
+    const client = new AuthClient({
+      transport: 'redirect',
+      identityStorage: createSharedIdentityStorage(),
+    });
     handleSignIn(FakeUrlTransport.last());
 
     const identity = await client.signIn();
 
     expect(identity.getPrincipal().isAnonymous()).toBe(false);
-    expect(FakeUrlTransport.last().requests[0]?.method).toBe('icrc34_delegation');
+    expect(FakeUrlTransport.last().requests[0]?.method).toBe('ii_session_delegation');
     // The flow journals values that replay across the redirect: the (unset)
-    // derivation origin from construction, the session key id, and the
-    // key-acquisition step that holds the batch so the delegation isn't split
-    // off from a concurrent request. The pending key is removed once the
-    // delegation is persisted.
-    expect(FakeUrlTransport.journal).toHaveLength(3);
+    // derivation origin from construction, then the create-once marker that
+    // holds the batch while the session identity is generated and persisted so
+    // the delegation isn't split off from a concurrent request.
+    expect(FakeUrlTransport.journal).toHaveLength(2);
     expect(FakeUrlTransport.journal[0]).toBeUndefined(); // derivation origin unset
-    expect(pendingSlots(storage)).toEqual([]);
-  });
-
-  it('sweeps expired pending keys abandoned by earlier flows', async () => {
-    const storage = createSharedStorage();
-    const staleSlot = `${PENDING_KEY_PREFIX}abandoned`;
-    storage.map.set(staleSlot, JSON.stringify({ stale: 'key' }));
-    storage.map.set(
-      'ic-auth-pending-keys',
-      JSON.stringify([{ slot: staleSlot, expiresAt: Date.now() - 1 }]),
-    );
-
-    const client = new AuthClient({ transport: 'redirect', storage });
-    handleSignIn(FakeUrlTransport.last());
-    await client.signIn();
-
-    expect(storage.map.has(staleSlot)).toBe(false);
-    expect(pendingSlots(storage)).toEqual([]);
-    expect(storage.map.has('ic-auth-pending-keys')).toBe(false);
-  });
-
-  it('ignores corrupted registry entries (foreign slot, non-finite expiry)', async () => {
-    const storage = createSharedStorage();
-    // A registry corrupted with an entry pointing at an unrelated storage key
-    // and one with a NaN expiry — neither is a valid pending-key entry.
-    storage.map.set('ic-delegation', JSON.stringify({ not: 'a pending key' }));
-    storage.map.set(
-      'ic-auth-pending-keys',
-      JSON.stringify([
-        { slot: 'ic-delegation', expiresAt: Date.now() - 1 }, // foreign slot, "expired"
-        { slot: `${PENDING_KEY_PREFIX}nan`, expiresAt: Number.NaN }, // never-expiring
-      ]),
-    );
-
-    const client = new AuthClient({ transport: 'redirect', storage });
-    handleSignIn(FakeUrlTransport.last());
-    await client.signIn();
-
-    // The sweep must not touch a key that was never a pending slot.
-    expect(storage.map.get('ic-delegation')).toBe(JSON.stringify({ not: 'a pending key' }));
-  });
-
-  it('completes sign-in even if pending-key cleanup fails', async () => {
-    const storage = createSharedStorage();
-    const remove = storage.remove;
-    storage.remove = async (key) => {
-      if (key.startsWith(PENDING_KEY_PREFIX)) throw new Error('storage unavailable');
-      return remove(key);
-    };
-
-    const client = new AuthClient({ transport: 'redirect', storage });
-    handleSignIn(FakeUrlTransport.last());
-    const identity = await client.signIn();
-
-    // Cleanup of the completed flow's pending key failed, but auth succeeded.
-    expect(identity.getPrincipal().isAnonymous()).toBe(false);
   });
 
   it('journals the derivation origin so it survives the redirect', async () => {
-    const storage = createSharedStorage();
+    const identityStorage = createSharedIdentityStorage();
     const DERIVATION = 'https://derivation.example.com';
 
     // Load 1: derivation origin supplied — forwarded on the request and journaled.
@@ -202,7 +170,7 @@ describe('AuthClient redirect (UrlTransport) sign-in', () => {
     const client1 = new AuthClient({
       transport: 'redirect',
       derivationOrigin: DERIVATION,
-      storage,
+      identityStorage,
     });
     handleSignIn(FakeUrlTransport.last());
     const pending1 = client1.signIn().catch(() => undefined); // navigates away
@@ -213,7 +181,7 @@ describe('AuthClient redirect (UrlTransport) sign-in', () => {
     // to the reconstructed client — the memoized value replays, so the request
     // still carries the original derivation origin.
     FakeUrlTransport.nextRespond = true;
-    const client2 = new AuthClient({ transport: 'redirect', storage });
+    const client2 = new AuthClient({ transport: 'redirect', identityStorage });
     handleSignIn(FakeUrlTransport.last());
     await client2.signIn();
     expect(FakeUrlTransport.last().requests[0]?.params?.icrc95DerivationOrigin).toBe(DERIVATION);
@@ -226,24 +194,47 @@ describe('AuthClient redirect (UrlTransport) sign-in', () => {
     expect(FakeUrlTransport.last().options.callbackUrl).toBe(CALLBACK_URL);
   });
 
+  it('journals returnTo and navigates to it on completion', async () => {
+    vi.stubGlobal('location', {
+      origin: CALLBACK_ORIGIN,
+      pathname: CALLBACK_PATH,
+      href: CALLBACK_URL,
+      replace: vi.fn(),
+      reload: vi.fn(),
+    });
+    const client = new AuthClient({
+      transport: 'redirect',
+      identityStorage: createSharedIdentityStorage(),
+    });
+    handleSignIn(FakeUrlTransport.last());
+
+    await client.signIn({ returnTo: '/dashboard' });
+
+    // Only the resolved same-origin href is journaled (never the raw value), and
+    // it survives the round-trip to be navigated to.
+    expect(FakeUrlTransport.journal).toContain(`${CALLBACK_ORIGIN}/dashboard`);
+    expect(window.location.replace).toHaveBeenCalledWith(`${CALLBACK_ORIGIN}/dashboard`);
+  });
+
   it('reuses the session key across the redirect', async () => {
-    const storage = createSharedStorage();
+    const identityStorage = createSharedIdentityStorage();
 
     // Load 1: navigates to the signer and never returns in-context.
     FakeUrlTransport.nextRespond = false;
-    const client1 = new AuthClient({ transport: 'redirect', storage });
+    const client1 = new AuthClient({ transport: 'redirect', identityStorage });
     handleSignIn(FakeUrlTransport.last());
     const pending1 = client1.signIn().catch(() => undefined); // stays pending
     await flush();
 
     const load1 = FakeUrlTransport.last();
-    expect(load1.requests[0]?.method).toBe('icrc34_delegation');
-    expect(pendingSlots(storage)).toHaveLength(1); // key persisted for the return
+    expect(load1.requests[0]?.method).toBe('ii_session_delegation');
+    // The session identity was persisted for the return load to restore.
+    expect(await identityStorage.get()).not.toBeNull();
     const publicKey1 = load1.requests[0]?.params?.publicKey;
 
     // Load 2: the signer returns; the flow replays and completes.
     FakeUrlTransport.nextRespond = true;
-    const client2 = new AuthClient({ transport: 'redirect', storage });
+    const client2 = new AuthClient({ transport: 'redirect', identityStorage });
     handleSignIn(FakeUrlTransport.last());
     const identity = await client2.signIn();
 
@@ -252,7 +243,6 @@ describe('AuthClient redirect (UrlTransport) sign-in', () => {
     // The delegation on the return load was requested for the SAME key that
     // load 1 generated — not a fresh one that would not match.
     expect(load2.requests[0]?.params?.publicKey).toBe(publicKey1);
-    expect(pendingSlots(storage)).toEqual([]); // cleaned up on completion
     void pending1;
   });
 
@@ -260,11 +250,11 @@ describe('AuthClient redirect (UrlTransport) sign-in', () => {
     const produce = vi.fn(() => 'https://relying.example.com/next');
 
     // Load 1: the value is produced and journaled.
-    const client1 = new AuthClient({ transport: 'redirect', storage: createSharedStorage() });
+    const client1 = new AuthClient({ transport: 'redirect' });
     const v1 = await client1.memoize(produce);
 
     // Load 2 (shared journal): the value replays without re-running produce.
-    const client2 = new AuthClient({ transport: 'redirect', storage: createSharedStorage() });
+    const client2 = new AuthClient({ transport: 'redirect' });
     const v2 = await client2.memoize(produce);
 
     expect(v1).toBe('https://relying.example.com/next');
@@ -275,7 +265,7 @@ describe('AuthClient redirect (UrlTransport) sign-in', () => {
 
 describe('AuthClient redirect (UrlTransport) requestAttributes', () => {
   it('memoizes the nonce and forwards it as base64', async () => {
-    const client = new AuthClient({ transport: 'redirect', storage: createSharedStorage() });
+    const client = new AuthClient({ transport: 'redirect' });
     handleAttributes(FakeUrlTransport.last());
 
     const nonce = new Uint8Array(32).fill(3);
@@ -290,13 +280,12 @@ describe('AuthClient redirect (UrlTransport) requestAttributes', () => {
   });
 
   it('reuses the memoized nonce across the redirect instead of re-fetching', async () => {
-    const storage = createSharedStorage();
     let counter = 0;
     const thunk = vi.fn(() => Promise.resolve(new Uint8Array(32).fill(++counter))); // fresh each call
 
     // Load 1: fetches the nonce, sends the request, then navigates away.
     FakeUrlTransport.nextRespond = false;
-    const client1 = new AuthClient({ transport: 'redirect', storage });
+    const client1 = new AuthClient({ transport: 'redirect' });
     handleAttributes(FakeUrlTransport.last());
     const pending1 = client1.requestAttributes({ keys: ['email'], nonce: thunk }).catch(() => null);
     await flush();
@@ -304,7 +293,7 @@ describe('AuthClient redirect (UrlTransport) requestAttributes', () => {
 
     // Load 2: the flow replays; the nonce must be the one signed against.
     FakeUrlTransport.nextRespond = true;
-    const client2 = new AuthClient({ transport: 'redirect', storage });
+    const client2 = new AuthClient({ transport: 'redirect' });
     handleAttributes(FakeUrlTransport.last());
     await client2.requestAttributes({ keys: ['email'], nonce: thunk });
 
