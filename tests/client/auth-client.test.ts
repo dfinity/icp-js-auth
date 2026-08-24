@@ -535,6 +535,83 @@ describe('AuthClient signIn', () => {
     expect(identity.getPrincipal().toText()).toBe(minted.accountKey?.getPrincipal().toText());
   });
 
+  /** Flushes microtasks until `changed()`, or a bounded number of turns. */
+  const settle = async (changed: () => boolean): Promise<void> => {
+    for (let turn = 0; turn < 50 && !changed(); turn++) await vi.advanceTimersByTimeAsync(0);
+  };
+
+  it('mints on the page load that restores a session, before any request', async () => {
+    const identityStorage = createIdentityStorage();
+    const sessionStorage = createSessionStorage();
+    const first = new AuthClient({ identityStorage, sessionStorage });
+    handleSignIn(FakeTransport.last());
+    await first.signIn();
+    first.dispose();
+
+    minted.count = 0;
+    const restored = new AuthClient({ identityStorage, sessionStorage });
+
+    // `pageshow` fires as part of the load, which is before the asynchronous
+    // restore has produced an identity. The refresh has to wait for it, or the
+    // load mints nothing and the first user action pays for the round trip.
+    globalThis.dispatchEvent(new Event('pageshow'));
+    // Generous: where tabs share credentials, the load first waits out the
+    // inherit window before minting for itself.
+    for (let i = 0; i < 400 && minted.count === 0; i++) {
+      await new Promise((resolve) => setTimeout(resolve, 5));
+    }
+
+    expect(minted.count).toBe(1);
+    restored.dispose();
+  });
+
+  it('mints when the tab comes back, if one is due', async () => {
+    const client = new AuthClient();
+    handleSignIn(FakeTransport.last());
+    const identity = (await client.signIn()) as SessionIdentity;
+    const held = identity.getDelegation();
+
+    // The clock moves while the tab is in the background; its own timers do not
+    // run, which is the case this trigger exists for.
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date(Date.now() + 4 * 60 * 1000 + 50_000));
+    document.dispatchEvent(new Event('visibilitychange'));
+    await settle(() => identity.getDelegation() !== held);
+    vi.useRealTimers();
+
+    expect(identity.getDelegation()).not.toBe(held);
+    client.dispose();
+  });
+
+  it('costs nothing to glance at a tab whose delegation is healthy', async () => {
+    const client = new AuthClient();
+    handleSignIn(FakeTransport.last());
+    const identity = (await client.signIn()) as SessionIdentity;
+    const held = identity.getDelegation();
+
+    document.dispatchEvent(new Event('visibilitychange'));
+    await Promise.resolve();
+
+    expect(identity.getDelegation()).toBe(held);
+    client.dispose();
+  });
+
+  it('hooks nothing when foreground refresh is turned off', async () => {
+    const client = new AuthClient({ disableForegroundRefresh: true });
+    handleSignIn(FakeTransport.last());
+    const identity = (await client.signIn()) as SessionIdentity;
+    const held = identity.getDelegation();
+
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date(Date.now() + 4 * 60 * 1000 + 50_000));
+    document.dispatchEvent(new Event('visibilitychange'));
+    await settle(() => false);
+    vi.useRealTimers();
+
+    expect(identity.getDelegation()).toBe(held);
+    client.dispose();
+  });
+
   it('ends the session at the canister before clearing what it holds', async () => {
     const sessionStorage = createSessionStorage();
     const client = new AuthClient({ sessionStorage });

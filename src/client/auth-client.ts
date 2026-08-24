@@ -15,6 +15,7 @@ import { Signer } from '@icp-sdk/signer';
 import { PostMessageTransport, UrlTransport } from '@icp-sdk/signer/web';
 import type { AppCredential } from './app-delegation-source.js';
 import { fromBase64, toBase64 } from './base64.js';
+import { watchForeground } from './foreground-refresh.js';
 import { IdbIdentityStorage } from './idb-identity-storage.js';
 import type { IdentityStorage } from './identity-storage.js';
 import { IdleManager, type IdleManagerOptions } from './idle-manager.js';
@@ -67,6 +68,17 @@ export interface AuthClientCreateOptions {
    * @default after 10 minutes, invalidates the identity
    */
   idleOptions?: IdleOptions;
+
+  /**
+   * Disables refreshing when the page is shown or the window regains focus.
+   *
+   * A backgrounded tab has its timers throttled, so its delegation can lapse
+   * while nobody is looking and the first click after coming back waits for a
+   * mint. Returning to the tab is early enough to hide that. Turn it off to make
+   * requests the only thing that ever triggers one.
+   * @default false
+   */
+  disableForegroundRefresh?: boolean;
 
   /**
    * Where Internet Identity is: the URL a sign-in ceremony renders at, and the
@@ -209,6 +221,7 @@ export class AuthClient {
   // together and one outliving the other carries nothing.
   readonly #newAppKey = (): Promise<SignIdentity> =>
     ECDSAKeyIdentity.generate({ extractable: false });
+  #unwatchForeground: (() => void) | undefined;
   #initPromise: Promise<void> | null = null;
   // Listeners registered via subscribe(), and the live subscription to the
   // delegation storage that drives them. The storage subscription is opened
@@ -228,6 +241,13 @@ export class AuthClient {
     const identityProviderUrl = new URL(
       options.identityProvider?.authorizeUrl?.toString() || IDENTITY_PROVIDER_DEFAULT,
     );
+    if (!options.disableForegroundRefresh) {
+      // The identity decides whether a mint is due; this only says the moment is
+      // a good one. Nothing is hooked where there is no DOM.
+      this.#unwatchForeground = watchForeground(() => {
+        void this.#refreshInForeground();
+      });
+    }
     if (options.openIdProvider) {
       identityProviderUrl.searchParams.set('openid', OPENID_PROVIDER_URLS[options.openIdProvider]);
     }
@@ -315,14 +335,16 @@ export class AuthClient {
   }
 
   /**
-   * Releases resources held by the client: the session-storage subscription
-   * and any registered {@link subscribe} listeners. Call it when discarding a
-   * client so its storage listener does not outlive it.
+   * Releases resources held by the client: the session-storage subscription, the
+   * foreground listeners, and any registered {@link subscribe} listeners. Call it
+   * when discarding a client so nothing it hooked outlives it.
    */
   dispose(): void {
     if (this.#identity instanceof SessionIdentity) this.#identity.dispose();
     this.#unsubscribeSession?.();
     this.#unsubscribeSession = undefined;
+    this.#unwatchForeground?.();
+    this.#unwatchForeground = undefined;
     this.#changeListeners.clear();
   }
 
@@ -731,6 +753,21 @@ export class AuthClient {
 
   // Derives #identity from a signing key and delegation chain. A PartialIdentity
   // (public key only, no signing capability) yields a PartialDelegationIdentity.
+  /**
+   * Mints ahead of the next request when the page comes back, if one is due.
+   *
+   * Silent by design: this is not a request anyone is waiting on, so a failure
+   * leaves the delegation in place for the next one to retry.
+   */
+  async #refreshInForeground(): Promise<void> {
+    // `pageshow` fires on the load itself, and this is what makes a page load
+    // mint: without waiting for the restore, the load's own event finds an
+    // anonymous identity and the first request pays for the mint instead.
+    await this.#init();
+    const identity = this.#identity;
+    if (identity instanceof SessionIdentity) await identity.refresh();
+  }
+
   /**
    * Asks the canister to delete the session, and gives up quietly if it cannot.
    *
