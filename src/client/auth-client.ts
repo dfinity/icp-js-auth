@@ -1,6 +1,6 @@
 import { AnonymousIdentity, type Identity, type SignIdentity } from '@icp-sdk/core/agent';
 import {
-  type DelegationChain,
+  DelegationChain,
   ECDSAKeyIdentity,
   isDelegationValid,
   type PartialIdentity,
@@ -8,6 +8,7 @@ import {
 import { Signer } from '@icp-sdk/signer';
 import { PostMessageTransport, UrlTransport } from '@icp-sdk/signer/web';
 import type { AppCredential } from './app-delegation-source.js';
+import { withLock } from './app-lock.js';
 import { fromBase64, toBase64 } from './base64.js';
 import { watchForeground } from './foreground-refresh.js';
 import { IdbIdentityStorage } from './idb-identity-storage.js';
@@ -15,10 +16,22 @@ import type { IdentityStorage } from './identity-storage.js';
 import { IdleManager, type IdleManagerOptions } from './idle-manager.js';
 import { LocalSessionStorage } from './local-session-storage.js';
 import { isLoopbackHost } from './loopback.js';
+import { openSessionChannel, type SessionChannel } from './session-channel.js';
 import { requestSessionDelegation } from './session-delegation.js';
 import { SessionIdentity } from './session-identity.js';
 import { SessionMinter } from './session-minter.js';
 import type { Session, SessionStorage } from './session-storage.js';
+
+/** One channel and one lock per origin, so every tab of it agrees with the rest. */
+const SESSION_CHANNEL = 'ic-session-sync';
+const MINT_LOCK = 'ic-session-mint';
+
+/**
+ * How long a tab waits for another to answer its ask. One round trip on a
+ * same-origin channel: a tab that hears nothing mints, which is what it would
+ * have done anyway.
+ */
+const INHERIT_WINDOW_MS = 200;
 
 const IDENTITY_PROVIDER_DEFAULT = 'https://id.ai/authorize';
 
@@ -199,6 +212,14 @@ export class AuthClient {
   readonly #newAppKey = (): Promise<SignIdentity> =>
     ECDSAKeyIdentity.generate({ extractable: false });
   #unwatchForeground: (() => void) | undefined;
+  // How tabs of this origin agree on a credential. Undefined where the
+  // environment has no channel, which leaves every tab on its own.
+  #channel: SessionChannel | undefined;
+  // The credential to answer another tab's ask with, kept here because the
+  // identity holding it may not exist yet when an ask arrives.
+  #shared: AppCredential | undefined;
+  // Set while a tab is waiting out the inherit window for an answer.
+  #offered: ((credential: AppCredential) => void) | undefined;
   #initPromise: Promise<void> | null = null;
   // Listeners registered via subscribe(), and the live subscription to the
   // delegation storage that drives them. The storage subscription is opened
@@ -216,6 +237,11 @@ export class AuthClient {
       options.identityProvider?.toString() || IDENTITY_PROVIDER_DEFAULT,
     );
     this.#identityProviderOrigin = identityProviderUrl.origin;
+    this.#channel = openSessionChannel(SESSION_CHANNEL, (message) => {
+      if (message.kind === 'ask') this.#offerShared();
+      else this.#adoptOffer(message);
+    });
+
     if (!options.disableForegroundRefresh) {
       // The identity decides whether a mint is due; this only says the moment is
       // a good one. Nothing is hooked where there is no DOM.
@@ -319,6 +345,8 @@ export class AuthClient {
     this.#unsubscribeSession = undefined;
     this.#unwatchForeground?.();
     this.#unwatchForeground = undefined;
+    this.#channel?.close();
+    this.#channel = undefined;
     this.#changeListeners.clear();
   }
 
@@ -395,14 +423,20 @@ export class AuthClient {
     // comes from: the chain above is rooted at the session's own key, and only a
     // mint reports the key an application's canisters will see.
     const minter = await this.#minterFor(key, sessionChain);
+    // No asking other tabs here. A ceremony may have signed in as a different
+    // account than the one they hold a credential for, and the account key this
+    // session records comes from the mint, so it has to be this session's.
     const appKey = await this.#newAppKey();
     const appDelegation = await minter.mint(appKey.getPublicKey().toDer());
     const session: Session = { chain: sessionChain, accountKey: appDelegation.publicKey };
 
-    this.#identity = this.#sessionIdentity(minter, session, {
-      key: appKey,
-      chain: appDelegation,
-    });
+    const credential = { key: appKey, chain: appDelegation };
+    // Signing in mints outside the identity, so the offer has to be made here
+    // too, or the tabs of this origin would each spend a call on what this one
+    // already has.
+    this.#shared = credential;
+    this.#offerShared();
+    this.#identity = this.#sessionIdentity(minter, session, credential);
 
     const idleOptions = this.#options?.idleOptions;
     if (!this.idleManager && !idleOptions?.disableIdle) {
@@ -673,7 +707,13 @@ export class AuthClient {
     }
     // No mint here: the account key was stored with the session, so who is
     // signed in is known without one, and the first request mints.
-    this.#identity = this.#sessionIdentity(await this.#minterFor(key, session.chain), session);
+    this.#identity = this.#sessionIdentity(
+      await this.#minterFor(key, session.chain),
+      session,
+      // A tab opening asks the others rather than minting. Anything that does not
+      // fit this account is refused by the identity.
+      await this.#askForCredential(),
+    );
 
     if (!this.#options.idleOptions?.disableIdle && !this.idleManager) {
       this.idleManager = IdleManager.create(this.#options.idleOptions);
@@ -709,7 +749,13 @@ export class AuthClient {
       return;
     }
 
-    this.#identity = this.#sessionIdentity(await this.#minterFor(key, session.chain), session);
+    this.#identity = this.#sessionIdentity(
+      await this.#minterFor(key, session.chain),
+      session,
+      // A tab opening asks the others rather than minting. Anything that does not
+      // fit this account is refused by the identity.
+      await this.#askForCredential(),
+    );
     this.#notify();
   }
 
@@ -721,6 +767,58 @@ export class AuthClient {
 
   // Derives #identity from a signing key and delegation chain. A PartialIdentity
   // (public key only, no signing capability) yields a PartialDelegationIdentity.
+  /** Answers another tab that has no credential, if this one has something to give. */
+  #offerShared(): void {
+    const credential = this.#shared;
+    if (!credential) return;
+    this.#channel?.post({
+      kind: 'offer',
+      keyPair: (credential.key as unknown as { getKeyPair(): CryptoKeyPair }).getKeyPair(),
+      chainJson: JSON.stringify(credential.chain.toJSON()),
+    });
+  }
+
+  /**
+   * Takes what another tab offered, if this client is waiting for one.
+   *
+   * The identity refuses a credential that is not rooted at this account and
+   * issued to the key beside it, so a mismatch is discarded there rather than
+   * being trusted because it arrived on our own origin's channel.
+   */
+  async #adoptOffer(offer: { keyPair: CryptoKeyPair; chainJson?: string }): Promise<void> {
+    if (offer.chainJson === undefined) return;
+    const credential = {
+      key: await ECDSAKeyIdentity.fromKeyPair(offer.keyPair),
+      chain: DelegationChain.fromJSON(offer.chainJson),
+    };
+    this.#offered?.(credential);
+    if (this.#identity instanceof SessionIdentity && this.#identity.adopt(credential)) {
+      this.#shared = credential;
+    }
+  }
+
+  /**
+   * Asks the other tabs of this origin for a credential, and gives up quickly.
+   *
+   * Worth at most one round trip on a same-origin channel: a tab that hears
+   * nothing mints, which is what it would have done anyway.
+   */
+  #askForCredential(): Promise<AppCredential | undefined> {
+    if (!this.#channel) return Promise.resolve(undefined);
+    return new Promise((resolve) => {
+      const timer = setTimeout(() => {
+        this.#offered = undefined;
+        resolve(undefined);
+      }, INHERIT_WINDOW_MS);
+      this.#offered = (credential) => {
+        clearTimeout(timer);
+        this.#offered = undefined;
+        resolve(credential);
+      };
+      this.#channel?.post({ kind: 'ask' });
+    });
+  }
+
   /**
    * Mints ahead of the next request when the page comes back, if one is due.
    *
@@ -771,6 +869,13 @@ export class AuthClient {
   ): SessionIdentity {
     return new SessionIdentity({
       newKey: this.#newAppKey,
+      withLock: (run) => withLock(MINT_LOCK, run),
+      onMinted: (credential) => {
+        // Offer it to the tabs of this origin, so none of them spends a call on
+        // what this one just obtained.
+        this.#shared = credential;
+        this.#offerShared();
+      },
       accountKey: session.accountKey,
       sessionExpiresAtMs: earliestExpiryMs(session.chain),
       source,

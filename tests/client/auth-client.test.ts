@@ -378,6 +378,14 @@ describe('AuthClient', () => {
 });
 
 describe('AuthClient signIn', () => {
+  /** Lets pending work run until `changed()`, under fake or real timers. */
+  const settle = async (changed: () => boolean): Promise<void> => {
+    for (let turn = 0; turn < 50 && !changed(); turn++) {
+      if (vi.isFakeTimers()) await vi.advanceTimersByTimeAsync(1);
+      else await new Promise((resolve) => setTimeout(resolve, 1));
+    }
+  };
+
   it('should return the authenticated identity', async () => {
     const client = new AuthClient();
     handleSignIn(FakeTransport.last());
@@ -487,11 +495,6 @@ describe('AuthClient signIn', () => {
 
     expect(identity.getPrincipal().toText()).toBe(minted.accountKey?.getPrincipal().toText());
   });
-
-  /** Flushes microtasks until `changed()`, or a bounded number of turns. */
-  const settle = async (changed: () => boolean): Promise<void> => {
-    for (let turn = 0; turn < 50 && !changed(); turn++) await vi.advanceTimersByTimeAsync(0);
-  };
 
   it('mints when the tab comes back, if one is due', async () => {
     const client = new AuthClient();

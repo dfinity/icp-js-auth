@@ -54,12 +54,29 @@ export interface SessionIdentityOptions {
   newKey: () => Promise<SignIdentity>;
 
   /**
-   * A credential already obtained for this session, adopted as the current one.
+   * A credential already obtained for this session, adopted if it fits.
    *
-   * Signing in mints before it resolves, so the identity it produces starts with
-   * one rather than minting again on the first request.
+   * Signing in mints before it resolves, and a tab opening may be handed one by
+   * another tab, so either way the identity can start with one rather than
+   * minting on its first request. Checked like any other, since one of these may
+   * have come from somewhere else.
    */
   initial?: AppCredential;
+
+  /**
+   * Runs a mint while holding whatever serialises mints across tabs of an origin.
+   *
+   * Defaults to running it directly, which is one tab's worth of behaviour and
+   * the whole of it where nothing can serialise.
+   */
+  withLock?: <T>(run: () => Promise<T>) => Promise<T>;
+
+  /**
+   * Called with each credential this identity mints, so a client can offer it to
+   * other tabs. Not called for one that arrived from elsewhere, since passing
+   * that on again would only go round in circles.
+   */
+  onMinted?: (credential: AppCredential) => void;
 
   /**
    * Called once when the session turns out to be gone, so the client can drop
@@ -87,6 +104,8 @@ export class SessionIdentity extends DelegationIdentity {
   readonly #source: AppDelegationSource;
   readonly #newKey: () => Promise<SignIdentity>;
   readonly #onSessionGone: () => void;
+  readonly #withLock: <T>(run: () => Promise<T>) => Promise<T>;
+  readonly #onMinted: ((credential: AppCredential) => void) | undefined;
   readonly #sessionExpiresAtMs: number;
   /** Reached by the base class's `sign`, so rotating does not change the object. */
   readonly #held: { current?: AppCredential };
@@ -116,8 +135,11 @@ export class SessionIdentity extends DelegationIdentity {
     this.#source = options.source;
     this.#newKey = options.newKey;
     this.#onSessionGone = options.onSessionGone;
+    this.#withLock = options.withLock ?? ((run) => run());
+    this.#onMinted = options.onMinted;
     this.#sessionExpiresAtMs = options.sessionExpiresAtMs;
-    if (options.initial) this.#adopt(options.initial);
+    // Through adopt(), because one of these may have come from another tab.
+    if (options.initial) this.adopt(options.initial);
   }
 
   override getDelegation(): DelegationChain {
@@ -192,13 +214,18 @@ export class SessionIdentity extends DelegationIdentity {
   }
 
   #mint(): Promise<AppCredential> {
-    this.#inFlight ??= this.#mintOnce().finally(() => {
+    this.#inFlight ??= this.#withLock(() => this.#mintOnce()).finally(() => {
       this.#inFlight = undefined;
     });
     return this.#inFlight;
   }
 
   async #mintOnce(): Promise<AppCredential> {
+    // Inside the lock now, which may have been held by a tab that minted while
+    // this one queued. Look again before spending a call.
+    const held = this.#held.current;
+    if (held && this.#msLeft(held.chain) > PRE_MINT_THRESHOLD_MS) return held;
+
     // A delegation lasts min(its ttl, what remains of the session), so minting
     // against an almost finished session returns one already too short to use,
     // and refreshing on the delegation alone would mint without end.
@@ -222,6 +249,7 @@ export class SessionIdentity extends DelegationIdentity {
     }
 
     this.#adopt(credential);
+    this.#onMinted?.(credential);
     return credential;
   }
 
