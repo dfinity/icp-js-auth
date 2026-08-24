@@ -1,60 +1,25 @@
 import { AnonymousIdentity, type Identity, type SignIdentity } from '@icp-sdk/core/agent';
 import {
-  DelegationChain,
-  DelegationIdentity,
+  type DelegationChain,
   ECDSAKeyIdentity,
-  Ed25519KeyIdentity,
   isDelegationValid,
-  PartialDelegationIdentity,
   type PartialIdentity,
 } from '@icp-sdk/core/identity';
-import type { Principal } from '@icp-sdk/core/principal';
 import { Signer } from '@icp-sdk/signer';
 import { PostMessageTransport, UrlTransport } from '@icp-sdk/signer/web';
+import type { AppCredential } from './app-delegation-source.js';
 import { fromBase64, toBase64 } from './base64.js';
+import { IdbIdentityStorage } from './idb-identity-storage.js';
+import type { IdentityStorage } from './identity-storage.js';
 import { IdleManager, type IdleManagerOptions } from './idle-manager.js';
-import {
-  type AuthClientStorage,
-  IdbStorage,
-  KEY_STORAGE_DELEGATION,
-  KEY_STORAGE_KEY,
-  KEY_VECTOR,
-  LocalStorage,
-  type StoredKey,
-} from './storage.js';
-
-const NANOSECONDS_PER_SECOND = BigInt(1_000_000_000);
-const SECONDS_PER_HOUR = BigInt(3_600);
-const NANOSECONDS_PER_HOUR = NANOSECONDS_PER_SECOND * SECONDS_PER_HOUR;
+import { LocalSessionStorage } from './local-session-storage.js';
+import { isLoopbackHost } from './loopback.js';
+import { requestSessionDelegation } from './session-delegation.js';
+import { SessionIdentity } from './session-identity.js';
+import { SessionMinter } from './session-minter.js';
+import type { Session, SessionStorage } from './session-storage.js';
 
 const IDENTITY_PROVIDER_DEFAULT = 'https://id.ai/authorize';
-const DEFAULT_MAX_TIME_TO_LIVE = BigInt(8) * NANOSECONDS_PER_HOUR;
-
-const ECDSA_KEY_LABEL = 'ECDSA';
-const ED25519_KEY_LABEL = 'Ed25519';
-type BaseKeyType = typeof ECDSA_KEY_LABEL | typeof ED25519_KEY_LABEL;
-
-// localStorage key used to cache the delegation expiration so that
-// isAuthenticated() can answer synchronously without hitting IndexedDB.
-const KEY_STORAGE_EXPIRATION = 'ic-delegation_expiration';
-
-// Storage key prefix for a redirect flow's session key, held only while the
-// flow is in progress (keyed by a per-flow id) and removed once the delegation
-// is persisted. See AuthClient.#acquireSessionKey.
-const PENDING_KEY_PREFIX = 'ic-auth-pending-key:';
-
-// The storage backend has no key enumeration, so pending-key slots are tracked
-// explicitly here: an abandoned flow never removes its key, so a later flow
-// prunes expired orphans by slot instead of leaking them forever.
-const PENDING_KEYS_REGISTRY_KEY = 'ic-auth-pending-keys';
-// Past the URL transport's ~10-min flow window the flow can't resume, so a
-// pending key older than this is treated as abandoned.
-const PENDING_KEY_TTL_MS = 10 * 60 * 1000;
-
-interface PendingKeyEntry {
-  slot: string;
-  expiresAt: number;
-}
 
 export type OpenIdProvider = 'google' | 'apple' | 'microsoft';
 
@@ -73,21 +38,24 @@ export interface AuthClientCreateOptions {
   /**
    * An identity to authenticate via delegation.
    */
-  identity?: SignIdentity | PartialIdentity;
+  identity?: SignIdentity;
 
   /**
-   * Persistent storage backend. Defaults to IndexedDB.
-   * @default IdbStorage
+   * Where the session signing identity (key pair) is persisted. The
+   * implementation owns the key algorithm — switch it to switch algorithms
+   * (e.g. ECDSA → Ed25519).
+   * @default IdbIdentityStorage
    */
-  storage?: AuthClientStorage;
+  identityStorage?: IdentityStorage;
 
   /**
-   * Type of session key to generate on each sign-in.
-   *
-   * Use `'Ed25519'` when your storage provider does not support `CryptoKey`.
-   * @default 'ECDSA'
+   * Where the session delegation chain is persisted. The delegation carries no
+   * private material, so it can live in a synchronous, observable store; the
+   * default notifies other tabs of a sign-in or sign-out via the `storage`
+   * event.
+   * @default LocalSessionStorage
    */
-  keyType?: BaseKeyType;
+  sessionStorage?: SessionStorage;
 
   /**
    * Idle timeout configuration.
@@ -164,15 +132,25 @@ export interface IdleOptions extends IdleManagerOptions {
  */
 export interface AuthClientSignInOptions {
   /**
-   * Maximum lifetime of the delegation in nanoseconds.
-   * @default 8 hours
+   * The longest this session may last, in nanoseconds.
+   *
+   * A ceiling rather than a request: what the user chooses at consent wins over
+   * it, an organization's policy may narrow it further, and Internet Identity
+   * clamps the result to between ten minutes and thirty days. Omit it to accept
+   * whatever the user is offered.
+   *
+   * The app delegations minted from the session are five minutes regardless, and
+   * are not requestable.
    */
   maxTimeToLive?: bigint;
 
   /**
-   * Restrict the delegation to specific canisters.
+   * URL to navigate to once sign-in completes, ignored unless it is a
+   * same-origin http(s) target. In the `'redirect'` flow it is journaled so it
+   * survives the round-trip, and the navigation replaces the current history
+   * entry so a transient sign-in page is not left behind.
    */
-  targets?: Principal[];
+  returnTo?: string;
 }
 
 export interface SignedAttributes {
@@ -192,23 +170,39 @@ export interface SignedAttributes {
  */
 export class AuthClient {
   #identity: Identity | PartialIdentity = new AnonymousIdentity();
-  #chain: DelegationChain | null = null;
-  #storage: AuthClientStorage;
+  #identityStorage: IdentityStorage;
+  #sessionStorage: SessionStorage;
   #signer: Signer;
   // Set only in redirect mode, so the redirect-specific paths (nonce/key
   // journaling) can reach `memoize`. Undefined in the default 'window' mode.
   #urlTransport: UrlTransport | undefined;
   #options: AuthClientCreateOptions;
+  // Where mint calls go. The Internet Identity canister is served by the gateway
+  // that serves its frontend, so the identity provider's origin is the host.
+  #identityProviderOrigin: string;
+  // Makes the key each mint gets a delegation for. Non-extractable, because it
+  // crosses to other tabs of this origin as a handle that signs and cannot be
+  // copied, and made afresh each time, because a key and its delegation expire
+  // together and one outliving the other carries nothing.
+  readonly #newAppKey = (): Promise<SignIdentity> =>
+    ECDSAKeyIdentity.generate({ extractable: false });
   #initPromise: Promise<void> | null = null;
+  // Listeners registered via subscribe(), and the live subscription to the
+  // delegation storage that drives them. The storage subscription is opened
+  // lazily on the first subscribe() and closed when the last one leaves.
+  #changeListeners = new Set<() => void>();
+  #unsubscribeSession: (() => void) | undefined;
   idleManager: IdleManager | undefined;
 
   constructor(options: AuthClientCreateOptions = {}) {
     this.#options = options;
-    this.#storage = options.storage ?? new IdbStorage();
+    this.#identityStorage = options.identityStorage ?? new IdbIdentityStorage();
+    this.#sessionStorage = options.sessionStorage ?? new LocalSessionStorage();
 
     const identityProviderUrl = new URL(
       options.identityProvider?.toString() || IDENTITY_PROVIDER_DEFAULT,
     );
+    this.#identityProviderOrigin = identityProviderUrl.origin;
     if (options.openIdProvider) {
       identityProviderUrl.searchParams.set('openid', OPENID_PROVIDER_URLS[options.openIdProvider]);
     }
@@ -257,21 +251,59 @@ export class AuthClient {
 
   /**
    * Checks whether the user has an active, non-expired session.
+   *
+   * Synchronous: the delegation lives in synchronous storage, so its earliest
+   * expiry is read and checked without touching IndexedDB.
    */
   isAuthenticated(): boolean {
-    // Uses a cached expiration in localStorage to avoid an async IndexedDB read.
-    const expiration = getExpirationFlag();
-    if (expiration === null) return false;
-    const nowNs = BigInt(Date.now()) * BigInt(1_000_000);
-    return nowNs < expiration;
+    const session = this.#sessionStorage.get();
+    return session !== null && isDelegationValid(session.chain);
+  }
+
+  /**
+   * Registers a listener fired when the session changes outside this client —
+   * a sign-in or sign-out in another tab, or anywhere else the configured store
+   * shares the session from. The client re-derives its identity before the
+   * listener runs, so {@link getIdentity} / {@link isAuthenticated} already
+   * reflect the change inside the callback.
+   *
+   * @param listener - Invoked on each external session change.
+   * @returns A function that unregisters the listener.
+   */
+  subscribe(listener: () => void): () => void {
+    this.#changeListeners.add(listener);
+    if (this.#unsubscribeSession === undefined) {
+      this.#unsubscribeSession = this.#sessionStorage.subscribe(() => {
+        // #reconcile() is async and may reject (e.g. identityStorage.get()
+        // failing to open IndexedDB). Swallow it: a failed re-derive leaves the
+        // current state in place, which is preferable to an unhandled rejection.
+        this.#reconcile().catch(() => {});
+      });
+    }
+    return () => {
+      this.#changeListeners.delete(listener);
+      if (this.#changeListeners.size === 0) {
+        this.#unsubscribeSession?.();
+        this.#unsubscribeSession = undefined;
+      }
+    };
+  }
+
+  /**
+   * Releases resources held by the client: the session-storage subscription
+   * and any registered {@link subscribe} listeners. Call it when discarding a
+   * client so its storage listener does not outlive it.
+   */
+  dispose(): void {
+    this.#unsubscribeSession?.();
+    this.#unsubscribeSession = undefined;
+    this.#changeListeners.clear();
   }
 
   /**
    * Opens the identity provider, requests a delegation, and returns the authenticated identity.
    *
    * @param options - Sign-in options.
-   * @param options.maxTimeToLive - Maximum lifetime of the delegation in nanoseconds.
-   * @param options.targets - Restrict the delegation to specific canisters.
    * @returns The authenticated identity.
    * @throws When authentication fails.
    *
@@ -283,29 +315,33 @@ export class AuthClient {
    * }
    */
   async signIn(options?: AuthClientSignInOptions): Promise<Identity> {
-    const maxTimeToLive = options?.maxTimeToLive ?? DEFAULT_MAX_TIME_TO_LIVE;
-    const keyType = this.#options.keyType ?? ECDSA_KEY_LABEL;
+    // Journal returnTo up front so it survives a 'redirect' round-trip, and only
+    // when provided so the flow's journal is unchanged for callers that omit it.
+    // Validate to a same-origin URL *inside* the producer, so only a safe href
+    // (or null) is ever journaled — never the raw, possibly cross-origin, value.
+    const rawReturnTo = options?.returnTo;
+    const returnTo =
+      rawReturnTo === undefined
+        ? undefined
+        : this.memoize(() => sameOriginTarget(rawReturnTo)?.href ?? null);
 
-    // Start session-key acquisition BEFORE opening the channel, awaiting it only
-    // after. In the redirect flow the acquisition's first `transport.memoize`
+    // Start session-identity acquisition BEFORE opening the channel, awaiting it
+    // only after. In the redirect flow the acquisition's first `transport.memoize`
     // runs synchronously when invoked, so its in-flight bump lands in the same
     // tick `signIn` is called — holding the transport's batch flush from the
     // very start of the flow rather than only after the `openChannel` await.
     // Under `Promise.all([signIn, requestAttributes])` this is what keeps a
     // faster concurrent request from flushing before this flow's delegation
     // request is buffered.
-    const sessionKeyPromise: Promise<{
-      key: SignIdentity | PartialIdentity;
-      pendingKeySlot?: string;
-    }> = this.#urlTransport
-      ? this.#ensureSessionKeyForRedirectFlow(this.#urlTransport, keyType)
-      : this.#ensureSessionKeyForWindowFlow(keyType).then((key) => ({ key }));
+    const identityPromise: Promise<SignIdentity | PartialIdentity> = this.#urlTransport
+      ? this.#acquireIdentityForRedirectFlow(this.#urlTransport)
+      : this.#acquireIdentityForWindowFlow();
     // The acquisition is started eagerly, before the awaits below. If one of
-    // those throws first, `sessionKeyPromise` is never awaited, so attach a
-    // no-op rejection handler now to keep a later acquisition failure from
-    // surfacing as an unhandled rejection. The `await` below still observes a
-    // rejection and propagates it when reached.
-    void sessionKeyPromise.catch(() => undefined);
+    // those throws first, `identityPromise` is never awaited, so attach a no-op
+    // rejection handler now to keep a later acquisition failure from surfacing
+    // as an unhandled rejection. The `await` below still observes a rejection
+    // and propagates it when reached.
+    void identityPromise.catch(() => undefined);
 
     // openChannel() must stay the first await: it can open a popup window,
     // which the browser may block unless it happens in the same tick as the
@@ -316,22 +352,35 @@ export class AuthClient {
     // writes cannot interleave with hydration's reads.
     await this.#init();
 
-    const { key, pendingKeySlot } = await sessionKeyPromise;
+    const key = await identityPromise;
 
-    const delegationChain = await this.#signer.requestDelegation({
-      publicKey: key.getPublicKey(),
-      targets: options?.targets,
-      maxTimeToLive,
+    if (!('sign' in key)) {
+      // Unreachable for a typed caller, since `identity` is a SignIdentity.
+      // Minting is a canister call signed by the session key, so a key that
+      // cannot sign cannot hold a session, and failing here beats handing back
+      // an identity whose first request fails for a reason nothing explains.
+      throw new Error('A session needs a key that can sign');
+    }
+
+    const sessionChain = await requestSessionDelegation(this.#signer, {
+      sessionPublicKey: key.getPublicKey().toDer(),
+      maxTimeToLive: options?.maxTimeToLive,
+      derivationOrigin: this.#options.derivationOrigin?.toString(),
     });
 
-    this.#chain = delegationChain;
+    // Mint inside the ceremony the user is already waiting through, so the first
+    // request after signing in does not wait. This is also where the account key
+    // comes from: the chain above is rooted at the session's own key, and only a
+    // mint reports the key an application's canisters will see.
+    const minter = await this.#minterFor(key, sessionChain);
+    const appKey = await this.#newAppKey();
+    const appDelegation = await minter.mint(appKey.getPublicKey().toDer());
+    const session: Session = { chain: sessionChain, accountKey: appDelegation.publicKey };
 
-    // PartialIdentity only has the public key — no signing capability.
-    if ('toDer' in key) {
-      this.#identity = PartialDelegationIdentity.fromDelegation(key, this.#chain);
-    } else {
-      this.#identity = DelegationIdentity.fromDelegation(key, this.#chain);
-    }
+    this.#identity = this.#sessionIdentity(minter, session, {
+      key: appKey,
+      chain: appDelegation,
+    });
 
     const idleOptions = this.#options?.idleOptions;
     if (!this.idleManager && !idleOptions?.disableIdle) {
@@ -339,88 +388,80 @@ export class AuthClient {
       this.#registerDefaultIdleCallback();
     }
 
-    // Persist so the session survives page reloads.
-    await persistChain(this.#storage, this.#chain);
-    await persistKey(this.#storage, key);
+    // Persist the session now that authentication has succeeded. In the window
+    // flow the identity was only minted (not stored) during acquisition, so it
+    // is written here — a cancelled or failed ceremony therefore never
+    // overwrites an existing valid session's key. The redirect flow already
+    // persisted it on the outbound load (it had to survive the navigation), and
+    // a caller-provided identity is used as-is and never persisted.
+    if (this.#urlTransport === undefined && this.#options.identity === undefined) {
+      // `options.identity` is undefined, so `key` came from
+      // `identityStorage.create()`, which returns a full SignIdentity.
+      await this.#identityStorage.set(key as SignIdentity);
+    }
+    this.#sessionStorage.set(session);
 
-    // The flow is complete: the delegation is bound to this key and stored, so
-    // the per-flow pending copy is no longer needed. Best-effort — the user is
-    // already signed in, so a cleanup failure must not fail signIn(); a later
-    // flow sweeps whatever is left behind.
-    if (pendingKeySlot !== undefined) {
-      try {
-        await this.#storage.remove(pendingKeySlot);
-        await unregisterPendingKey(this.#storage, pendingKeySlot);
-      } catch {
-        // ignore
-      }
+    if (typeof returnTo === 'string') {
+      // Leave the (possibly transient) sign-in page for the already-validated
+      // return target, replacing it so it and the redirect chain aren't kept in
+      // history.
+      location.replace(returnTo);
     }
 
     return this.#identity;
   }
 
-  // Window flow: sign-in completes in a single load, so a fresh session key per
-  // sign-in is enough (or the caller-provided identity), with nothing to
-  // persist for a later load.
-  async #ensureSessionKeyForWindowFlow(
-    keyType: BaseKeyType,
-  ): Promise<SignIdentity | PartialIdentity> {
-    return this.#options.identity ?? (await generateKey(keyType));
+  // Window flow: sign-in completes in a single load. Mint a fresh session
+  // identity (or use the caller-provided one) but do NOT persist it yet —
+  // signIn writes it only once the delegation is obtained.
+  async #acquireIdentityForWindowFlow(): Promise<SignIdentity | PartialIdentity> {
+    return this.#options.identity ?? (await this.#identityStorage.create());
   }
 
   // Redirect flow: `signIn` runs twice — once on the load that navigates to the
   // identity provider, and again on the return load that replays the delegation
-  // minted for the FIRST load's key. Both runs must therefore use the same key.
-  // A per-flow key id is journaled via the transport (stable across the
-  // redirect) and the key is kept in storage under that id, so the return load
-  // restores the same key rather than generating a fresh one that would not
-  // match the replayed delegation. A caller-provided identity is already stable
-  // across the redirect, so it is used as-is with nothing persisted.
-  async #ensureSessionKeyForRedirectFlow(
+  // minted for the FIRST load's key. Both runs must therefore use the same
+  // identity. Minting + persisting is gated behind `transport.memoize` so it
+  // runs once, on the first load; the return load skips it (the memoized result
+  // replays) and restores the same identity from storage. Unlike the window
+  // flow the identity must be persisted here, before success — the page unloads
+  // before the delegation returns, so the return load has nothing else to
+  // restore from. A caller-provided identity is already stable across the
+  // redirect, so it is used as-is with nothing persisted.
+  async #acquireIdentityForRedirectFlow(
     transport: UrlTransport,
-    keyType: BaseKeyType,
-  ): Promise<{ key: SignIdentity | PartialIdentity; pendingKeySlot?: string }> {
+  ): Promise<SignIdentity | PartialIdentity> {
     if (this.#options.identity !== undefined) {
-      return { key: this.#options.identity };
+      return this.#options.identity;
     }
 
-    const keyId = await transport.memoize(() => globalThis.crypto.randomUUID());
-    const pendingKeySlot = `${PENDING_KEY_PREFIX}${keyId}`;
-
-    // Acquire the per-flow key inside a `memoize` producer so the transport
-    // holds its batch flush across the (async) key restore/generate + storage
-    // write. The transport coalesces concurrently issued requests into one
-    // redirect by flushing on a macrotask once no memoize producer is in
-    // flight; without this hold, a faster concurrent request (e.g. the nonce
-    // path of `requestAttributes`) buffers first and trips that flush before
-    // this flow's delegation request — issued only once the key is ready — is
-    // buffered, splitting what should be one redirect into two.
+    // Mint + persist inside a `memoize` producer so the transport holds its
+    // batch flush across the (async) identity generation + storage write. The
+    // transport coalesces concurrently issued requests into one redirect by
+    // flushing on a macrotask once no memoize producer is in flight; without
+    // this hold, a faster concurrent request (e.g. the nonce path of
+    // `requestAttributes`) buffers first and trips that flush before this flow's
+    // delegation request — issued only once the key is ready — is buffered,
+    // splitting what should be one redirect into two.
     //
-    // The key is captured in a closure, not read back after the producer: on
-    // the FIRST load the producer sets `acquired`, so the delegation request
+    // The identity is captured in a closure, not read back after the producer:
+    // on the FIRST load the producer sets `created`, so the delegation request
     // that follows is issued with no intervening storage read — a read there
     // would re-open the very flush gap this closes. The producer is skipped on
-    // the replay load (its result is journaled), where the key is instead
-    // restored from storage. Only the id is journaled; the key lives in storage.
-    let acquired: SignIdentity | PartialIdentity | null = null;
+    // the replay load (its result is journaled), where the identity is instead
+    // restored from storage.
+    let created: SignIdentity | null = null;
     await transport.memoize(async () => {
-      acquired = await restoreKeyAt(this.#storage, pendingKeySlot);
-      if (acquired === null) {
-        acquired = await generateKey(keyType);
-        // Register before writing the key: if the write then fails, a stray
-        // registry entry is harmless (swept on expiry), whereas a key with no
-        // registry entry would leak un-sweepably.
-        await sweepAndRegisterPendingKey(this.#storage, pendingKeySlot, Date.now());
-        await this.#storage.set(pendingKeySlot, serializeKey(acquired));
-      }
-      return keyId;
+      created = await this.#identityStorage.create();
+      await this.#identityStorage.set(created);
+      return true;
     });
 
-    const key = acquired ?? (await restoreKeyAt(this.#storage, pendingKeySlot));
-    if (key === null) {
-      throw new Error('Session key missing after acquisition');
+    const identity = created ?? (await this.#identityStorage.get());
+    if (identity === null) {
+      throw new Error('Session identity missing after acquisition');
     }
-    return { key, pendingKeySlot };
+    return identity;
   }
 
   /**
@@ -538,28 +579,17 @@ export class AuthClient {
     // Wait for the constructor's session restore: hydration racing the
     // deletion below could re-populate the identity from already-read state.
     await this.#init();
-    await deleteStorage(this.#storage);
+    this.#sessionStorage.remove();
+    await this.#identityStorage.remove();
 
     this.#identity = new AnonymousIdentity();
-    this.#chain = null;
 
     if (options.returnTo !== undefined) {
-      // Navigate exactly as before (pushState, else location.href), but only to
-      // a validated same-origin http(s) target, and feed that validated
-      // `target.href` to both sinks rather than the raw `returnTo`. An invalid
-      // or cross-origin `returnTo` is ignored, so the fallback can no longer be
-      // turned into an open redirect or a `javascript:` execution.
-      let target: URL | undefined;
-      try {
-        target = new URL(options.returnTo, window.location.href);
-      } catch {
-        target = undefined;
-      }
-      if (
-        target !== undefined &&
-        (target.protocol === 'https:' || target.protocol === 'http:') &&
-        target.origin === window.location.origin
-      ) {
+      // Navigate only to a validated same-origin http(s) target, so an invalid
+      // or cross-origin `returnTo` can't be turned into an open redirect or a
+      // `javascript:` execution.
+      const target = sameOriginTarget(options.returnTo);
+      if (target !== undefined) {
         try {
           window.history.pushState({}, '', target.href);
         } catch {
@@ -595,24 +625,27 @@ export class AuthClient {
     return this.#initPromise;
   }
 
-  // Attempts to restore a previous session (key + delegation chain) from
-  // storage. If found and still valid, sets #identity and #chain so the
-  // client is ready to use without a new signIn().
+  // Attempts to restore a previous session (signing identity + delegation
+  // chain) from storage. If found and still valid, sets #identity so the client is ready to use without a new signIn().
   async #hydrate(): Promise<void> {
-    const key =
-      this.#options.identity ??
-      (await restoreKey(this.#storage, this.#options.keyType ?? ECDSA_KEY_LABEL));
-    if (!key) return;
+    const key = this.#options.identity ?? (await this.#identityStorage.get());
+    if (key === null) return;
 
-    const chain = await restoreChain(this.#storage);
-    if (!chain) return;
-
-    this.#chain = chain;
-    if ('toDer' in key) {
-      this.#identity = PartialDelegationIdentity.fromDelegation(key, chain);
-    } else {
-      this.#identity = DelegationIdentity.fromDelegation(key, chain);
+    const session = this.#sessionStorage.get();
+    if (session === null) return;
+    if (!isDelegationValid(session.chain) || !keyMatchesChain(key, session.chain)) {
+      // Drop the delegation so isAuthenticated() and later reads agree. Either
+      // it expired, or the stored key and delegation are from different
+      // sign-ins (e.g. an abandoned redirect re-auth wrote a new key beside the
+      // old delegation) — assembling those would sign with a key the delegation
+      // doesn't authorize. A fresh signIn() overwrites the identity, so leave
+      // it in place.
+      this.#sessionStorage.remove();
+      return;
     }
+    // No mint here: the account key was stored with the session, so who is
+    // signed in is known without one, and the first request mints.
+    this.#identity = this.#sessionIdentity(await this.#minterFor(key, session.chain), session);
 
     if (!this.#options.idleOptions?.disableIdle && !this.idleManager) {
       this.idleManager = IdleManager.create(this.#options.idleOptions);
@@ -620,15 +653,102 @@ export class AuthClient {
     }
   }
 
+  // Re-reads the delegation after an external change and re-derives the
+  // identity, then notifies
+  // subscribers. A removed or expired delegation resets to anonymous; a new one
+  // is paired with the persisted signing identity.
+  async #reconcile(): Promise<void> {
+    const session = this.#sessionStorage.get();
+    if (session === null || !isDelegationValid(session.chain)) {
+      this.#identity = new AnonymousIdentity();
+      this.#notify();
+      return;
+    }
+
+    const key = this.#options.identity ?? (await this.#identityStorage.get());
+    if (key === null) {
+      // The delegation is present but its signing identity is not yet visible in
+      // this context. Leave the current state untouched rather than asserting a
+      // session we cannot sign for.
+      return;
+    }
+    if (!keyMatchesChain(key, session.chain)) {
+      // Key and session are from different sign-ins; they can't be assembled
+      // into a usable identity. Unlike #hydrate this doesn't mutate storage —
+      // reconcile only reflects external state.
+      this.#identity = new AnonymousIdentity();
+      this.#notify();
+      return;
+    }
+
+    this.#identity = this.#sessionIdentity(await this.#minterFor(key, session.chain), session);
+    this.#notify();
+  }
+
+  #notify(): void {
+    for (const listener of this.#changeListeners) {
+      listener();
+    }
+  }
+
+  // Derives #identity from a signing key and delegation chain. A PartialIdentity
+  // (public key only, no signing capability) yields a PartialDelegationIdentity.
+  /** An agent pointed at Internet Identity, signing as the session. */
+  #minterFor(sessionKey: SignIdentity, sessionChain: DelegationChain): Promise<SessionMinter> {
+    return SessionMinter.create({
+      sessionKey,
+      sessionChain,
+      host: this.#identityProviderOrigin,
+      fetchRootKey: isLoopbackHost(new URL(this.#identityProviderOrigin).hostname),
+    });
+  }
+
+  #sessionIdentity(
+    source: SessionMinter,
+    session: Session,
+    initial?: AppCredential,
+  ): SessionIdentity {
+    return new SessionIdentity({
+      newKey: this.#newAppKey,
+      accountKey: session.accountKey,
+      sessionExpiresAtMs: earliestExpiryMs(session.chain),
+      source,
+      initial,
+      onSessionGone: () => {
+        // Storage is shared by every tab of this origin, so what is stored is not
+        // necessarily the session that just died. Signing in again replaces a
+        // browser's session, so a tab still holding the old one is refused while
+        // the tab that signed in is working fine — and clearing here would take
+        // its session with it.
+        const stored = this.#sessionStorage.get();
+        if (stored !== null && !isSameSession(stored, session)) {
+          // A newer session is stored, and it belongs to the same person in the
+          // same browser. Adopt it rather than destroying it.
+          void this.#reconcile();
+          return;
+        }
+
+        this.#sessionStorage.remove();
+        this.#identity = new AnonymousIdentity();
+        this.#notify();
+      },
+    });
+  }
+
   #registerDefaultIdleCallback() {
     const idleOptions = this.#options?.idleOptions;
     if (!idleOptions?.onIdle && !idleOptions?.disableDefaultIdleCallback) {
-      // Invoked without being awaited, so handle the promise here. Reload only
-      // after teardown resolves, and only if it succeeded — a reload before or
-      // without teardown lets #hydrate restore the still-valid session.
+      // Invoked without being awaited, so handle the promise here. `signOut`
+      // clears storage, which notifies subscribers, so a client with a
+      // `subscribe` listener re-renders signed-out in place. Only reload when
+      // nothing is listening (the legacy behavior for apps that don't observe
+      // changes), and only after teardown resolves — a reload before or without
+      // teardown lets #hydrate restore the still-valid session.
       this.idleManager?.registerCallback(() => {
         void this.signOut()
-          .then(() => location.reload())
+          .then(() => {
+            if (this.#changeListeners.size === 0) location.reload();
+          })
           .catch(() => {});
       });
     }
@@ -636,248 +756,60 @@ export class AuthClient {
 }
 
 /**
- * Generates a new session key.
- * @param keyType - The key algorithm to use.
+ * Resolves a `returnTo` string against the current location and returns it only
+ * when it is a same-origin http(s) URL; otherwise `undefined`. Keeps a
+ * cross-origin, protocol-relative, or `javascript:` value from being navigated to.
+ * @param returnTo - The caller-supplied return target.
  */
-async function generateKey(keyType: BaseKeyType): Promise<SignIdentity> {
-  if (keyType === ED25519_KEY_LABEL) {
-    return Ed25519KeyIdentity.generate();
-  }
-  return await ECDSAKeyIdentity.generate();
-}
-
-/**
- * Saves a session key to storage.
- * @param storage - The storage backend.
- * @param key - The key to persist.
- */
-async function persistKey(
-  storage: AuthClientStorage,
-  key: SignIdentity | PartialIdentity,
-): Promise<void> {
-  await storage.set(KEY_STORAGE_KEY, serializeKey(key));
-}
-
-/**
- * Loads a session key from storage. Falls back to migrating a legacy
- * key from localStorage if nothing is found in the primary store.
- * @param storage - The storage backend.
- * @param keyType - The expected key algorithm (determines deserialization).
- */
-async function restoreKey(
-  storage: AuthClientStorage,
-  keyType: BaseKeyType,
-): Promise<SignIdentity | PartialIdentity | null> {
-  let stored = await storage.get(KEY_STORAGE_KEY);
-  if (!stored) {
-    stored = await migrateFromLocalStorage(storage, keyType);
-  }
-  if (!stored) return null;
-
+function sameOriginTarget(returnTo: string): URL | undefined {
+  let target: URL;
   try {
-    // CryptoKeyPair (object) → ECDSA, JSON string → Ed25519
-    if (typeof stored === 'object') {
-      return await ECDSAKeyIdentity.fromKeyPair(stored);
-    }
-    return Ed25519KeyIdentity.fromJSON(stored);
+    target = new URL(returnTo, window.location.href);
   } catch {
-    // The stored value may be corrupt or from an incompatible version.
-    // Returning null lets the caller fall through to key generation,
-    // which is safer than crashing on startup.
-    return null;
+    return undefined;
   }
-}
-
-// Reads the pending-key registry, dropping malformed entries. The value comes
-// from storage, so guard against corruption: keep only real pending-key slots
-// with a finite expiry (a NaN expiry compares false forever and never sweeps;
-// a foreign slot would make the sweep remove an unrelated storage key).
-async function readPendingRegistry(storage: AuthClientStorage): Promise<PendingKeyEntry[]> {
-  const raw = await storage.get(PENDING_KEYS_REGISTRY_KEY);
-  if (typeof raw !== 'string') return [];
-  try {
-    const parsed: unknown = JSON.parse(raw);
-    if (!Array.isArray(parsed)) return [];
-    return parsed.filter((entry): entry is PendingKeyEntry => {
-      if (typeof entry !== 'object' || entry === null) return false;
-      const { slot, expiresAt } = entry as PendingKeyEntry;
-      return (
-        typeof slot === 'string' &&
-        slot.startsWith(PENDING_KEY_PREFIX) &&
-        typeof expiresAt === 'number' &&
-        Number.isFinite(expiresAt)
-      );
-    });
-  } catch {
-    return [];
+  if (
+    (target.protocol === 'https:' || target.protocol === 'http:') &&
+    target.origin === window.location.origin
+  ) {
+    return target;
   }
-}
-
-async function writePendingRegistry(
-  storage: AuthClientStorage,
-  entries: PendingKeyEntry[],
-): Promise<void> {
-  if (entries.length === 0) {
-    await storage.remove(PENDING_KEYS_REGISTRY_KEY);
-    return;
-  }
-  await storage.set(PENDING_KEYS_REGISTRY_KEY, JSON.stringify(entries));
-}
-
-// Removes expired pending-key slots, then registers `slot` with a fresh expiry.
-async function sweepAndRegisterPendingKey(
-  storage: AuthClientStorage,
-  slot: string,
-  now: number,
-): Promise<void> {
-  const entries = await readPendingRegistry(storage);
-  const live: PendingKeyEntry[] = [];
-  for (const entry of entries) {
-    if (entry.slot === slot) continue; // re-registered with a fresh expiry below
-    if (entry.expiresAt <= now) {
-      await storage.remove(entry.slot);
-    } else {
-      live.push(entry);
-    }
-  }
-  live.push({ slot, expiresAt: now + PENDING_KEY_TTL_MS });
-  await writePendingRegistry(storage, live);
-}
-
-// Drops a slot from the pending-key registry once its flow completes.
-async function unregisterPendingKey(storage: AuthClientStorage, slot: string): Promise<void> {
-  const entries = await readPendingRegistry(storage);
-  const remaining = entries.filter((entry) => entry.slot !== slot);
-  if (remaining.length !== entries.length) {
-    await writePendingRegistry(storage, remaining);
-  }
+  return undefined;
 }
 
 /**
- * Loads a session key from a specific storage slot, deserializing by stored
- * shape (`CryptoKeyPair` → ECDSA, JSON string → Ed25519). Unlike
- * {@link restoreKey} it does not migrate from localStorage — it reads only the
- * given slot, as used for a redirect flow's per-flow pending key.
- * @param storage - The storage backend.
- * @param storageKey - The slot to read.
+ * Whether `key` is the session key the delegation chain terminates in — the
+ * chain's innermost delegation must target this key's public key. A mismatch
+ * means the stored key and delegation came from different sign-ins, so pairing
+ * them would produce an identity that signs with a key the delegation does not
+ * authorize; the caller must discard the session instead.
+ * @param key - The signing (or partial) identity restored from storage.
+ * @param chain - The delegation chain restored from storage.
  */
-async function restoreKeyAt(
-  storage: AuthClientStorage,
-  storageKey: string,
-): Promise<SignIdentity | PartialIdentity | null> {
-  const stored = await storage.get(storageKey);
-  if (!stored) return null;
+function keyMatchesChain(key: SignIdentity | PartialIdentity, chain: DelegationChain): boolean {
+  const leaf = chain.delegations[chain.delegations.length - 1]?.delegation.pubkey;
+  if (leaf === undefined) return false;
+  return bytesEqual(new Uint8Array(leaf), new Uint8Array(key.getPublicKey().toDer()));
+}
 
-  try {
-    if (typeof stored === 'object') {
-      return await ECDSAKeyIdentity.fromKeyPair(stored);
-    }
-    return Ed25519KeyIdentity.fromJSON(stored);
-  } catch {
-    return null;
+/** Constant-shape byte-array equality. */
+function bytesEqual(a: Uint8Array, b: Uint8Array): boolean {
+  if (a.byteLength !== b.byteLength) return false;
+  for (let i = 0; i < a.byteLength; i++) {
+    if (a[i] !== b[i]) return false;
   }
+  return true;
 }
 
 /**
- * Converts a key into a format suitable for storage.
- * @param key - The key to serialize.
+ * Encodes a Uint8Array to a base64 string.
+ * @param bytes - The bytes to encode.
  */
-function serializeKey(key: SignIdentity | PartialIdentity): StoredKey {
-  if (key instanceof ECDSAKeyIdentity) return key.getKeyPair();
-  if (key instanceof Ed25519KeyIdentity) return JSON.stringify(key.toJSON());
-  throw new Error('Unsupported key type');
-}
 
 /**
- * Saves the delegation chain and caches its earliest expiration
- * in localStorage so {@link AuthClient.isAuthenticated} can check it synchronously.
- * @param storage - The storage backend.
- * @param chain - The delegation chain to persist.
+ * Decodes a base64 string to a Uint8Array.
+ * @param str - The base64-encoded string.
  */
-async function persistChain(storage: AuthClientStorage, chain: DelegationChain): Promise<void> {
-  await storage.set(KEY_STORAGE_DELEGATION, JSON.stringify(chain.toJSON()));
-
-  let earliest: bigint | null = null;
-  for (const { delegation } of chain.delegations) {
-    if (earliest === null || delegation.expiration < earliest) {
-      earliest = delegation.expiration;
-    }
-  }
-  if (earliest !== null) {
-    localStorage.setItem(KEY_STORAGE_EXPIRATION, earliest.toString());
-  }
-}
-
-/**
- * Loads the delegation chain from storage. Returns `null` and wipes
- * storage if the chain is expired or corrupted.
- * @param storage - The storage backend.
- */
-async function restoreChain(storage: AuthClientStorage): Promise<DelegationChain | null> {
-  try {
-    const raw = await storage.get(KEY_STORAGE_DELEGATION);
-    if (!raw || typeof raw !== 'string') return null;
-
-    const chain = DelegationChain.fromJSON(raw);
-    if (!isDelegationValid(chain)) {
-      await deleteStorage(storage);
-      return null;
-    }
-    return chain;
-  } catch (e) {
-    console.error(e);
-    await deleteStorage(storage);
-    return null;
-  }
-}
-
-/**
- * Clears all session data from storage.
- * @param storage - The storage backend.
- */
-async function deleteStorage(storage: AuthClientStorage): Promise<void> {
-  await storage.remove(KEY_STORAGE_KEY);
-  await storage.remove(KEY_STORAGE_DELEGATION);
-  await storage.remove(KEY_VECTOR);
-  localStorage.removeItem(KEY_STORAGE_EXPIRATION);
-}
-
-/** Reads the cached delegation expiration from localStorage (nanoseconds). */
-function getExpirationFlag(): bigint | null {
-  const value = localStorage.getItem(KEY_STORAGE_EXPIRATION);
-  if (value === null) return null;
-  return BigInt(value);
-}
-
-/**
- * One-time migration: moves a legacy session stored in localStorage
- * into the primary storage, then cleans up the old entries.
- * @param storage - The target storage backend.
- * @param keyType - The expected key algorithm (only ECDSA keys are migrated).
- */
-async function migrateFromLocalStorage(
-  storage: AuthClientStorage,
-  keyType: BaseKeyType,
-): Promise<StoredKey | null> {
-  try {
-    const fallback = new LocalStorage();
-    const localChain = await fallback.get(KEY_STORAGE_DELEGATION);
-    const localKey = await fallback.get(KEY_STORAGE_KEY);
-
-    if (!localChain || !localKey || keyType !== ECDSA_KEY_LABEL) return null;
-
-    console.log('Discovered an identity stored in localstorage. Migrating to IndexedDB');
-    await storage.set(KEY_STORAGE_DELEGATION, localChain);
-    await storage.set(KEY_STORAGE_KEY, localKey);
-    await fallback.remove(KEY_STORAGE_DELEGATION);
-    await fallback.remove(KEY_STORAGE_KEY);
-
-    return localKey;
-  } catch (error) {
-    console.error(`error while attempting to recover localstorage: ${error}`);
-    return null;
-  }
-}
 
 /**
  * Scopes attribute keys to an OpenID provider.
@@ -905,4 +837,21 @@ export function scopedKeys<
   return keys.map(
     (key) => `openid:${provider}:${key}` as `openid:${(typeof OPENID_PROVIDER_URLS)[P]}:${K}`,
   );
+}
+
+/** When a chain stops being usable, which for a session chain is the session's end. */
+function earliestExpiryMs(chain: DelegationChain): number {
+  const expirations = chain.delegations.map(({ delegation }) => delegation.expiration);
+  if (expirations.length === 0) return 0;
+  return Number(expirations.reduce((a, b) => (a < b ? a : b)) / 1_000_000n);
+}
+
+/**
+ * Whether two sessions are the same one.
+ *
+ * Compared by chain, since a sign-in mints a fresh one: the account key is equal
+ * for every session at the same account and says nothing about which this is.
+ */
+function isSameSession(a: Session, b: Session): boolean {
+  return JSON.stringify(a.chain.toJSON()) === JSON.stringify(b.chain.toJSON());
 }

@@ -1,17 +1,135 @@
-import type { PublicKey } from '@icp-sdk/core/agent';
+import type { PublicKey, SignIdentity } from '@icp-sdk/core/agent';
 import { DelegationChain, Ed25519KeyIdentity } from '@icp-sdk/core/identity';
 import { Principal } from '@icp-sdk/core/principal';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { AuthClient } from '../../src/client/auth-client.ts';
+import type { IdentityStorage } from '../../src/client/identity-storage.ts';
 import { IdleManager } from '../../src/client/idle-manager.ts';
-import {
-  type AuthClientStorage,
-  IdbStorage,
-  KEY_STORAGE_DELEGATION,
-  KEY_STORAGE_KEY,
-  LocalStorage,
-} from '../../src/client/storage.ts';
+import type { SessionIdentity } from '../../src/client/session-identity.ts';
+import type { Session, SessionStorage } from '../../src/client/session-storage.ts';
 import { FakeTransport } from './fake-transport.ts';
+
+// In-memory identity storage that records every identity it creates, so tests
+// can assert on create/set/remove calls and compare generated identities. Uses
+// Ed25519 (synchronous, deterministic) rather than the ECDSA default. create()
+// only mints; set() persists, mirroring the real stores.
+function createIdentityStorage(
+  initial: SignIdentity | null = null,
+): IdentityStorage & { created: SignIdentity[] } {
+  const created: SignIdentity[] = [];
+  let current: SignIdentity | null = initial;
+  return {
+    created,
+    create: vi.fn(async () => {
+      const identity = Ed25519KeyIdentity.generate();
+      created.push(identity);
+      return identity;
+    }),
+    set: vi.fn(async (identity: SignIdentity) => {
+      current = identity;
+    }),
+    get: vi.fn(async () => current),
+    remove: vi.fn(async () => {
+      current = null;
+    }),
+  };
+}
+
+// In-memory delegation storage with spies on every method.
+// Takes a chain rather than a Session so the tests below read as what they are
+// about; the session wrapper is this helper's business.
+function createSessionStorage(initial: DelegationChain | null = null): SessionStorage {
+  let current: Session | null =
+    initial === null ? null : { chain: initial, accountKey: initial.publicKey };
+  return {
+    get: vi.fn(() => current),
+    set: vi.fn((session: Session) => {
+      current = session;
+    }),
+    remove: vi.fn(() => {
+      current = null;
+    }),
+    discard: vi.fn(() => {
+      current = null;
+    }),
+    subscribe: vi.fn(() => () => {}),
+  };
+}
+
+// A session storage whose change listener can be fired on demand, to simulate a
+// sign-in or sign-out that happened in another tab or on a sibling origin.
+// `external()` mutates the stored session and notifies the subscriber.
+function controllableSessionStorage(initial: DelegationChain | null = null): {
+  storage: SessionStorage;
+  external(chain: DelegationChain | null): void;
+} {
+  let current: Session | null =
+    initial === null ? null : { chain: initial, accountKey: initial.publicKey };
+  let listener: (() => void) | null = null;
+  return {
+    storage: {
+      get: () => current,
+      set: (session: Session) => {
+        current = session;
+      },
+      remove: () => {
+        current = null;
+      },
+      discard: () => {
+        current = null;
+      },
+      subscribe: (l: () => void) => {
+        listener = l;
+        return () => {
+          listener = null;
+        };
+      },
+    },
+    external(chain: DelegationChain | null) {
+      current = chain === null ? null : { chain, accountKey: chain.publicKey };
+      listener?.();
+    },
+  };
+}
+
+const II_CANISTER = Principal.fromText('rdmx6-jaaaa-aaaaa-aaadq-cai');
+
+// Minting is a canister call, so the source is replaced rather than the network.
+// The timing it drives is covered in session-identity.test.ts; what matters here
+// is that AuthClient mints once at sign-in and stores what came back. The mock
+// fills in `minted.accountKey` so assertions can name the principal it roots at.
+const minted = vi.hoisted(() => ({
+  accountKey: undefined as SignIdentity | undefined,
+  count: 0,
+  refuse: false,
+}));
+
+vi.mock('../../src/client/session-minter.ts', async () => {
+  const { DelegationChain: Chain, Ed25519KeyIdentity: Key } = await import(
+    '@icp-sdk/core/identity'
+  );
+  const accountKey = Key.generate();
+  minted.accountKey = accountKey;
+  return {
+    SessionMinter: {
+      create: async () => ({
+        mint: async (appPublicKey: Uint8Array) => {
+          minted.count += 1;
+          if (minted.refuse) {
+            const { SessionGoneError } = await import('../../src/client/app-delegation-source.ts');
+            throw new SessionGoneError();
+          }
+          return Chain.create(
+            accountKey,
+            { toDer: () => appPublicKey } as unknown as PublicKey,
+            new Date(Date.now() + 5 * 60 * 1000),
+          );
+        },
+        revoke: async () => {},
+      }),
+    },
+  };
+});
 
 // Swap `PostMessageTransport` for `FakeTransport` so `AuthClient` uses the real
 // `Signer` over an in-memory transport — no window is opened and nothing about
@@ -64,37 +182,27 @@ const DEFAULT_REQUEST_ATTRIBUTES_BODY: JsonRpcBody = {
   result: { data: btoa('hello'), signature: btoa('sig') },
 };
 
-// A delegation-chain response as a conformant signer would build it: delegating
-// to the requested session key, scoped to any requested targets, and expiring
-// within maxTimeToLive — all of which the signer's returned-chain validation
-// (>= 5.6.1) enforces.
-async function conformantSignInBody(params: {
-  publicKey: string;
-  targets?: string[];
-  maxTimeToLive?: string;
-}): Promise<JsonRpcBody> {
-  const to = { toDer: () => fromBase64(params.publicKey) } as unknown as PublicKey;
-  const targets = params.targets?.map((t) => Principal.fromText(t));
-  const ttlMs =
-    params.maxTimeToLive !== undefined
-      ? Number(BigInt(params.maxTimeToLive) / 1_000_000n)
-      : 60 * 60 * 1000;
+// A session-chain response as Internet Identity builds it: a chain to the
+// requested session key, restricted to the Internet Identity canister, and
+// lasting as long as the session the user consented to.
+async function conformantSignInBody(params: { sessionPublicKey: string }): Promise<JsonRpcBody> {
+  const to = { toDer: () => fromBase64(params.sessionPublicKey) } as unknown as PublicKey;
   const chain = await DelegationChain.create(
     Ed25519KeyIdentity.generate(),
     to,
-    new Date(Date.now() + ttlMs),
-    targets ? { targets } : undefined,
+    new Date(Date.now() + 60 * 60 * 1000),
+    { targets: [II_CANISTER] },
   );
   return { result: encodeDelegationChainResponse(chain) };
 }
 
 /**
- * Registers an `icrc34_delegation` handler. By default it returns a chain that
- * delegates to the requested key; pass `body` to force a specific response.
+ * Registers an `ii_session_delegation` handler. By default it returns a session
+ * chain to the requested key; pass `body` to force a specific response.
  */
 function handleSignIn(transport: FakeTransport, body?: JsonRpcBody): void {
   transport.onRequest(async (req) => {
-    if (req.method !== 'icrc34_delegation') return;
+    if (req.method !== 'ii_session_delegation') return;
     if (req.id === undefined || req.id === null) return;
     const resolved = body ?? (await conformantSignInBody(req.params as never));
     return { jsonrpc: '2.0', id: req.id, ...resolved };
@@ -151,15 +259,7 @@ describe('AuthClient', () => {
   it('should use a provided identity as the key for hydration', async () => {
     const identity = Ed25519KeyIdentity.generate();
     const chain = await createTestDelegation(identity);
-    const storage: AuthClientStorage = {
-      remove: vi.fn(),
-      get: vi.fn(async (x) => {
-        if (x === KEY_STORAGE_DELEGATION) return JSON.stringify(chain.toJSON());
-        return null;
-      }),
-      set: vi.fn(),
-    };
-    const client = new AuthClient({ identity, storage });
+    const client = new AuthClient({ identity, sessionStorage: createSessionStorage(chain) });
     const resolved = await client.getIdentity();
     expect(resolved.getPrincipal().isAnonymous()).toBe(false);
   });
@@ -302,18 +402,158 @@ describe('AuthClient signIn', () => {
     await expect(client.signIn()).rejects.toThrow('connection failed');
   });
 
-  it('should forward targets and maxTimeToLive to the delegation request', async () => {
+  it('does not clear a session another tab signed in with', async () => {
+    // Both tabs share localStorage and IndexedDB, so both share the session.
+    const identityStorage = createIdentityStorage();
+    const sessionStorage = createSessionStorage();
+
+    const tabB = new AuthClient({ identityStorage, sessionStorage });
+    handleSignIn(FakeTransport.last());
+    const identityB = (await tabB.signIn()) as SessionIdentity;
+
+    // Signing in replaces whatever session this browser held, so tab B's is now
+    // gone at the canister and storage carries the one tab A just obtained.
+    const tabA = new AuthClient({ identityStorage, sessionStorage });
+    handleSignIn(FakeTransport.last());
+    await tabA.signIn();
+    const sessionA = sessionStorage.get();
+
+    // Tab B keeps using what it holds. Past that delegation's life, so the
+    // request has to mint, and the mint is refused.
+    minted.refuse = true;
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date(Date.now() + 10 * 60 * 1000));
+    await identityB
+      .transformRequest({ body: { arg: new Uint8Array() } } as never)
+      .catch(() => undefined);
+    vi.useRealTimers();
+    minted.refuse = false;
+
+    expect(sessionStorage.get()).toEqual(sessionA);
+    expect(tabA.isAuthenticated()).toBe(true);
+  });
+
+  it('signs with a key nothing can export', async () => {
+    const client = new AuthClient();
+    handleSignIn(FakeTransport.last());
+    const identity = (await client.signIn()) as SessionIdentity;
+
+    // The app key travels to other tabs of this origin, so it has to be a handle
+    // that signs rather than material that can be copied.
+    await expect(identity.sign(new Uint8Array([1, 2, 3]))).resolves.toBeDefined();
+    const key = (identity as unknown as { getKeyPair?: () => CryptoKeyPair }).getKeyPair?.();
+    expect(key?.privateKey.extractable ?? false).toBe(false);
+  });
+
+  it('mints inside the ceremony, so the first request after it does not wait', async () => {
+    minted.count = 0;
+    const client = new AuthClient();
+    handleSignIn(FakeTransport.last());
+
+    const identity = await client.signIn();
+    expect(minted.count).toBe(1);
+
+    // The identity already holds a delegation, so signing a request needs no
+    // second mint.
+    await identity.transformRequest({ body: { arg: new Uint8Array() } } as never);
+
+    expect(minted.count).toBe(1);
+  });
+
+  it('stores the account key from the mint, not the session chain root', async () => {
+    const sessionStorage = createSessionStorage();
+    const client = new AuthClient({ sessionStorage });
+    handleSignIn(FakeTransport.last());
+
+    await client.signIn();
+
+    const stored = sessionStorage.get();
+    // The chain is rooted at the session's own key; the account key comes back
+    // from the mint and is the only record of who an app sees as the caller.
+    expect(stored?.accountKey).toEqual(minted.accountKey?.getPublicKey().toDer());
+    expect(stored?.accountKey).not.toEqual(stored?.chain.publicKey);
+  });
+
+  it('hands back an identity whose principal is the account', async () => {
+    const client = new AuthClient();
+    handleSignIn(FakeTransport.last());
+
+    const identity = await client.signIn();
+
+    expect(identity.getPrincipal().toText()).toBe(minted.accountKey?.getPrincipal().toText());
+  });
+
+  it('reports a restored session synchronously, before anything async runs', async () => {
+    const identityStorage = createIdentityStorage();
+    const sessionStorage = createSessionStorage();
+    const first = new AuthClient({ identityStorage, sessionStorage });
+    handleSignIn(FakeTransport.last());
+    await first.signIn();
+    minted.count = 0;
+
+    // A second client over the same storage is a reload. isAuthenticated() reads
+    // the stored session and nothing else: no mint, no network, no IndexedDB.
+    const reloaded = new AuthClient({ identityStorage, sessionStorage });
+
+    expect(reloaded.isAuthenticated()).toBe(true);
+    expect(minted.count).toBe(0);
+  });
+
+  it('stops reporting a session the canister has dropped', async () => {
+    const sessionStorage = createSessionStorage();
+    const client = new AuthClient({ sessionStorage });
+    handleSignIn(FakeTransport.last());
+    const identity = await client.signIn();
+    expect(client.isAuthenticated()).toBe(true);
+
+    // Past the session's own end, so the next mint is refused as terminal. A
+    // revocation reaches the client the same way: through a failed mint.
+    vi.setSystemTime(new Date(Date.now() + 2 * 60 * 60 * 1000));
+    await identity.transformRequest({ body: { arg: new Uint8Array() } } as never).catch(() => {});
+
+    expect(client.isAuthenticated()).toBe(false);
+  });
+
+  it('answers for a restored session without minting', async () => {
+    const identityStorage = createIdentityStorage();
+    const sessionStorage = createSessionStorage();
+    const first = new AuthClient({ identityStorage, sessionStorage });
+    handleSignIn(FakeTransport.last());
+    await first.signIn();
+
+    // A second client over the same storage is a reload.
+    const restored = new AuthClient({ identityStorage, sessionStorage });
+    const identity = await restored.getIdentity();
+
+    expect(identity.getPrincipal().toText()).toBe(minted.accountKey?.getPrincipal().toText());
+  });
+
+  it('asks for a session, and not for what it cannot be given', async () => {
     const client = new AuthClient();
     const transport = FakeTransport.last();
     handleSignIn(transport);
 
-    const target = Principal.fromText('aaaaa-aa');
-    await client.signIn({ targets: [target], maxTimeToLive: 1_000_000n });
+    await client.signIn();
 
     const req = transport.requests[0];
-    expect(req.method).toBe('icrc34_delegation');
-    expect(req.params?.targets).toEqual([target.toText()]);
-    expect(req.params?.maxTimeToLive).toBe('1000000');
+    expect(req.method).toBe('ii_session_delegation');
+    expect(req.params?.sessionPublicKey).toBeTypeOf('string');
+    // An access level is the user's alone, and an app delegation's targets are
+    // the canister's, so neither is something to ask for here.
+    expect(req.params?.targets).toBeUndefined();
+  });
+
+  it('forwards a requested session ceiling, and omits it when absent', async () => {
+    const client = new AuthClient();
+    handleSignIn(FakeTransport.last());
+    await client.signIn({ maxTimeToLive: 3_600_000_000_000n });
+    expect(FakeTransport.last().requests[0]?.params?.maxTimeToLive).toBe('3600000000000');
+
+    FakeTransport.reset();
+    const plain = new AuthClient();
+    handleSignIn(FakeTransport.last());
+    await plain.signIn();
+    expect(FakeTransport.last().requests[0]?.params?.maxTimeToLive).toBeUndefined();
   });
 
   it('should forward derivationOrigin on every request as icrc95DerivationOrigin', async () => {
@@ -326,39 +566,37 @@ describe('AuthClient signIn', () => {
     expect(transport.requests[0].params?.icrc95DerivationOrigin).toBe('https://example.com');
   });
 
-  it('should persist delegation and key after sign-in', async () => {
-    const storage: AuthClientStorage = {
-      remove: vi.fn(),
-      get: vi.fn().mockResolvedValue(null),
-      set: vi.fn(),
-    };
-    const client = new AuthClient({ storage });
+  it('should persist the delegation and create a session identity on sign-in', async () => {
+    const identityStorage = createIdentityStorage();
+    const sessionStorage = createSessionStorage();
+    const client = new AuthClient({ identityStorage, sessionStorage });
     handleSignIn(FakeTransport.last());
     await client.signIn();
 
-    expect(storage.set).toHaveBeenCalledWith(KEY_STORAGE_DELEGATION, expect.any(String));
-    expect(storage.set).toHaveBeenCalledWith(KEY_STORAGE_KEY, expect.anything());
+    expect(identityStorage.create).toHaveBeenCalledTimes(1);
+    expect(sessionStorage.set).toHaveBeenCalledWith(
+      expect.objectContaining({ chain: expect.any(DelegationChain) }),
+    );
   });
 
-  it('should generate a fresh key for each sign-in', async () => {
-    const storedKeys: unknown[] = [];
-    const storage: AuthClientStorage = {
-      remove: vi.fn(),
-      get: vi.fn().mockResolvedValue(null),
-      set: vi.fn(async (k, v) => {
-        if (k === KEY_STORAGE_KEY) storedKeys.push(v);
-      }),
-    };
-    const client = new AuthClient({ storage, keyType: 'Ed25519' });
+  it('should create a fresh identity for each sign-in', async () => {
+    const identityStorage = createIdentityStorage();
+    const client = new AuthClient({
+      identityStorage,
+      sessionStorage: createSessionStorage(),
+    });
     handleSignIn(FakeTransport.last());
     await client.signIn();
     await client.signIn();
 
-    expect(storedKeys).toHaveLength(2);
-    expect(storedKeys[0]).not.toEqual(storedKeys[1]);
+    expect(identityStorage.create).toHaveBeenCalledTimes(2);
+    expect(identityStorage.created).toHaveLength(2);
+    expect(identityStorage.created[0].getPrincipal().toText()).not.toBe(
+      identityStorage.created[1].getPrincipal().toText(),
+    );
   });
 
-  it('should set the localStorage expiration flag after sign-in', async () => {
+  it('reports authenticated only after a successful sign-in', async () => {
     const client = new AuthClient({ idleOptions: { disableIdle: true } });
     handleSignIn(FakeTransport.last());
     expect(client.isAuthenticated()).toBe(false);
@@ -366,7 +604,7 @@ describe('AuthClient signIn', () => {
     expect(client.isAuthenticated()).toBe(true);
   });
 
-  it('should clear the localStorage expiration flag on sign-out', async () => {
+  it('reports unauthenticated after sign-out', async () => {
     const client = new AuthClient({ idleOptions: { disableIdle: true } });
     handleSignIn(FakeTransport.last());
     await client.signIn();
@@ -374,38 +612,61 @@ describe('AuthClient signIn', () => {
     await client.signOut();
     expect(client.isAuthenticated()).toBe(false);
   });
+
+  it('navigates to a same-origin returnTo after sign-in', async () => {
+    vi.stubGlobal('location', {
+      reload: vi.fn(),
+      replace: vi.fn(),
+      href: 'http://localhost/app',
+      origin: 'http://localhost',
+    });
+    const client = new AuthClient();
+    handleSignIn(FakeTransport.last());
+
+    await client.signIn({ returnTo: '/next' });
+
+    expect(window.location.replace).toHaveBeenCalledWith('http://localhost/next');
+  });
+
+  it('ignores a cross-origin returnTo', async () => {
+    vi.stubGlobal('location', {
+      reload: vi.fn(),
+      replace: vi.fn(),
+      href: 'http://localhost/app',
+      origin: 'http://localhost',
+    });
+    const client = new AuthClient();
+    handleSignIn(FakeTransport.last());
+
+    await client.signIn({ returnTo: 'https://evil.example/phish' });
+
+    expect(window.location.replace).not.toHaveBeenCalled();
+  });
 });
 
 describe('AuthClient idle behavior', () => {
   it('should sign out after idle and reload the window by default', async () => {
-    const storage: AuthClientStorage = {
-      remove: vi.fn(),
-      get: vi.fn().mockResolvedValue(null),
-      set: vi.fn(),
-    };
+    const identityStorage = createIdentityStorage();
     const client = new AuthClient({
-      storage,
+      identityStorage,
       idleOptions: { idleTimeout: 1000 },
     });
     handleSignIn(FakeTransport.last());
     await client.signIn();
 
-    expect(storage.remove).not.toHaveBeenCalled();
+    expect(identityStorage.remove).not.toHaveBeenCalled();
 
     await new Promise((r) => setTimeout(r, 1100));
 
-    expect(storage.remove).toHaveBeenCalled();
+    expect(identityStorage.remove).toHaveBeenCalled();
     expect(window.location.reload).toHaveBeenCalled();
     expect(client.isAuthenticated()).toBe(false);
   });
 
   it('does not reload when idle sign-out fails (would otherwise restore the session)', async () => {
-    const storage: AuthClientStorage = {
-      remove: vi.fn().mockRejectedValue(new Error('storage unavailable')),
-      get: vi.fn().mockResolvedValue(null),
-      set: vi.fn(),
-    };
-    const client = new AuthClient({ storage, idleOptions: { idleTimeout: 1000 } });
+    const identityStorage = createIdentityStorage();
+    identityStorage.remove = vi.fn().mockRejectedValue(new Error('storage unavailable'));
+    const client = new AuthClient({ identityStorage, idleOptions: { idleTimeout: 1000 } });
     handleSignIn(FakeTransport.last());
     await client.signIn();
 
@@ -413,18 +674,14 @@ describe('AuthClient idle behavior', () => {
 
     // Teardown was attempted but failed; reloading now would `#hydrate` the
     // still-valid session, so the callback must swallow the error and not reload.
-    expect(storage.remove).toHaveBeenCalled();
+    expect(identityStorage.remove).toHaveBeenCalled();
     expect(window.location.reload).not.toHaveBeenCalled();
   });
 
   it('should not reload the page if the default callback is disabled', async () => {
-    const storage: AuthClientStorage = {
-      remove: vi.fn(),
-      get: vi.fn().mockResolvedValue(null),
-      set: vi.fn(),
-    };
+    const identityStorage = createIdentityStorage();
     const client = new AuthClient({
-      storage,
+      identityStorage,
       idleOptions: { idleTimeout: 1000, disableDefaultIdleCallback: true },
     });
     handleSignIn(FakeTransport.last());
@@ -432,7 +689,7 @@ describe('AuthClient idle behavior', () => {
 
     await new Promise((r) => setTimeout(r, 1100));
 
-    expect(storage.remove).not.toHaveBeenCalled();
+    expect(identityStorage.remove).not.toHaveBeenCalled();
     expect(window.location.reload).not.toHaveBeenCalled();
   });
 
@@ -450,13 +707,21 @@ describe('AuthClient idle behavior', () => {
     expect(window.location.reload).not.toHaveBeenCalled();
     expect(idleCb).toHaveBeenCalled();
   });
-});
 
-describe('IdbStorage', () => {
-  it('should handle get and set', async () => {
-    const storage = new IdbStorage();
-    await storage.set('testKey', 'testValue');
-    expect(await storage.get('testKey')).toBe('testValue');
+  it('does not reload on idle when a listener is subscribed', async () => {
+    // Default storage, so idle sign-out clears it and notifies subscribers.
+    const client = new AuthClient({ idleOptions: { idleTimeout: 1000 } });
+    handleSignIn(FakeTransport.last());
+    await client.signIn();
+    const listener = vi.fn();
+    client.subscribe(listener);
+
+    await new Promise((r) => setTimeout(r, 1100));
+
+    // A subscribed app re-renders from the notification instead of reloading.
+    expect(window.location.reload).not.toHaveBeenCalled();
+    await vi.waitFor(() => expect(listener).toHaveBeenCalled());
+    expect(client.isAuthenticated()).toBe(false);
   });
 });
 
@@ -466,102 +731,154 @@ describe('Session restoration', () => {
     '4bbff6b476463558d7be318aa342d1a97778d70833038680187950e9e02486c0d1fa89134802051c8b5d4e53c08b87381b87097bca4c4f348611eb8ce6c91809',
   ];
 
-  it('should restore an existing Ed25519Key and delegation', async () => {
+  it('should restore an existing identity and delegation', async () => {
     vi.setSystemTime(new Date('2020-01-01T00:00:00.000Z'));
 
     const expiration = new Date('2020-01-03T00:00:00.000Z');
     const key = Ed25519KeyIdentity.fromJSON(JSON.stringify(testSecrets));
     const chain = await createTestDelegation(key, expiration);
 
-    const storage: AuthClientStorage = {
-      remove: vi.fn(),
-      get: vi.fn(async (x) => {
-        if (x === KEY_STORAGE_DELEGATION) return JSON.stringify(chain.toJSON());
-        if (x === KEY_STORAGE_KEY) return JSON.stringify(testSecrets);
-        return null;
-      }),
-      set: vi.fn(),
-    };
-
-    const client = new AuthClient({ storage });
+    const client = new AuthClient({
+      identityStorage: createIdentityStorage(key),
+      sessionStorage: createSessionStorage(chain),
+    });
     const identity = await client.getIdentity();
     expect(identity.getPrincipal().isAnonymous()).toBe(false);
   });
 
-  it('should remain anonymous with a key but no delegation', async () => {
+  it('should remain anonymous with an identity but no delegation', async () => {
     vi.setSystemTime(new Date('2020-01-01T00:00:00.000Z'));
 
-    const storage: AuthClientStorage = {
-      remove: vi.fn(),
-      get: vi.fn(async (x) => {
-        if (x === KEY_STORAGE_KEY) return JSON.stringify(testSecrets);
-        return null;
-      }),
-      set: vi.fn(),
-    };
-
-    const client = new AuthClient({ storage });
+    const key = Ed25519KeyIdentity.fromJSON(JSON.stringify(testSecrets));
+    const client = new AuthClient({
+      identityStorage: createIdentityStorage(key),
+      sessionStorage: createSessionStorage(null),
+    });
     const identity = await client.getIdentity();
     expect(identity.getPrincipal().isAnonymous()).toBe(true);
   });
 
-  it('should clear storage when the delegation has expired', async () => {
+  it('should clear the delegation when it has expired', async () => {
     vi.setSystemTime(new Date('2020-01-01T00:00:00.000Z'));
 
     const expiration = new Date('2019-12-30T00:00:00.000Z');
     const key = Ed25519KeyIdentity.fromJSON(JSON.stringify(testSecrets));
     const chain = await createTestDelegation(key, expiration);
 
-    const fakeStore: Record<string, string> = {};
-    fakeStore[KEY_STORAGE_DELEGATION] = JSON.stringify(chain.toJSON());
-    fakeStore[KEY_STORAGE_KEY] = JSON.stringify(testSecrets);
-
-    const storage: AuthClientStorage = {
-      remove: vi.fn(async (x) => {
-        delete fakeStore[x];
-      }),
-      get: vi.fn(async (x) => fakeStore[x] ?? null),
-      set: vi.fn(),
-    };
-
-    const client = new AuthClient({ storage });
+    const sessionStorage = createSessionStorage(chain);
+    const client = new AuthClient({
+      identityStorage: createIdentityStorage(key),
+      sessionStorage,
+    });
     const identity = await client.getIdentity();
     expect(identity.getPrincipal().isAnonymous()).toBe(true);
-    expect(storage.remove).toHaveBeenCalled();
+    expect(sessionStorage.remove).toHaveBeenCalled();
+  });
+
+  it('discards the session when the stored key does not match the delegation', async () => {
+    vi.setSystemTime(new Date('2020-01-01T00:00:00.000Z'));
+
+    // A valid delegation for one key, but a different key persisted — the shape
+    // an abandoned redirect re-auth leaves behind (new key beside old
+    // delegation). Assembling them would sign with a key the delegation does
+    // not authorize, so the session must be discarded, not restored.
+    const storedKey = Ed25519KeyIdentity.generate();
+    const otherKey = Ed25519KeyIdentity.generate();
+    const chainForOther = await createTestDelegation(otherKey);
+
+    const sessionStorage = createSessionStorage(chainForOther);
+    const client = new AuthClient({
+      identityStorage: createIdentityStorage(storedKey),
+      sessionStorage,
+    });
+    const identity = await client.getIdentity();
+    expect(identity.getPrincipal().isAnonymous()).toBe(true);
+    expect(sessionStorage.remove).toHaveBeenCalled();
   });
 });
 
-describe('Migration from localStorage', () => {
-  it('should proceed normally if no values are stored in localStorage', async () => {
-    const storage: AuthClientStorage = {
-      remove: vi.fn(),
-      get: vi.fn().mockResolvedValue(null),
-      set: vi.fn(),
-    };
+describe('AuthClient subscribe', () => {
+  it('notifies subscribers and re-derives identity on an external sign-in', async () => {
+    const key = Ed25519KeyIdentity.generate();
+    const chain = await createTestDelegation(key);
+    const ctl = controllableSessionStorage(null);
+    // A provided identity lets #reconcile derive the session without an async
+    // identity-storage read.
+    const client = new AuthClient({ identity: key, sessionStorage: ctl.storage });
+    await client.getIdentity();
+    expect(client.isAuthenticated()).toBe(false);
 
-    new AuthClient({ storage });
-    await new Promise((r) => setTimeout(r, 0)); // wait for hydration
+    const listener = vi.fn();
+    client.subscribe(listener);
+    ctl.external(chain); // another tab signs in
 
-    // No migration should have occurred (no set calls for delegation/key)
-    expect(storage.set).not.toHaveBeenCalled();
+    await vi.waitFor(() => expect(listener).toHaveBeenCalled());
+    expect(client.isAuthenticated()).toBe(true);
+    expect((await client.getIdentity()).getPrincipal().isAnonymous()).toBe(false);
   });
 
-  it('should migrate storage from localStorage', async () => {
-    const legacyStorage = new LocalStorage();
-    const storage: AuthClientStorage = {
-      remove: vi.fn(),
-      get: vi.fn().mockResolvedValue(null),
-      set: vi.fn(),
-    };
+  it('resets to anonymous on an external sign-out', async () => {
+    const key = Ed25519KeyIdentity.generate();
+    const chain = await createTestDelegation(key);
+    const ctl = controllableSessionStorage(chain);
+    const client = new AuthClient({ identity: key, sessionStorage: ctl.storage });
+    await client.getIdentity();
+    expect(client.isAuthenticated()).toBe(true);
 
-    await legacyStorage.set(KEY_STORAGE_DELEGATION, 'test');
-    await legacyStorage.set(KEY_STORAGE_KEY, 'key');
+    const listener = vi.fn();
+    client.subscribe(listener);
+    ctl.external(null); // another tab signs out
 
-    new AuthClient({ storage });
-    await new Promise((r) => setTimeout(r, 0)); // wait for hydration
+    await vi.waitFor(() => expect(listener).toHaveBeenCalled());
+    expect(client.isAuthenticated()).toBe(false);
+    expect((await client.getIdentity()).getPrincipal().isAnonymous()).toBe(true);
+  });
 
-    expect(storage.set).toHaveBeenCalledWith(KEY_STORAGE_DELEGATION, 'test');
-    expect(storage.set).toHaveBeenCalledWith(KEY_STORAGE_KEY, 'key');
+  it('stops delivering after unsubscribe', async () => {
+    const ctl = controllableSessionStorage(null);
+    const client = new AuthClient({ sessionStorage: ctl.storage });
+    const listener = vi.fn();
+    const unsubscribe = client.subscribe(listener);
+
+    unsubscribe();
+    ctl.external(await createTestDelegation(Ed25519KeyIdentity.generate()));
+    await new Promise((r) => setTimeout(r, 0));
+
+    expect(listener).not.toHaveBeenCalled();
+  });
+
+  it('does not watch storage or change identity until an app subscribes', async () => {
+    const ctl = controllableSessionStorage(null);
+    const subscribeSpy = vi.spyOn(ctl.storage, 'subscribe');
+    const client = new AuthClient({ sessionStorage: ctl.storage });
+    await client.getIdentity();
+
+    // With no listener, the client must not watch storage, so an external
+    // sign-in cannot flip its identity out from under an app that never opted in.
+    expect(subscribeSpy).not.toHaveBeenCalled();
+    ctl.external(await createTestDelegation(Ed25519KeyIdentity.generate()));
+    await new Promise((r) => setTimeout(r, 0));
+    expect((await client.getIdentity()).getPrincipal().isAnonymous()).toBe(true);
+
+    // Registering a listener is what opens the storage subscription.
+    client.subscribe(() => {});
+    expect(subscribeSpy).toHaveBeenCalledOnce();
+  });
+
+  it('notifies subscribers on a local sign-out (via the storage)', async () => {
+    // Default storage, so signOut()'s sessionStorage.remove() fires the
+    // storage, which drives reconcile → notify — no direct notify in signOut.
+    const client = new AuthClient({ idleOptions: { disableIdle: true } });
+    handleSignIn(FakeTransport.last());
+    await client.signIn();
+    expect(client.isAuthenticated()).toBe(true);
+
+    const listener = vi.fn();
+    client.subscribe(listener);
+    await client.signOut();
+
+    await vi.waitFor(() => expect(listener).toHaveBeenCalled());
+    expect(client.isAuthenticated()).toBe(false);
   });
 });
 
