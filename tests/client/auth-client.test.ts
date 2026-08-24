@@ -102,6 +102,8 @@ const minted = vi.hoisted(() => ({
   accountKey: undefined as SignIdentity | undefined,
   count: 0,
   refuse: false,
+  revoked: 0,
+  revokeFails: false,
 }));
 
 vi.mock('../../src/client/session-minter.ts', async () => {
@@ -125,7 +127,10 @@ vi.mock('../../src/client/session-minter.ts', async () => {
             new Date(Date.now() + 5 * 60 * 1000),
           );
         },
-        revoke: async () => {},
+        revoke: async () => {
+          if (minted.revokeFails) throw new Error('offline');
+          minted.revoked += 1;
+        },
       }),
     },
   };
@@ -481,6 +486,45 @@ describe('AuthClient signIn', () => {
     const identity = await client.signIn();
 
     expect(identity.getPrincipal().toText()).toBe(minted.accountKey?.getPrincipal().toText());
+  });
+
+  it('ends the session at the canister before clearing what it holds', async () => {
+    minted.revoked = 0;
+    const sessionStorage = createSessionStorage();
+    const client = new AuthClient({ sessionStorage });
+    handleSignIn(FakeTransport.last());
+    await client.signIn();
+
+    await client.signOut();
+
+    expect(minted.revoked).toBe(1);
+    expect(sessionStorage.get()).toBeNull();
+    expect(client.isAuthenticated()).toBe(false);
+  });
+
+  it('signs out locally even when the canister cannot be reached', async () => {
+    minted.revokeFails = true;
+    const sessionStorage = createSessionStorage();
+    const client = new AuthClient({ sessionStorage });
+    handleSignIn(FakeTransport.last());
+    await client.signIn();
+
+    // A user who pressed sign out has to end up signed out on this device,
+    // whatever the network did.
+    await expect(client.signOut()).resolves.toBeUndefined();
+
+    expect(sessionStorage.get()).toBeNull();
+    expect(client.isAuthenticated()).toBe(false);
+    minted.revokeFails = false;
+  });
+
+  it('has nothing to revoke when no session is held', async () => {
+    minted.revoked = 0;
+    const client = new AuthClient({ sessionStorage: createSessionStorage() });
+
+    await client.signOut();
+
+    expect(minted.revoked).toBe(0);
   });
 
   it('reports a restored session synchronously, before anything async runs', async () => {

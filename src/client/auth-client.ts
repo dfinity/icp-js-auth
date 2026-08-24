@@ -579,6 +579,12 @@ export class AuthClient {
     // Wait for the constructor's session restore: hydration racing the
     // deletion below could re-populate the identity from already-read state.
     await this.#init();
+
+    // End the session at the canister first, so access stops within one app
+    // delegation's lifetime instead of running to the session's own expiry.
+    // Clearing local state only stops this browser using what it holds.
+    await this.#revokeSession();
+
     this.#sessionStorage.remove();
     await this.#identityStorage.remove();
 
@@ -693,6 +699,28 @@ export class AuthClient {
 
   // Derives #identity from a signing key and delegation chain. A PartialIdentity
   // (public key only, no signing capability) yields a PartialDelegationIdentity.
+  /**
+   * Asks the canister to delete the session, and gives up quietly if it cannot.
+   *
+   * A failure here must not stop a sign-out: a user who pressed it has to end up
+   * signed out on the device in front of them, and the session expires on its own
+   * either way. Revocation is what makes a sign-out reach the delegations already
+   * issued, so it is attempted first and its outcome does not change the rest.
+   */
+  async #revokeSession(): Promise<void> {
+    const session = this.#sessionStorage.get();
+    const key = this.#options.identity ?? (await this.#identityStorage.get());
+    if (session === null || key === null) return;
+
+    try {
+      const minter = await this.#minterFor(key, session.chain);
+      await minter.revoke();
+    } catch {
+      // Offline, or a session the canister no longer has. Either way there is
+      // nothing left to do here and nothing worth telling the caller.
+    }
+  }
+
   /** An agent pointed at Internet Identity, signing as the session. */
   #minterFor(sessionKey: SignIdentity, sessionChain: DelegationChain): Promise<SessionMinter> {
     return SessionMinter.create({
