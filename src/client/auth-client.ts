@@ -11,6 +11,7 @@ import {
 import type { Principal } from '@icp-sdk/core/principal';
 import { Signer } from '@icp-sdk/signer';
 import { PostMessageTransport, UrlTransport } from '@icp-sdk/signer/web';
+import { fromBase64, toBase64 } from './base64.js';
 import { IdleManager, type IdleManagerOptions } from './idle-manager.js';
 import {
   type AuthClientStorage,
@@ -632,37 +633,6 @@ export class AuthClient {
       });
     }
   }
-}
-
-/**
- * Encodes a Uint8Array to a base64 string.
- * @param bytes - The bytes to encode.
- */
-function toBase64(bytes: Uint8Array): string {
-  if ('toBase64' in bytes && typeof bytes.toBase64 === 'function') {
-    return bytes.toBase64();
-  }
-  let binary = '';
-  for (let i = 0; i < bytes.byteLength; i++) {
-    binary += String.fromCharCode(bytes[i]);
-  }
-  return globalThis.btoa(binary);
-}
-
-/**
- * Decodes a base64 string to a Uint8Array.
- * @param str - The base64-encoded string.
- */
-function fromBase64(str: string): Uint8Array {
-  if ('fromBase64' in Uint8Array && typeof Uint8Array.fromBase64 === 'function') {
-    return Uint8Array.fromBase64(str);
-  }
-  const binary = globalThis.atob(str);
-  const bytes = new Uint8Array(binary.length);
-  for (let i = 0; i < binary.length; i++) {
-    bytes[i] = binary.charCodeAt(i);
-  }
-  return bytes;
 }
 
 /**
