@@ -938,10 +938,18 @@ export class AuthClient {
     session: Session,
     initial?: AppCredential,
   ): SessionIdentity {
-    return new SessionIdentity({
+    // Filled in below, so the hook can tell whether the identity it belongs to is
+    // still the one this client presents.
+    const mine: { identity?: SessionIdentity } = {};
+    const identity = new SessionIdentity({
       newKey: this.#newAppKey,
       withLock: (run) => withLock(MINT_LOCK, run),
       onMinted: (credential) => {
+        // A mint that started before this identity was displaced still lands
+        // here, and its credential is rooted at a session this client no longer
+        // holds. Offering it would have every other tab adopt something it has
+        // to refuse, leaving it with nothing.
+        if (this.#identity !== mine.identity) return;
         // Offer it to the tabs of this origin, so none of them spends a call on
         // what this one just obtained.
         this.#shared = credential;
@@ -977,6 +985,8 @@ export class AuthClient {
         this.#notify();
       },
     });
+    mine.identity = identity;
+    return identity;
   }
 
   #registerDefaultIdleCallback() {
