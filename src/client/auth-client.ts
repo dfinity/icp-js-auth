@@ -220,6 +220,8 @@ export interface SignedAttributes {
  */
 export class AuthClient {
   #identity: Identity | PartialIdentity = new AnonymousIdentity();
+  /** The session the identity on show was built for, if it was built from one. */
+  #presenting: Session | undefined;
   #identityStorage: IdentityStorage;
   readonly #identityCanisterId: Principal;
   #sessionStorage: SessionStorage;
@@ -477,7 +479,7 @@ export class AuthClient {
     // already has.
     this.#shared = credential;
     this.#offerShared();
-    this.#setIdentity(this.#sessionIdentity(minter, session, credential));
+    this.#setIdentity(this.#sessionIdentity(minter, session, credential), session);
 
     const idleOptions = this.#options?.idleOptions;
     if (!this.idleManager && !idleOptions?.disableIdle) {
@@ -760,6 +762,7 @@ export class AuthClient {
         // not fit this account is refused by the identity.
         await this.#askForCredential(),
       ),
+      session,
     );
 
     if (!this.#options.idleOptions?.disableIdle && !this.idleManager) {
@@ -774,6 +777,19 @@ export class AuthClient {
   // is paired with the persisted signing identity.
   async #reconcile(): Promise<void> {
     const session = this.#sessionStorage.get();
+    // A write on this tab notifies this tab, so signing in lands here straight
+    // after it has already built the identity for that session — and rebuilding
+    // it would throw away the credential the ceremony just minted, since nothing
+    // answers the ask for one in a single tab. Reconcile is for a change made
+    // elsewhere; the session it already presents is not one.
+    if (
+      session !== null &&
+      this.#presenting !== undefined &&
+      isSameSession(session, this.#presenting) &&
+      this.#identity instanceof SessionIdentity
+    ) {
+      return;
+    }
     if (session === null || !isDelegationValid(session.chain)) {
       this.#identity = new AnonymousIdentity();
       this.#notify();
@@ -804,6 +820,7 @@ export class AuthClient {
         // not fit this account is refused by the identity.
         await this.#askForCredential(),
       ),
+      session,
     );
     this.#notify();
   }
@@ -926,11 +943,12 @@ export class AuthClient {
    * armed refresh. Dropping the reference without disposing leaves that timer to
    * fire and record the session as used on behalf of an object nothing can reach.
    */
-  #setIdentity(next: Identity): void {
+  #setIdentity(next: Identity, session?: Session): void {
     if (this.#identity instanceof SessionIdentity && this.#identity !== next) {
       this.#identity.dispose();
     }
     this.#identity = next;
+    this.#presenting = session;
   }
 
   #sessionIdentity(
