@@ -243,6 +243,8 @@ export class AuthClient {
   #shared: AppCredential | undefined;
   // Set while a tab is waiting out the inherit window for an answer.
   #offered: ((credential: AppCredential) => void) | undefined;
+  /** Ceremonies in flight, which suppress the foreground refresh. */
+  #ceremonies = 0;
   #initPromise: Promise<void> | null = null;
   // Listeners registered via subscribe(), and the live subscription to the
   // delegation storage that drives them. The storage subscription is opened
@@ -391,6 +393,19 @@ export class AuthClient {
    * }
    */
   async signIn(options?: AuthClientSignInOptions): Promise<Identity> {
+    // A ceremony backgrounds this tab and foregrounds it again on its way back,
+    // so without this the return fires a foreground refresh against the identity
+    // this call is in the middle of replacing: a mint spent on a session being
+    // discarded, and its credential offered to the other tabs as though current.
+    this.#ceremonies += 1;
+    try {
+      return await this.#runSignIn(options);
+    } finally {
+      this.#ceremonies -= 1;
+    }
+  }
+
+  async #runSignIn(options?: AuthClientSignInOptions): Promise<Identity> {
     // Journal returnTo up front so it survives a 'redirect' round-trip, and only
     // when provided so the flow's journal is unchanged for callers that omit it.
     // Validate to a same-origin URL *inside* the producer, so only a safe href
@@ -860,12 +875,16 @@ export class AuthClient {
    * leaves the delegation in place for the next one to retry.
    */
   async #refreshInForeground(): Promise<void> {
+    if (this.#ceremonies > 0) return;
     // `pageshow` fires on the load itself, and this is what makes a page load
     // mint: without waiting for the restore, the load's own event finds an
     // anonymous identity and the first request pays for the mint instead.
     await this.#init();
+    // Re-checked: a ceremony can start while the restore is resolving.
+    if (this.#ceremonies > 0) return;
     const identity = this.#identity;
-    if (identity instanceof SessionIdentity) await identity.refresh();
+    // Nothing asked for this, so a failure is not reported. ERR-4.
+    if (identity instanceof SessionIdentity) await identity.refresh().catch(() => undefined);
   }
 
   /**
