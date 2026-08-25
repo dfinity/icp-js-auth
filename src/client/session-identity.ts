@@ -155,7 +155,10 @@ export class SessionIdentity extends DelegationIdentity {
   async refresh(): Promise<void> {
     const current = this.#held.current;
     if (current && this.#msLeft(current.chain) > PRE_MINT_THRESHOLD_MS) return;
-    await this.#mint().catch(() => undefined);
+    // Rejects, so a caller that asked for this knows it did not happen. A caller
+    // minting on a schedule of its own rather than on request swallows it, which
+    // is where ERR-4's silence belongs.
+    await this.#mint();
   }
 
   /** Drops the scheduled refresh. */
