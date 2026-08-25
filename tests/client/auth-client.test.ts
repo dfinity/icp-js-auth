@@ -397,6 +397,24 @@ describe('AuthClient', () => {
 });
 
 describe('AuthClient signIn', () => {
+  it('keeps the credential the ceremony minted when a subscriber is listening', async () => {
+    const client = new AuthClient();
+    // Subscribing is what registers the storage listener, and a write on this tab
+    // notifies this tab, so signing in reconciles against its own write.
+    const unsubscribe = client.subscribe(() => undefined);
+    handleSignIn(FakeTransport.last());
+
+    const identity = (await client.signIn()) as SessionIdentity;
+    // Let the notification from its own write, and the ask it would make, run out.
+    await new Promise((resolve) => setTimeout(resolve, 400));
+
+    expect(identity.getDelegation().delegations.length).toBeGreaterThan(0);
+    const current = (await client.getIdentity()) as SessionIdentity;
+    expect(current.getDelegation().delegations.length).toBeGreaterThan(0);
+    unsubscribe();
+    client.dispose();
+  });
+
   it('should return the authenticated identity', async () => {
     const client = new AuthClient();
     handleSignIn(FakeTransport.last());

@@ -156,6 +156,17 @@ describe('SessionIdentity', () => {
     expect(mint).toHaveBeenCalledTimes(1);
   });
 
+  it('refresh() reports a mint that failed, rather than resolving quietly', async () => {
+    const { mint, identity, request } = harness();
+    await request();
+    identity.dispose();
+    mint.mockRejectedValueOnce(new Error('boundary node unreachable'));
+
+    await vi.advanceTimersByTimeAsync(TTL - 12_000);
+
+    await expect(identity.refresh()).rejects.toThrow('boundary node unreachable');
+  });
+
   it('reports a gone session once, and only for NoMatchingSession', async () => {
     const onSessionGone = vi.fn();
     const { mint, request } = harness({ onSessionGone });
