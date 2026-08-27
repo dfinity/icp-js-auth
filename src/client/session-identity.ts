@@ -117,7 +117,15 @@ export class SessionIdentity extends DelegationIdentity {
     this.#newKey = options.newKey;
     this.#onSessionGone = options.onSessionGone;
     this.#sessionExpiresAtMs = options.sessionExpiresAtMs;
-    if (options.initial) this.#adopt(options.initial);
+    // Checked like any other credential from outside. This started as the
+    // credential the sign-in ceremony had just minted itself, and now also
+    // carries one offered by another tab, so the two suppliers do not have the
+    // same trust. A credential that is not for this account and key is dropped
+    // rather than refused loudly: sharing is an optimisation, and minting for
+    // ourselves is what a tab that hears nothing does anyway.
+    if (options.initial && this.#isForThisSession(options.initial)) {
+      this.#adopt(options.initial);
+    }
   }
 
   override getDelegation(): DelegationChain {
@@ -207,6 +215,12 @@ export class SessionIdentity extends DelegationIdentity {
       throw new SessionGoneError('The session has expired');
     }
 
+    // What is held before the awaits below, so a credential adopted while this
+    // mint was in flight is not overwritten by it. That credential came from
+    // outside and is what this origin has already settled on; this mint was
+    // started before there was any sign one was coming.
+    const before = this.#held.current;
+
     const key = await this.#newKey();
     let chain: DelegationChain;
     try {
@@ -219,6 +233,14 @@ export class SessionIdentity extends DelegationIdentity {
     const credential = { key, chain };
     if (!this.#isForThisSession(credential)) {
       throw new Error('The minted delegation is not for this account and key');
+    }
+
+    const adopted = this.#held.current;
+    if (adopted !== undefined && adopted !== before) {
+      // Returned rather than the freshly minted one, so the caller signs with
+      // what this origin holds. Both are valid for this session; only one of
+      // them is the one the other tabs are using.
+      return adopted;
     }
 
     this.#adopt(credential);
