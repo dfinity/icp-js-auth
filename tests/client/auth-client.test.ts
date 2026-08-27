@@ -425,6 +425,32 @@ describe('AuthClient signIn', () => {
     await expect(client.signIn()).rejects.toThrow('connection failed');
   });
 
+  it('refuses a session chain that delegates to a different key', async () => {
+    const client = new AuthClient();
+    // A chain to a key the client never made: it mints nothing, and the reason
+    // has to be named here rather than at the first request.
+    const stranger = Ed25519KeyIdentity.generate();
+    const chain = await DelegationChain.create(
+      Ed25519KeyIdentity.generate(),
+      stranger.getPublicKey(),
+      new Date(Date.now() + 60 * 60 * 1000),
+      { targets: [II_CANISTER] },
+    );
+    handleSignIn(FakeTransport.last(), { result: encodeDelegationChainResponse(chain) });
+
+    await expect(client.signIn()).rejects.toThrow('does not delegate to the key');
+  });
+
+  it('refuses a session response carrying no delegations', async () => {
+    const client = new AuthClient();
+    const chain = await createTestDelegation(Ed25519KeyIdentity.generate());
+    handleSignIn(FakeTransport.last(), {
+      result: { ...encodeDelegationChainResponse(chain), signerDelegation: [] },
+    });
+
+    await expect(client.signIn()).rejects.toThrow('signerDelegation');
+  });
+
   it('does not clear a session another tab signed in with', async () => {
     // Both tabs share localStorage and IndexedDB, so both share the session.
     const identityStorage = createIdentityStorage();
@@ -578,7 +604,7 @@ describe('AuthClient signIn', () => {
 
   it('mints against the configured canister, over the configured agent', async () => {
     minted.createdWith = [];
-    const agentOptions = { host: 'http://localhost:4943', shouldFetchRootKey: true };
+    const agentOptions = { host: 'http://localhost:8000', shouldFetchRootKey: true };
     const client = new AuthClient({
       sessionStorage: createSessionStorage(),
       identityProvider: { canisterId: 'aaaaa-aa' },

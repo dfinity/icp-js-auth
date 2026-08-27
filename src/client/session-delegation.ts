@@ -21,7 +21,13 @@ interface SessionDelegationResult {
 
 const looksLikeResult = (value: unknown): value is SessionDelegationResult => {
   const result = value as SessionDelegationResult | undefined;
-  return typeof result?.publicKey === 'string' && Array.isArray(result?.signerDelegation);
+  return (
+    typeof result?.publicKey === 'string' &&
+    Array.isArray(result?.signerDelegation) &&
+    // An empty list builds a chain whose earliest expiry is 0, so it reads as a
+    // session that expired at the epoch rather than as a bad response.
+    result.signerDelegation.length > 0
+  );
 };
 
 /**
@@ -60,7 +66,9 @@ export async function requestSessionDelegation(
 
   const result = response.result;
   if (!looksLikeResult(result)) {
-    throw new Error('Invalid session response: missing publicKey or signerDelegation');
+    throw new Error(
+      'Invalid session response: missing publicKey, or missing or empty signerDelegation',
+    );
   }
 
   return DelegationChain.fromDelegations(

@@ -396,6 +396,14 @@ export class AuthClient {
       derivationOrigin: this.#options.derivationOrigin?.toString(),
     });
 
+    // The chain comes from the signer over a transport shared with others, so
+    // the key it delegates to is checked here rather than assumed. A chain for
+    // another key mints nothing, and failing now names the cause instead of
+    // leaving it to the first request.
+    if (!keyMatchesChain(key, sessionChain)) {
+      throw new Error('The session chain does not delegate to the key it was requested for');
+    }
+
     // Mint inside the ceremony the user is already waiting through, so the first
     // request after signing in does not wait. This is also where the account key
     // comes from: the chain above is rooted at the session's own key, and only a
