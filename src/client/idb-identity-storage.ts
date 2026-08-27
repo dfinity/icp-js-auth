@@ -4,7 +4,11 @@ import { type DBCreateOptions, IdbKeyVal } from './db.js';
 import type { IdentityStorage } from './identity-storage.js';
 
 // Storage slot the key pair lives under. Owned by this implementation.
-const STORAGE_KEY = 'identity';
+// Distinct from the slot the pre-session client used ('identity') in the same
+// database and store, because what is stored is no longer the same thing: that
+// slot held the key an application's own delegations were issued to, and this
+// one holds the key that mints them.
+const STORAGE_KEY = 'session-identity';
 
 /**
  * Default identity storage: a non-extractable ECDSA (P-256) key pair in
