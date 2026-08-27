@@ -38,11 +38,6 @@ export const OPENID_PROVIDER_URLS = {
 
 const DEFAULT_OPENID_SCOPE_KEYS = ['name', 'email', 'verified_email'] as const;
 
-// How many sessions one sign-out will revoke. Each pass past the first means a
-// tab signed in during the previous round trip, which a person cannot do
-// repeatedly; the bound is there so buggy application code cannot spin here.
-const MAX_SIGN_OUT_REVOCATIONS = 5;
-
 /**
  * Options for creating an {@link AuthClient}.
  */
@@ -292,7 +287,13 @@ export class AuthClient {
 
     // Eagerly start restoring a previous session from storage.
     // The result is awaited in getIdentity() before returning.
-    this.#init();
+    //
+    // The rejection is marked handled here as well: storage that cannot be read
+    // makes this reject with nobody waiting yet, and an unhandled rejection at
+    // construction is not how a caller should learn about it. The promise is
+    // memoized, so getIdentity() still surfaces the same failure to whoever
+    // asks for an identity.
+    this.#init().catch(() => undefined);
   }
 
   /**
@@ -657,31 +658,36 @@ export class AuthClient {
    * @param options.returnTo - URL to navigate to after sign-out.
    */
   async signOut(options: { returnTo?: string } = {}): Promise<void> {
-    // Wait for the constructor's session restore: hydration racing the
-    // deletion below could re-populate the identity from already-read state.
-    await this.#init();
+    // Hydration matters here only because it could re-populate the identity from
+    // state it had already read. A failure means there was nothing to restore,
+    // so it is not a reason to skip either half of what a sign-out owes.
+    await this.#init().catch(() => undefined);
 
-    // End the session at the canister first, so access stops within one app
-    // delegation's lifetime instead of running to the session's own expiry.
-    // Clearing local state only stops this browser using what it holds.
-    //
-    // Repeated, because revoking is a round trip and the stores are shared: a
-    // tab that signs in while this one is in flight writes a session this call
-    // is about to delete. Signing out wins over signing in, so that session is
-    // revoked too rather than being deleted locally and left alive at the
-    // canister with nothing left to revoke it by. Bounded in practice by each
-    // pass only running when someone signed in during the previous one.
-    for (let attempt = 0; attempt < MAX_SIGN_OUT_REVOCATIONS; attempt++) {
-      const revoked = await this.#revokeSession();
-      if (revoked === undefined) break;
-      const stored = this.#sessionStorage.get();
-      if (stored === null || isSameSession(stored, revoked)) break;
-    }
+    // Signing out owes two things: end the session at the canister, so access
+    // stops within one app delegation's lifetime rather than running to the
+    // session's own expiry; and throw away what this browser holds, here and in
+    // the other tabs. Neither waits for the other. What ties them is that
+    // revoking needs the session and its key, so both are read first and the
+    // call is made against those rather than against storage that is about to
+    // be emptied.
+    const session = this.#sessionStorage.get();
+    const key = this.#options.identity ?? (await this.#identityStorage.get().catch(() => null));
+    const revoking = this.#revokeSession(session, key);
 
+    // Removing the shared session is also how the other tabs find out, so this
+    // is the step that signs the origin out rather than just this tab.
     this.#sessionStorage.remove();
-    await this.#identityStorage.remove();
-
     this.#identity = new AnonymousIdentity();
+
+    // Before navigating, or `returnTo` tears down the request that is still in
+    // flight and the session outlives the sign-out that asked to end it.
+    await revoking;
+
+    // Deliberately able to reject, unlike everything above it. Failing to read
+    // storage is a reason to carry on signing out; failing to empty it is not
+    // the same thing, and a caller that reloads on success — the idle callback
+    // does — has to be able to tell the difference.
+    await this.#identityStorage.remove();
 
     if (options.returnTo !== undefined) {
       // Navigate only to a validated same-origin http(s) target, so an invalid
@@ -842,11 +848,15 @@ export class AuthClient {
    * either way. Revocation is what makes a sign-out reach the delegations already
    * issued, so it is attempted first and its outcome does not change the rest.
    */
-  /** Revokes what is stored now, and reports which session that was. */
-  async #revokeSession(): Promise<Session | undefined> {
-    const session = this.#sessionStorage.get();
-    const key = this.#options.identity ?? (await this.#identityStorage.get());
-    if (session === null || key === null) return undefined;
+  /**
+   * Ends a session at the canister, against a session and key already read.
+   *
+   * Takes both rather than reading them, so it does not race the storage being
+   * emptied beside it. Never rejects: a sign-out that could not reach the
+   * canister still has to sign this browser out.
+   */
+  async #revokeSession(session: Session | null, key: SignIdentity | null): Promise<void> {
+    if (session === null || key === null) return;
 
     try {
       const minter = await this.#minterFor(key, session.chain);
@@ -855,7 +865,6 @@ export class AuthClient {
       // Offline, or a session the canister no longer has. Either way there is
       // nothing left to do here and nothing worth telling the caller.
     }
-    return session;
   }
 
   /** An agent pointed at Internet Identity, signing as the session. */
