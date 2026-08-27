@@ -2,7 +2,13 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { watchForeground } from '../../src/client/foreground-refresh.ts';
 
-afterEach(() => vi.unstubAllGlobals());
+afterEach(() => {
+  vi.unstubAllGlobals();
+  // Spies are not undone by unstubAllGlobals, and the visibilityState getter is
+  // spied on below. Left in place it reads 'hidden' for every test after it, in
+  // a file whose remaining tests are about firing when the page is visible.
+  vi.restoreAllMocks();
+});
 
 describe('watchForeground', () => {
   it('fires when the page becomes visible', () => {

@@ -3,8 +3,15 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { LocalSessionStorage } from '../../src/client/local-session-storage.ts';
 import type { Session } from '../../src/client/session-storage.ts';
 
-/** A session over a chain, using the chain's own root as the account key. */
-const session = (chain: DelegationChain): Session => ({ chain, accountKey: chain.publicKey });
+/**
+ * A session over a chain, with an account key of its own.
+ *
+ * Deliberately not the chain's root: the account key is what an application's
+ * canisters see, the chain is rooted at the session's own key, and a serializer
+ * that derived one from the other would pass a fixture that conflated them.
+ */
+const accountKey = Ed25519KeyIdentity.generate().getPublicKey().toDer();
+const session = (chain: DelegationChain): Session => ({ chain, accountKey });
 
 async function testChain(): Promise<DelegationChain> {
   const key = Ed25519KeyIdentity.generate();
@@ -36,12 +43,27 @@ describe('LocalSessionStorage', () => {
 
     expect(restored).not.toBeNull();
     expect(restored?.chain.toJSON()).toEqual(chain.toJSON());
+    // Bytes, not the value: toDer() brands what it returns and fromBase64 does
+    // not, so the two are equal in every way that matters and not deeply equal.
+    expect(new Uint8Array(restored?.accountKey ?? [])).toEqual(new Uint8Array(accountKey));
   });
 
   it('writes under the configured key', async () => {
+    const storage = new LocalSessionStorage('somewhere-else');
+    storage.set(session(await testChain()));
+
+    expect(localStorage.getItem('somewhere-else')).not.toBeNull();
+    expect(localStorage.getItem('ic-session-delegation')).toBeNull();
+  });
+
+  it('defaults to its own slot, not the one a pre-session client wrote', async () => {
     const storage = new LocalSessionStorage();
     storage.set(session(await testChain()));
-    expect(localStorage.getItem(new LocalSessionStorage().key)).not.toBeNull();
+
+    // Pinned: the old slot holds a value of a different shape, and reading one
+    // back as a session would put a delegation to work as a session chain.
+    expect(storage.key).toBe('ic-session-delegation');
+    expect(localStorage.getItem('ic-delegation')).toBeNull();
   });
 
   it('removes the stored delegation', async () => {
