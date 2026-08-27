@@ -268,7 +268,11 @@ export class AuthClient {
     );
     this.#channel = openSessionChannel(SESSION_CHANNEL, (message) => {
       if (message.kind === 'ask') this.#offerShared();
-      else this.#adoptOffer(message);
+      else {
+        // Adopting is an optimisation and can fail on its own: a key pair the
+        // guard admitted may still not import. Sharing nothing costs a mint.
+        this.#adoptOffer(message).catch(() => {});
+      }
     });
 
     if (!options.disableForegroundRefresh) {
@@ -872,15 +876,20 @@ export class AuthClient {
   #askForCredential(): Promise<AppCredential | undefined> {
     if (!this.#channel) return Promise.resolve(undefined);
     return new Promise((resolve) => {
-      const timer = setTimeout(() => {
-        this.#offered = undefined;
-        resolve(undefined);
-      }, INHERIT_WINDOW_MS);
-      this.#offered = (credential) => {
-        clearTimeout(timer);
-        this.#offered = undefined;
+      // Cleared only while it is still ours: two overlapping asks — a hydrate
+      // and a reconcile, say — share this field, and an earlier timeout that
+      // cleared unconditionally would take the later ask's handler with it,
+      // leaving that ask unable to hear an offer at all.
+      const settle = (credential?: AppCredential) => {
+        if (this.#offered === handler) this.#offered = undefined;
         resolve(credential);
       };
+      const timer = setTimeout(() => settle(), INHERIT_WINDOW_MS);
+      const handler = (credential: AppCredential) => {
+        clearTimeout(timer);
+        settle(credential);
+      };
+      this.#offered = handler;
       this.#channel?.post({ kind: 'ask' });
     });
   }

@@ -37,15 +37,30 @@ export interface SessionChannel {
   close(): void;
 }
 
+// A channel reaches one origin, so a malformed message is our own code — a tab
+// running a different version during a deploy, or an application posting on the
+// name. Checked anyway, because the predicate is what tells the caller the
+// payload is there, and an offer without a key pair reaches the adopter as a
+// rejection nothing catches.
 const looksLikeMessage = (value: unknown): value is SessionMessage => {
   const message = value as SessionMessage | undefined;
-  return message?.kind === 'ask' || message?.kind === 'offer';
+  if (message?.kind === 'ask') return true;
+  if (message?.kind !== 'offer') return false;
+  const { keyPair, chainJson } = message;
+  return (
+    typeof keyPair === 'object' &&
+    keyPair !== null &&
+    'privateKey' in keyPair &&
+    'publicKey' in keyPair &&
+    (chainJson === undefined || typeof chainJson === 'string')
+  );
 };
 
 /**
  * Opens the channel for an origin, or returns `undefined` where there is none.
- * @param name - Channel name. One per storage slot, so two clients configured
- *   for different slots do not answer each other.
+ * @param name - Channel name. Separates clients that should not answer each
+ *   other; `AuthClient` uses one name per origin, since an origin is one
+ *   application with one storage configuration.
  * @param onMessage - Called for each message from another tab. A channel never
  *   delivers a tab its own messages.
  */

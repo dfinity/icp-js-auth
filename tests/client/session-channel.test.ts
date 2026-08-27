@@ -75,6 +75,22 @@ describe('openSessionChannel', () => {
     expect(b.received).toEqual([]);
   });
 
+  it('ignores an offer with nothing to adopt', async () => {
+    const a = channel('ic-delegation');
+    const b = channel('ic-delegation');
+    const post = (a.handle as unknown as { post(m: unknown): void }).post;
+
+    // The kind is right and the payload is not. Forwarding these reaches the
+    // adopter as a rejection, so they stop here.
+    post({ kind: 'offer' });
+    post({ kind: 'offer', keyPair: null });
+    post({ kind: 'offer', keyPair: {} });
+    post({ kind: 'offer', keyPair: { privateKey: 1, publicKey: 2 }, chainJson: 5 });
+    await delivered();
+
+    expect(b.received).toEqual([]);
+  });
+
   it('delivers nothing once closed', async () => {
     const a = channel('ic-delegation');
     const b = channel('ic-delegation');
