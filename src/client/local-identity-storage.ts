@@ -4,7 +4,13 @@ import type { IdentityStorage } from './identity-storage.js';
 
 // Storage slot suffix the key lives under, combined with the instance prefix.
 // Owned by this implementation.
-const STORAGE_KEY = 'identity';
+//
+// Distinct from the slot the pre-session client used ('identity'), because what
+// is stored is no longer the same thing: that slot held the key an application's
+// own delegations were issued to, and this one holds the key that mints them.
+// Reading the old value here would put a key to work in a role it was never
+// issued for.
+const STORAGE_KEY = 'session-identity';
 
 /**
  * Legacy identity storage: an Ed25519 key pair in `localStorage`, for

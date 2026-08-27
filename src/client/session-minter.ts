@@ -22,7 +22,7 @@ const idlFactory: IDL.InterfaceFactory = ({ IDL }) => {
     NoMatchingSession: IDL.Null,
     InternalCanisterError: IDL.Text,
   });
-  const Delegation = IDL.Record({
+  const CandidDelegation = IDL.Record({
     pubkey: SessionKey,
     expiration: Timestamp,
     targets: IDL.Opt(IDL.Vec(IDL.Principal)),
@@ -43,7 +43,7 @@ const idlFactory: IDL.InterfaceFactory = ({ IDL }) => {
       [IDL.Record({ session_key: SessionKey, expiration: Timestamp })],
       [
         IDL.Variant({
-          Ok: IDL.Record({ delegation: Delegation, signature: SessionKey }),
+          Ok: IDL.Record({ delegation: CandidDelegation, signature: SessionKey }),
           Err: AppSessionError,
         }),
       ],
@@ -202,9 +202,9 @@ export function appDelegationChain(
  */
 export function assertChainReaches(chain: DelegationChain, canisterId: Principal): void {
   const targets = chain.delegations.flatMap(({ delegation }) => delegation.targets ?? []);
-  const restrictedToIt =
+  const restrictedToThisCanister =
     targets.length > 0 && targets.every((target) => target.compareTo(canisterId) === 'eq');
-  if (!restrictedToIt) {
+  if (!restrictedToThisCanister) {
     const named = targets.length === 0 ? 'nothing' : targets.map((t) => t.toText()).join(', ');
     throw new Error(
       `A session chain must be restricted to ${canisterId.toText()}, but this one names ${named}`,
