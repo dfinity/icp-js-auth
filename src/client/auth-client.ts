@@ -37,6 +37,11 @@ export const OPENID_PROVIDER_URLS = {
 
 const DEFAULT_OPENID_SCOPE_KEYS = ['name', 'email', 'verified_email'] as const;
 
+// How many sessions one sign-out will revoke. Each pass past the first means a
+// tab signed in during the previous round trip, which a person cannot do
+// repeatedly; the bound is there so buggy application code cannot spin here.
+const MAX_SIGN_OUT_REVOCATIONS = 5;
+
 /**
  * Options for creating an {@link AuthClient}.
  */
@@ -614,7 +619,19 @@ export class AuthClient {
     // End the session at the canister first, so access stops within one app
     // delegation's lifetime instead of running to the session's own expiry.
     // Clearing local state only stops this browser using what it holds.
-    await this.#revokeSession();
+    //
+    // Repeated, because revoking is a round trip and the stores are shared: a
+    // tab that signs in while this one is in flight writes a session this call
+    // is about to delete. Signing out wins over signing in, so that session is
+    // revoked too rather than being deleted locally and left alive at the
+    // canister with nothing left to revoke it by. Bounded in practice by each
+    // pass only running when someone signed in during the previous one.
+    for (let attempt = 0; attempt < MAX_SIGN_OUT_REVOCATIONS; attempt++) {
+      const revoked = await this.#revokeSession();
+      if (revoked === undefined) break;
+      const stored = this.#sessionStorage.get();
+      if (stored === null || isSameSession(stored, revoked)) break;
+    }
 
     this.#sessionStorage.remove();
     await this.#identityStorage.remove();
@@ -761,10 +778,11 @@ export class AuthClient {
    * either way. Revocation is what makes a sign-out reach the delegations already
    * issued, so it is attempted first and its outcome does not change the rest.
    */
-  async #revokeSession(): Promise<void> {
+  /** Revokes what is stored now, and reports which session that was. */
+  async #revokeSession(): Promise<Session | undefined> {
     const session = this.#sessionStorage.get();
     const key = this.#options.identity ?? (await this.#identityStorage.get());
-    if (session === null || key === null) return;
+    if (session === null || key === null) return undefined;
 
     try {
       const minter = await this.#minterFor(key, session.chain);
@@ -773,6 +791,7 @@ export class AuthClient {
       // Offline, or a session the canister no longer has. Either way there is
       // nothing left to do here and nothing worth telling the caller.
     }
+    return session;
   }
 
   /** An agent pointed at Internet Identity, signing as the session. */
