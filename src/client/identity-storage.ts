@@ -7,8 +7,9 @@ import type { SignIdentity } from '@icp-sdk/core/agent';
  * The implementation owns the key algorithm and the storage slot: {@link create}
  * generates a fresh identity of its own type and stores that same type.
  * Switching algorithms (e.g. ECDSA → Ed25519) therefore means switching the
- * implementation, not passing a flag — {@link AuthClient} stays
- * key-type-agnostic and never sees the key material's shape.
+ * implementation, not passing a flag. The interface exists so a caller chooses
+ * where and how the key is held without the shape of the key material reaching
+ * it.
  */
 export interface IdentityStorage {
   /**

@@ -100,6 +100,29 @@ describe('SessionIdentity', () => {
     expect(mint).toHaveBeenCalledTimes(2);
   });
 
+  it('keeps the account principal across a rotation', async () => {
+    const { identity, mint, request } = harness();
+    await request();
+    const before = identity.getPrincipal().toText();
+
+    await vi.advanceTimersByTimeAsync(TTL - 15_000);
+
+    // Asserted so this cannot pass by no rotation having happened.
+    expect(mint).toHaveBeenCalledTimes(2);
+    // The delegation underneath was replaced; who is signed in was not.
+    expect(identity.getPrincipal().toText()).toBe(before);
+  });
+
+  it('mints again after a failed mint rather than replaying the rejection', async () => {
+    const { mint, request } = harness();
+    mint.mockRejectedValueOnce(new Error('transport blip'));
+
+    await expect(request()).rejects.toThrow('transport blip');
+
+    await expect(request()).resolves.toBeDefined();
+    expect(mint).toHaveBeenCalledTimes(2);
+  });
+
   it('lets an unused delegation lapse instead of refreshing it', async () => {
     const { mint, request } = harness();
     await request();
