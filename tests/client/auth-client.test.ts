@@ -477,33 +477,6 @@ describe('AuthClient signIn', () => {
     await expect(client.signIn()).rejects.toThrow('signerDelegation');
   });
 
-  it('revokes a session written while it was revoking, rather than only deleting it', async () => {
-    const sessionStorage = createSessionStorage();
-    const client = new AuthClient({ sessionStorage });
-    handleSignIn(FakeTransport.last());
-    await client.signIn();
-    const first = rootKeyOf(sessionStorage);
-
-    // Another tab signing in during the round trip. Signing out wins over
-    // signing in, so this session is ended at the canister too — deleting it
-    // locally without revoking would leave it alive there with nothing left to
-    // revoke it by.
-    const replacement = await createTestDelegation(Ed25519KeyIdentity.generate());
-    minted.observeRevoke = () => {
-      minted.observeRevoke = undefined;
-      sessionStorage.set({ chain: replacement, accountKey: replacement.publicKey });
-    };
-    const second = Array.from(new Uint8Array(replacement.publicKey)).join(',');
-
-    await client.signOut();
-    minted.observeRevoke = undefined;
-
-    expect(minted.revokedSessions).toContain(first);
-    expect(minted.revokedSessions).toContain(second);
-    expect(sessionStorage.get()).toBeNull();
-    expect(client.isAuthenticated()).toBe(false);
-  });
-
   it('does not clear a session another tab signed in with', async () => {
     // Both tabs share localStorage and IndexedDB, so both share the session.
     const identityStorage = createIdentityStorage();
@@ -685,7 +658,7 @@ describe('AuthClient signIn', () => {
     client.dispose();
   });
 
-  it('ends the session at the canister before clearing what it holds', async () => {
+  it('ends the session at the canister, against what it read before emptying storage', async () => {
     const sessionStorage = createSessionStorage();
     const client = new AuthClient({ sessionStorage });
     handleSignIn(FakeTransport.last());
@@ -693,17 +666,55 @@ describe('AuthClient signIn', () => {
     // Counted per session: undisposed clients from other tests can sign out at
     // any moment, and a shared tally would pick their revocations up as this one.
     const mine = rootKeyOf(sessionStorage);
-    // Observed inside revoke, because the assertions below hold whichever order
-    // the two ran in: swapping them leaves the session cleared and the tally at
-    // one. Revoking has to happen while the session is still stored.
-    const storedAtRevoke: (string | null)[] = [];
-    minted.observeRevoke = () => storedAtRevoke.push(rootKeyOf(sessionStorage));
 
     await client.signOut();
-    minted.observeRevoke = undefined;
 
-    expect(storedAtRevoke).toEqual([mine]);
+    // Revoked even though the wipe does not wait for it — the call is made
+    // against the session read up front, not against storage.
     expect(minted.revokedSessions.filter((root) => root === mine)).toHaveLength(1);
+    expect(sessionStorage.get()).toBeNull();
+    expect(client.isAuthenticated()).toBe(false);
+  });
+
+  it('empties storage without waiting for the canister', async () => {
+    const sessionStorage = createSessionStorage();
+    const client = new AuthClient({ sessionStorage });
+    handleSignIn(FakeTransport.last());
+    await client.signIn();
+
+    // Held open, so resolving only after the assertion proves the wipe did not
+    // wait on it. Both are owed to the user; neither blocks the other.
+    let release!: () => void;
+    const held = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    minted.observeRevoke = () => {
+      expect(sessionStorage.get()).toBeNull();
+      release();
+    };
+
+    const signingOut = client.signOut();
+    await held;
+    minted.observeRevoke = undefined;
+    await signingOut;
+
+    expect(sessionStorage.get()).toBeNull();
+  });
+
+  it('signs out locally even when the session and its key cannot be read', async () => {
+    const sessionStorage = createSessionStorage();
+    const identityStorage = createIdentityStorage();
+    const client = new AuthClient({ sessionStorage, identityStorage });
+    handleSignIn(FakeTransport.last());
+    await client.signIn();
+
+    // Broken after signing in, which is when a store becomes unreadable in
+    // practice. Nothing to revoke with is a failed revocation, not a reason to
+    // leave the browser signed in.
+    identityStorage.get = vi.fn().mockRejectedValue(new Error('storage unavailable'));
+
+    await expect(client.signOut()).resolves.toBeUndefined();
+
     expect(sessionStorage.get()).toBeNull();
     expect(client.isAuthenticated()).toBe(false);
   });
