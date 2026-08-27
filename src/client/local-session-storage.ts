@@ -5,7 +5,14 @@ import type { Session, SessionStorage } from './session-storage.js';
 
 // Default storage slot the serialized session lives under. Owned by
 // this implementation; override per instance via the constructor.
-const DEFAULT_KEY = 'ic-delegation';
+//
+// Distinct from the slot the pre-session client used ('ic-delegation'), because
+// what is stored is no longer the same thing: that slot held a delegation an
+// application called its own canisters with, and this one holds a session
+// restricted to Internet Identity. An old value cannot be migrated either — it
+// carries no account key, and deriving one from the chain would name the
+// session's own key rather than the account's.
+const DEFAULT_KEY = 'ic-session-delegation';
 
 /**
  * Default session storage: the session in `localStorage`, with

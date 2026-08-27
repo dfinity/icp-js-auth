@@ -108,8 +108,9 @@ const minted = vi.hoisted(() => ({
   revokedSessions: [] as string[],
   count: 0,
   refuse: false,
-  revoked: 0,
   revokeFails: false,
+  // Set by a test that needs to observe the moment revoke runs.
+  observeRevoke: undefined as (() => void) | undefined,
 }));
 
 vi.mock('../../src/client/session-minter.ts', async () => {
@@ -146,8 +147,8 @@ vi.mock('../../src/client/session-minter.ts', async () => {
           );
         },
         revoke: async () => {
+          minted.observeRevoke?.();
           if (minted.revokeFails) throw new Error('offline');
-          minted.revoked += 1;
           minted.revokedSessions.push(rootOf(options.sessionChain));
         },
       }),
@@ -444,6 +445,59 @@ describe('AuthClient signIn', () => {
     await expect(client.signIn()).rejects.toThrow('connection failed');
   });
 
+  it('refuses a session chain that delegates to a different key', async () => {
+    const client = new AuthClient();
+    // A chain to a key the client never made: it mints nothing, and the reason
+    // has to be named here rather than at the first request.
+    const stranger = Ed25519KeyIdentity.generate();
+    const chain = await DelegationChain.create(
+      Ed25519KeyIdentity.generate(),
+      stranger.getPublicKey(),
+      new Date(Date.now() + 60 * 60 * 1000),
+      { targets: [II_CANISTER] },
+    );
+    handleSignIn(FakeTransport.last(), { result: encodeDelegationChainResponse(chain) });
+
+    await expect(client.signIn()).rejects.toThrow('does not delegate to the key');
+  });
+
+  it('refuses a session response carrying no delegations', async () => {
+    const client = new AuthClient();
+    const chain = await createTestDelegation(Ed25519KeyIdentity.generate());
+    handleSignIn(FakeTransport.last(), {
+      result: { ...encodeDelegationChainResponse(chain), signerDelegation: [] },
+    });
+
+    await expect(client.signIn()).rejects.toThrow('signerDelegation');
+  });
+
+  it('revokes a session written while it was revoking, rather than only deleting it', async () => {
+    const sessionStorage = createSessionStorage();
+    const client = new AuthClient({ sessionStorage });
+    handleSignIn(FakeTransport.last());
+    await client.signIn();
+    const first = rootKeyOf(sessionStorage);
+
+    // Another tab signing in during the round trip. Signing out wins over
+    // signing in, so this session is ended at the canister too — deleting it
+    // locally without revoking would leave it alive there with nothing left to
+    // revoke it by.
+    const replacement = await createTestDelegation(Ed25519KeyIdentity.generate());
+    minted.observeRevoke = () => {
+      minted.observeRevoke = undefined;
+      sessionStorage.set({ chain: replacement, accountKey: replacement.publicKey });
+    };
+    const second = Array.from(new Uint8Array(replacement.publicKey)).join(',');
+
+    await client.signOut();
+    minted.observeRevoke = undefined;
+
+    expect(minted.revokedSessions).toContain(first);
+    expect(minted.revokedSessions).toContain(second);
+    expect(sessionStorage.get()).toBeNull();
+    expect(client.isAuthenticated()).toBe(false);
+  });
+
   it('does not clear a session another tab signed in with', async () => {
     // Both tabs share localStorage and IndexedDB, so both share the session.
     const identityStorage = createIdentityStorage();
@@ -638,9 +692,16 @@ describe('AuthClient signIn', () => {
     // Counted per session: undisposed clients from other tests can sign out at
     // any moment, and a shared tally would pick their revocations up as this one.
     const mine = rootKeyOf(sessionStorage);
+    // Observed inside revoke, because the assertions below hold whichever order
+    // the two ran in: swapping them leaves the session cleared and the tally at
+    // one. Revoking has to happen while the session is still stored.
+    const storedAtRevoke: (string | null)[] = [];
+    minted.observeRevoke = () => storedAtRevoke.push(rootKeyOf(sessionStorage));
 
     await client.signOut();
+    minted.observeRevoke = undefined;
 
+    expect(storedAtRevoke).toEqual([mine]);
     expect(minted.revokedSessions.filter((root) => root === mine)).toHaveLength(1);
     expect(sessionStorage.get()).toBeNull();
     expect(client.isAuthenticated()).toBe(false);
@@ -717,7 +778,7 @@ describe('AuthClient signIn', () => {
 
   it('mints against the configured canister, over the configured agent', async () => {
     minted.createdWith = [];
-    const agentOptions = { host: 'http://localhost:4943', shouldFetchRootKey: true };
+    const agentOptions = { host: 'http://localhost:8000', shouldFetchRootKey: true };
     const client = new AuthClient({
       sessionStorage: createSessionStorage(),
       identityProvider: { canisterId: 'aaaaa-aa' },
