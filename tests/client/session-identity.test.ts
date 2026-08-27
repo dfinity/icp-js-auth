@@ -2,7 +2,7 @@ import type { SignIdentity } from '@icp-sdk/core/agent';
 import { DelegationChain, Ed25519KeyIdentity } from '@icp-sdk/core/identity';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-import { SessionGoneError } from '../../src/client/app-delegation-source.ts';
+import { type AppCredential, SessionGoneError } from '../../src/client/app-delegation-source.ts';
 import { SessionIdentity } from '../../src/client/session-identity.ts';
 
 const MINUTE = 60_000;
@@ -26,7 +26,12 @@ async function appDelegation(to: SignIdentity, lifetimeMs = TTL): Promise<Delega
 }
 
 function harness(
-  options: { lifetimeMs?: number; sessionMs?: number; onSessionGone?: () => void } = {},
+  options: {
+    lifetimeMs?: number;
+    sessionMs?: number;
+    onSessionGone?: () => void;
+    initial?: AppCredential;
+  } = {},
 ) {
   // The key a mint is for is made by the identity, so the fake source has to sign
   // its answer to whatever key it was handed.
@@ -50,6 +55,7 @@ function harness(
     source: { mint },
     newKey,
     onSessionGone,
+    initial: options.initial,
   });
   const request = () =>
     identity.transformRequest({ body: { arg: new Uint8Array() } } as never) as Promise<unknown>;
@@ -259,6 +265,38 @@ describe('SessionIdentity', () => {
     const chain = await appDelegation(Ed25519KeyIdentity.generate());
 
     expect(identity.adopt({ key, chain })).toBe(false);
+  });
+
+  it('ignores an initial credential that is not for this account and key', async () => {
+    const key = Ed25519KeyIdentity.generate();
+    // Rooted at a different account, as a stale offer from another tab would be
+    // after the session was replaced.
+    const foreign = await DelegationChain.create(
+      Ed25519KeyIdentity.generate(),
+      key.getPublicKey(),
+      new Date(Date.now() + TTL),
+    );
+    const { identity, mint, request } = harness({ initial: { key, chain: foreign } });
+
+    expect(identity.getDelegation().delegations).toEqual([]);
+
+    // Mints for itself rather than signing under a chain for another account.
+    await request();
+    expect(mint).toHaveBeenCalledTimes(1);
+  });
+
+  it('keeps a credential adopted while a mint was in flight', async () => {
+    const { identity, request } = harness();
+    const shared = Ed25519KeyIdentity.generate();
+    const sharedChain = await appDelegation(shared);
+
+    // Another tab answers during the mint. It is what this origin has settled
+    // on, so the mint in flight must not replace it.
+    const pending = request();
+    expect(identity.adopt({ key: shared, chain: sharedChain })).toBe(true);
+    await pending;
+
+    expect(identity.getDelegation()).toBe(sharedChain);
   });
 
   it('makes a fresh key for every mint, so a key never outlives its delegation', async () => {
