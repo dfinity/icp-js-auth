@@ -1,5 +1,6 @@
 import type { PublicKey } from '@icp-sdk/core/agent';
 import { DelegationChain, Ed25519KeyIdentity } from '@icp-sdk/core/identity';
+import { Principal } from '@icp-sdk/core/principal';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { slotsFor } from '../../src/client/slots.ts';
 
@@ -12,6 +13,29 @@ import { IdleManager } from '../../src/client/idle-manager.ts';
 import { LocalCredentialStorage } from '../../src/client/local-credential-storage.ts';
 import { MemoryCredentialStorage } from '../../src/client/memory-credential-storage.ts';
 import { FakeUrlTransport } from './fake-url-transport.ts';
+
+const II_CANISTER = Principal.fromText('rdmx6-jaaaa-aaaaa-aaadq-cai');
+
+// Minting is a canister call; the source is replaced rather than the network.
+vi.mock('../../src/client/session-minter.ts', async () => {
+  const { DelegationChain: Chain, Ed25519KeyIdentity: Key } = await import(
+    '@icp-sdk/core/identity'
+  );
+  const accountKey = Key.generate();
+  return {
+    SessionMinter: {
+      create: async () => ({
+        mint: async (appPublicKey: Uint8Array) =>
+          Chain.create(
+            accountKey,
+            { toDer: () => appPublicKey } as unknown as PublicKey,
+            new Date(Date.now() + 5 * 60 * 1000),
+          ),
+        revoke: async () => {},
+      }),
+    },
+  };
+});
 
 // Redirect mode selects `UrlTransport` from `@icp-sdk/signer/web`; swap it for
 // an in-memory fake so the flow can be driven without a real page navigation.
@@ -58,6 +82,7 @@ async function delegationBody(publicKey: string) {
     Ed25519KeyIdentity.generate(),
     to,
     new Date(Date.now() + 3.6e6),
+    { targets: [II_CANISTER] },
   );
   return {
     result: {
@@ -76,11 +101,11 @@ async function delegationBody(publicKey: string) {
 
 function handleSignIn(transport: FakeUrlTransport): void {
   transport.onRequest(async (req) => {
-    if (req.method !== 'icrc34_delegation' || req.id == null) return;
+    if (req.method !== 'ii_session_delegation' || req.id == null) return;
     return {
       jsonrpc: '2.0',
       id: req.id,
-      ...(await delegationBody(req.params?.publicKey as string)),
+      ...(await delegationBody(req.params?.sessionPublicKey as string)),
     };
   });
 }
@@ -145,7 +170,7 @@ describe('AuthClient redirect (UrlTransport) sign-in', () => {
     const identity = await client.signIn();
 
     expect(identity.getPrincipal().isAnonymous()).toBe(false);
-    expect(FakeUrlTransport.last().requests[0]?.method).toBe('icrc34_delegation');
+    expect(FakeUrlTransport.last().requests[0]?.method).toBe('ii_session_delegation');
     // The flow journals values that replay across the redirect: the (unset)
     // derivation origin from construction, and the key-acquisition step, which
     // both holds the batch so the delegation isn't split off from a concurrent
@@ -216,9 +241,9 @@ describe('AuthClient redirect (UrlTransport) sign-in', () => {
     await flush();
 
     const load1 = FakeUrlTransport.last();
-    expect(load1.requests[0]?.method).toBe('icrc34_delegation');
+    expect(load1.requests[0]?.method).toBe('ii_session_delegation');
     expect(await hasPendingKey(storage)).toBe(true); // persisted for the return
-    const publicKey1 = load1.requests[0]?.params?.publicKey;
+    const publicKey1 = load1.requests[0]?.params?.sessionPublicKey;
 
     // Load 2: the signer returns; the flow replays and completes.
     FakeUrlTransport.nextRespond = true;
@@ -230,7 +255,7 @@ describe('AuthClient redirect (UrlTransport) sign-in', () => {
     expect(identity.getPrincipal().isAnonymous()).toBe(false);
     // The delegation on the return load was requested for the SAME key that
     // load 1 generated — not a fresh one that would not match.
-    expect(load2.requests[0]?.params?.publicKey).toBe(publicKey1);
+    expect(load2.requests[0]?.params?.sessionPublicKey).toBe(publicKey1);
     expect(await hasPendingKey(storage)).toBe(false); // cleaned up on completion
     void pending1;
   });

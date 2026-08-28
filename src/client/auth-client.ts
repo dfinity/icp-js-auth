@@ -1,17 +1,25 @@
-import { AnonymousIdentity, type Identity, type SignIdentity } from '@icp-sdk/core/agent';
+import {
+  AnonymousIdentity,
+  type DerEncodedPublicKey,
+  type HttpAgentOptions,
+  type Identity,
+  type SignIdentity,
+} from '@icp-sdk/core/agent';
 import {
   type DelegationChain,
-  DelegationIdentity,
   isDelegationValid,
-  PartialDelegationIdentity,
   type PartialIdentity,
 } from '@icp-sdk/core/identity';
 import { Principal } from '@icp-sdk/core/principal';
 import { Signer } from '@icp-sdk/signer';
 import { PostMessageTransport, UrlTransport } from '@icp-sdk/signer/web';
+import { fromBase64, toBase64 } from './base64.js';
 import type { Credential, CredentialStorage } from './credential-storage.js';
 import { IdbCredentialStorage } from './idb-credential-storage.js';
 import { IdleManager, type IdleManagerOptions } from './idle-manager.js';
+import { requestSessionDelegation } from './session-delegation.js';
+import { SessionIdentity } from './session-identity.js';
+import { SessionMinter } from './session-minter.js';
 import { type Slots, slotsFor } from './slots.js';
 import { LocalStateStorage, type StateStorage } from './state-storage.js';
 
@@ -20,6 +28,7 @@ const SECONDS_PER_HOUR = BigInt(3_600);
 const NANOSECONDS_PER_HOUR = NANOSECONDS_PER_SECOND * SECONDS_PER_HOUR;
 
 const IDENTITY_PROVIDER_DEFAULT = 'https://id.ai/authorize';
+const IDENTITY_CANISTER_DEFAULT = 'rdmx6-jaaaa-aaaaa-aaadq-cai';
 const DEFAULT_MAX_TIME_TO_LIVE = BigInt(8) * NANOSECONDS_PER_HOUR;
 
 export type OpenIdProvider = 'google' | 'apple' | 'microsoft';
@@ -77,10 +86,30 @@ export interface AuthClientCreateOptions {
   idleOptions?: IdleOptions;
 
   /**
-   * Identity provider URL.
-   * @default "https://id.ai/authorize"
+   * Where the identity provider is, as two values rather than one.
+   *
+   * A ceremony is rendered at a URL and delegations are minted by a canister,
+   * and they are not the same address: a custom domain can front the mainnet
+   * canister, and a local deployment changes both. Each half defaults to its
+   * mainnet value, so an application deploying against mainnet configures
+   * neither. Nothing is derived from the URL — the origin of one is not a
+   * promise about which canister answers there.
    */
-  identityProvider?: string | URL;
+  identityProvider?: {
+    /** The authorize URL a ceremony is rendered at. */
+    authorizeUrl?: string | URL;
+
+    /** The canister that mints and revokes this application's delegations. */
+    canisterId?: Principal | string;
+  };
+
+  /**
+   * Options for the agent that makes the mint and revoke calls.
+   *
+   * `identity` is not among them: the agent signs as the session, which is what
+   * those calls rest on.
+   */
+  agentOptions?: Omit<HttpAgentOptions, 'identity'>;
 
   /**
    * Derivation origin for the identity provider.
@@ -149,11 +178,6 @@ export interface AuthClientSignInOptions {
    * @default 8 hours
    */
   maxTimeToLive?: bigint;
-
-  /**
-   * Restrict the delegation to specific canisters.
-   */
-  targets?: Principal[];
 }
 
 export interface SignedAttributes {
@@ -195,9 +219,9 @@ export type SessionStatus =
 
 export class AuthClient {
   #identity: Identity | PartialIdentity = new AnonymousIdentity();
-  #chain: DelegationChain | null = null;
   #credentialStorage: CredentialStorage;
   readonly #slots: Slots;
+  readonly #canisterId: Principal;
   #stateStorage: StateStorage;
   #signer: Signer;
   // Set only in redirect mode, so the redirect-specific paths (nonce/key
@@ -213,8 +237,22 @@ export class AuthClient {
     this.#slots = slotsFor(options.namespace);
     this.#stateStorage = options.stateStorage ?? new LocalStateStorage(this.#slots.state);
 
+    // A string or URL is what this option used to be, and a caller still passing
+    // one would otherwise be silently ignored — both halves falling back to
+    // mainnet, which is the kind of misconfiguration that only shows up as calls
+    // going to the wrong canister.
+    if (typeof options.identityProvider === 'string' || options.identityProvider instanceof URL) {
+      throw new TypeError(
+        'identityProvider is now an object: pass { authorizeUrl } for the ceremony URL, and { canisterId } for the canister that mints',
+      );
+    }
+
+    this.#canisterId = Principal.from(
+      options.identityProvider?.canisterId ?? IDENTITY_CANISTER_DEFAULT,
+    );
+
     const identityProviderUrl = new URL(
-      options.identityProvider?.toString() || IDENTITY_PROVIDER_DEFAULT,
+      options.identityProvider?.authorizeUrl?.toString() || IDENTITY_PROVIDER_DEFAULT,
     );
     if (options.openIdProvider) {
       identityProviderUrl.searchParams.set('openid', OPENID_PROVIDER_URLS[options.openIdProvider]);
@@ -376,19 +414,26 @@ export class AuthClient {
 
     const { key, pending } = await sessionKeyPromise;
 
-    const delegationChain = await this.#signer.requestDelegation({
-      publicKey: key.getPublicKey(),
-      targets: options?.targets,
+    if (!('sign' in key)) {
+      // Unreachable for a typed caller, since `identity` is a SignIdentity.
+      // Minting is a canister call signed by the session key, so a key that
+      // cannot sign cannot hold a session, and failing here beats handing back
+      // an identity whose first request fails for a reason nothing explains.
+      throw new Error('A session needs a key that can sign');
+    }
+
+    const sessionChain = await requestSessionDelegation(this.#signer, {
+      sessionPublicKey: key.getPublicKey().toDer(),
       maxTimeToLive,
+      derivationOrigin: this.#options.derivationOrigin?.toString(),
     });
 
-    this.#chain = delegationChain;
-
-    // PartialIdentity only has the public key — no signing capability.
-    if ('toDer' in key) {
-      this.#identity = PartialDelegationIdentity.fromDelegation(key, this.#chain);
-    } else {
-      this.#identity = DelegationIdentity.fromDelegation(key, this.#chain);
+    // The chain comes from the signer over a transport shared with others, so
+    // the key it delegates to is checked here rather than assumed. A chain for
+    // another key mints nothing, and failing now names the cause instead of
+    // leaving it to the first request.
+    if (!keyMatchesChain(key, sessionChain)) {
+      throw new Error('The session chain does not delegate to the key it was requested for');
     }
 
     const idleOptions = this.#options?.idleOptions;
@@ -397,9 +442,31 @@ export class AuthClient {
       this.#registerDefaultIdleCallback();
     }
 
-    // Promote: the key and the delegation issued to it become one record under
-    // the session slot, and the ceremony's own copy goes.
-    await this.#persistSession(key, this.#chain);
+    // Mint inside the ceremony the user is already waiting through, so the first
+    // request after signing in does not wait. This is also where the account key
+    // comes from: the session chain is rooted at the session's own key, and only
+    // a mint reports the key an application's canisters will see.
+    //
+    // Into the ceremony's own slot, not the one every tab of this origin acts
+    // with. Clearing that slot up front, or writing to it here, would change what
+    // those tabs hold before this sign-in has succeeded — and a ceremony that
+    // then failed would have cost each of them a mint for nothing.
+    const minter = await this.#minterFor(key, sessionChain);
+    const appKey = await this.#credentialStorage.create();
+    const appChain = await minter.mint(appKey.getPublicKey().toDer());
+    await this.#credentialStorage.set(this.#slots.appPending, {
+      identity: appKey,
+      chain: appChain,
+    });
+
+    // The session and the state first, because the state is what makes this
+    // account the one this origin answers for; promoting ahead of it would
+    // publish a credential for a sign-in nothing has recorded yet.
+    await this.#persistSession(key, sessionChain, appChain.publicKey);
+    await this.#promoteAppCredential();
+
+    const identity = await this.#openSession(key, sessionChain, minter);
+    this.#identity = identity;
 
     // Best-effort — the user is already signed in, so a cleanup failure must not
     // fail signIn(), and the next ceremony overwrites what is left behind.
@@ -606,10 +673,28 @@ export class AuthClient {
     // Wait for the constructor's session restore: hydration racing the
     // deletion below could re-populate the identity from already-read state.
     await this.#init();
-    await this.#endSession();
 
+    // Read before anything is cleared: the revoke call is made as the session,
+    // so it needs what the wipe is about to remove.
+    const session = await this.#credentialStorage.get(this.#slots.session).catch(() => null);
+
+    // Ending the session at the canister and clearing what is held here are
+    // independent, so they run together: a slow or failing revoke must not hold
+    // up a wipe the user asked for, and a user who pressed sign out must not
+    // stay signed in on the device in front of them because a call failed.
+    const revoked =
+      session?.chain === undefined || !('sign' in session.identity)
+        ? Promise.resolve()
+        : this.#revoke(session.identity, session.chain).catch(() => undefined);
+    const cleared = this.#endSession();
+
+    if (this.#identity instanceof SessionIdentity) this.#identity.dispose();
     this.#identity = new AnonymousIdentity();
-    this.#chain = null;
+
+    // Only the wipe may fail the sign-out. The idle callback reloads on success
+    // alone, and a reload after a failed wipe would restore the session it just
+    // tried to end.
+    await Promise.all([revoked, cleared]);
 
     if (options.returnTo !== undefined) {
       // Navigate exactly as before (pushState, else location.href), but only to
@@ -655,6 +740,89 @@ export class AuthClient {
     }
   }
 
+  /** Ends the session at the canister, so nothing more can be minted from it. */
+  async #revoke(key: SignIdentity, sessionChain: DelegationChain): Promise<void> {
+    const minter = await SessionMinter.create({
+      sessionKey: key,
+      sessionChain,
+      canisterId: this.#canisterId,
+      agentOptions: this.#options.agentOptions,
+    });
+    await minter.revoke();
+  }
+
+  /**
+   * Builds the identity an application acts with, from a session it holds.
+   *
+   * The account's key is what an identity answers for its principal, and only a
+   * mint reports it — the session chain is rooted at the session's own key. So
+   * where an app credential is stored its root is taken, and where there is none
+   * one is minted, which a load owes anyway: nothing usable is held, so a mint is
+   * due before anything asks for an identity.
+   */
+  /**
+   * Moves what a ceremony minted into the slot every tab acts with.
+   *
+   * Overwrites rather than clearing and re-filling, so there is no moment where
+   * the origin holds nothing — and what it replaces is a credential rooted at
+   * whatever account the previous session belonged to.
+   */
+  async #promoteAppCredential(): Promise<void> {
+    const minted = await this.#credentialStorage.get(this.#slots.appPending);
+    if (minted?.chain === undefined) return;
+
+    await this.#credentialStorage.set(this.#slots.app, {
+      identity: minted.identity,
+      chain: minted.chain,
+    });
+    // Best-effort: what is left behind is a spent five-minute record in a slot
+    // nothing reads, replaced by the next ceremony.
+    await this.#credentialStorage.remove(this.#slots.appPending).catch(() => undefined);
+  }
+
+  #minterFor(key: SignIdentity, sessionChain: DelegationChain): Promise<SessionMinter> {
+    return SessionMinter.create({
+      sessionKey: key,
+      sessionChain,
+      canisterId: this.#canisterId,
+      agentOptions: this.#options.agentOptions,
+    });
+  }
+
+  async #openSession(
+    key: SignIdentity,
+    sessionChain: DelegationChain,
+    source?: SessionMinter,
+  ): Promise<SessionIdentity> {
+    const minter = source ?? (await this.#minterFor(key, sessionChain));
+
+    const stored = await this.#credentialStorage.get(this.#slots.app);
+    let accountKey = stored?.chain?.publicKey;
+    if (accountKey === undefined) {
+      const appKey = await this.#credentialStorage.create();
+      const appChain = await minter.mint(appKey.getPublicKey().toDer());
+      await this.#credentialStorage.set(this.#slots.app, { identity: appKey, chain: appChain });
+      accountKey = appChain.publicKey;
+    }
+
+    const identity = new SessionIdentity({
+      accountKey,
+      sessionExpiresAtMs: earliestExpiryMs(sessionChain),
+      source: minter,
+      storage: this.#credentialStorage,
+      onSessionGone: () => {
+        // Drops what this origin holds and leaves the record standing: a dead
+        // chain can mean a sibling replaced the session rather than that it ended.
+        void this.#dropSession().catch(() => undefined);
+        this.#identity = new AnonymousIdentity();
+      },
+    });
+    // Adopts what is stored, so the identity a caller is handed already holds a
+    // delegation rather than minting on its first request.
+    await identity.refresh();
+    return identity;
+  }
+
   // Memoized — only runs #hydrate once, returns the same promise on repeat calls.
   #init(): Promise<void> {
     if (!this.#initPromise) {
@@ -688,12 +856,9 @@ export class AuthClient {
       return;
     }
 
-    this.#chain = chain;
-    if ('toDer' in key) {
-      this.#identity = PartialDelegationIdentity.fromDelegation(key, chain);
-    } else {
-      this.#identity = DelegationIdentity.fromDelegation(key, chain);
-    }
+    if (!('sign' in key)) return;
+
+    this.#identity = await this.#openSession(key, chain);
 
     if (!this.#options.idleOptions?.disableIdle && !this.idleManager) {
       this.idleManager = IdleManager.create(this.#options.idleOptions);
@@ -708,6 +873,7 @@ export class AuthClient {
   async #persistSession(
     identity: SignIdentity | PartialIdentity,
     chain: DelegationChain,
+    accountKey: DerEncodedPublicKey,
   ): Promise<void> {
     // A PartialIdentity is the caller's own and cannot sign, so there is nothing
     // worth storing: the client uses it for this run and restores nothing later.
@@ -722,10 +888,10 @@ export class AuthClient {
       }
     }
     if (earliest !== null) {
-      // Both fields come off the chain: it is rooted at the account's key, and
-      // the sign-in lasts as long as its earliest delegation.
+      // The account is what a mint reported, and the sign-in lasts as long as
+      // the session chain's earliest delegation.
       this.#stateStorage.set({
-        principal: Principal.selfAuthenticating(new Uint8Array(chain.publicKey)),
+        principal: Principal.selfAuthenticating(new Uint8Array(accountKey)),
         expiration: earliest,
       });
     }
@@ -777,8 +943,16 @@ export class AuthClient {
   // state is retracted before this by both callers: it is what says whether this
   // origin is signed in, and a teardown that failed partway must not leave it
   // saying yes.
+  //
+  // Both are attempted whatever either does, since a credential that survives can
+  // still be adopted; the first failure is reported once neither is left behind.
   async #clearCredentials(): Promise<void> {
-    await this.#credentialStorage.remove(this.#slots.session);
+    const outcomes = await Promise.allSettled([
+      this.#credentialStorage.remove(this.#slots.session),
+      this.#credentialStorage.remove(this.#slots.app),
+    ]);
+    const failed = outcomes.find((outcome) => outcome.status === 'rejected');
+    if (failed !== undefined) throw failed.reason;
   }
 
   #registerDefaultIdleCallback() {
@@ -796,35 +970,22 @@ export class AuthClient {
   }
 }
 
-/**
- * Encodes a Uint8Array to a base64 string.
- * @param bytes - The bytes to encode.
- */
-function toBase64(bytes: Uint8Array): string {
-  if ('toBase64' in bytes && typeof bytes.toBase64 === 'function') {
-    return bytes.toBase64();
+/** The moment a chain stops being usable: its earliest delegation's expiry. */
+function earliestExpiryMs(chain: DelegationChain): number {
+  let earliest: bigint | null = null;
+  for (const { delegation } of chain.delegations) {
+    if (earliest === null || delegation.expiration < earliest) {
+      earliest = delegation.expiration;
+    }
   }
-  let binary = '';
-  for (let i = 0; i < bytes.byteLength; i++) {
-    binary += String.fromCharCode(bytes[i]);
-  }
-  return globalThis.btoa(binary);
+  return earliest === null ? 0 : Number(earliest / 1_000_000n);
 }
 
-/**
- * Decodes a base64 string to a Uint8Array.
- * @param str - The base64-encoded string.
- */
-function fromBase64(str: string): Uint8Array {
-  if ('fromBase64' in Uint8Array && typeof Uint8Array.fromBase64 === 'function') {
-    return Uint8Array.fromBase64(str);
-  }
-  const binary = globalThis.atob(str);
-  const bytes = new Uint8Array(binary.length);
-  for (let i = 0; i < binary.length; i++) {
-    bytes[i] = binary.charCodeAt(i);
-  }
-  return bytes;
+/** Whether a chain's leaf authorises the key it was requested for. */
+function keyMatchesChain(key: SignIdentity | PartialIdentity, chain: DelegationChain): boolean {
+  const leaf = chain.delegations[chain.delegations.length - 1]?.delegation.pubkey;
+  if (leaf === undefined) return false;
+  return publicKeyOf(key) === toBase64(new Uint8Array(leaf));
 }
 
 /** A key's public half as text, for comparing two keys without holding both. */

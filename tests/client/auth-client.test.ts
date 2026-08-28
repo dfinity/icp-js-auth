@@ -1,19 +1,69 @@
-import type { PublicKey } from '@icp-sdk/core/agent';
-import { DelegationChain, Ed25519KeyIdentity } from '@icp-sdk/core/identity';
+import type { PublicKey, SignIdentity } from '@icp-sdk/core/agent';
+import {
+  DelegationChain,
+  type DelegationIdentity,
+  Ed25519KeyIdentity,
+} from '@icp-sdk/core/identity';
 import { Principal } from '@icp-sdk/core/principal';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { slotsFor } from '../../src/client/slots.ts';
-
-/** The bare names, which is what a client with no namespace writes under. */
-const SLOTS = slotsFor();
-
 import { AuthClient } from '../../src/client/auth-client.ts';
 import type { Credential, CredentialStorage } from '../../src/client/credential-storage.ts';
 import { IdbCredentialStorage } from '../../src/client/idb-credential-storage.ts';
 import { IdleManager } from '../../src/client/idle-manager.ts';
 import { MemoryCredentialStorage } from '../../src/client/memory-credential-storage.ts';
+import { slotsFor } from '../../src/client/slots.ts';
 import { MemoryStateStorage } from '../../src/client/state-storage.ts';
 import { FakeTransport } from './fake-transport.ts';
+
+/** The bare names, which is what a client with no namespace writes under. */
+const SLOTS = slotsFor();
+
+const II_CANISTER = Principal.fromText('rdmx6-jaaaa-aaaaa-aaadq-cai');
+
+// Minting is a canister call, so the source is replaced rather than the network.
+// The timing it drives is covered in session-identity.test.ts; what matters here
+// is that AuthClient mints at sign-in and stores what came back. The mock fills
+// in `minted.accountKey` so assertions can name the principal it roots at.
+const minted = vi.hoisted(() => ({
+  accountKey: undefined as SignIdentity | undefined,
+  createdWith: [] as { canisterId?: unknown; agentOptions?: unknown }[],
+  count: 0,
+  revoked: 0,
+  refuse: false,
+}));
+
+vi.mock('../../src/client/session-minter.ts', async () => {
+  const { DelegationChain: Chain, Ed25519KeyIdentity: Key } = await import(
+    '@icp-sdk/core/identity'
+  );
+  const accountKey = Key.generate();
+  minted.accountKey = accountKey;
+  return {
+    SessionMinter: {
+      create: async (options: { canisterId?: unknown; agentOptions?: unknown }) => ({
+        mint: async (appPublicKey: Uint8Array) => {
+          minted.createdWith.push({
+            canisterId: options.canisterId,
+            agentOptions: options.agentOptions,
+          });
+          minted.count += 1;
+          if (minted.refuse) {
+            const { SessionGoneError } = await import('../../src/client/app-delegation-source.ts');
+            throw new SessionGoneError();
+          }
+          return Chain.create(
+            accountKey,
+            { toDer: () => appPublicKey } as unknown as PublicKey,
+            new Date(Date.now() + 5 * 60 * 1000),
+          );
+        },
+        revoke: async () => {
+          minted.revoked += 1;
+        },
+      }),
+    },
+  };
+});
 
 // Swap `PostMessageTransport` for `FakeTransport` so `AuthClient` uses the real
 // `Signer` over an in-memory transport — no window is opened and nothing about
@@ -100,17 +150,14 @@ const DEFAULT_REQUEST_ATTRIBUTES_BODY: JsonRpcBody = {
   result: { data: btoa('hello'), signature: btoa('sig') },
 };
 
-// A delegation-chain response as a conformant signer would build it: delegating
-// to the requested session key, scoped to any requested targets, and expiring
-// within maxTimeToLive — all of which the signer's returned-chain validation
-// (>= 5.6.1) enforces.
+// A session-chain response as Internet Identity builds it: a chain to the
+// requested session key, restricted to the Internet Identity canister, and
+// lasting as long as the session the user consented to.
 async function conformantSignInBody(params: {
-  publicKey: string;
-  targets?: string[];
+  sessionPublicKey: string;
   maxTimeToLive?: string;
 }): Promise<JsonRpcBody> {
-  const to = { toDer: () => fromBase64(params.publicKey) } as unknown as PublicKey;
-  const targets = params.targets?.map((t) => Principal.fromText(t));
+  const to = { toDer: () => fromBase64(params.sessionPublicKey) } as unknown as PublicKey;
   const ttlMs =
     params.maxTimeToLive !== undefined
       ? Number(BigInt(params.maxTimeToLive) / 1_000_000n)
@@ -119,18 +166,18 @@ async function conformantSignInBody(params: {
     Ed25519KeyIdentity.generate(),
     to,
     new Date(Date.now() + ttlMs),
-    targets ? { targets } : undefined,
+    { targets: [II_CANISTER] },
   );
   return { result: encodeDelegationChainResponse(chain) };
 }
 
 /**
- * Registers an `icrc34_delegation` handler. By default it returns a chain that
- * delegates to the requested key; pass `body` to force a specific response.
+ * Registers an `ii_session_delegation` handler. By default it returns a session
+ * chain to the requested key; pass `body` to force a specific response.
  */
 function handleSignIn(transport: FakeTransport, body?: JsonRpcBody): void {
   transport.onRequest(async (req) => {
-    if (req.method !== 'icrc34_delegation') return;
+    if (req.method !== 'ii_session_delegation') return;
     if (req.id === undefined || req.id === null) return;
     const resolved = body ?? (await conformantSignInBody(req.params as never));
     return { jsonrpc: '2.0', id: req.id, ...resolved };
@@ -300,6 +347,16 @@ describe('AuthClient', () => {
     expect(localStorage.getItem('ic-session-state')).toBeNull();
   });
 
+  it('refuses the identity provider as a bare URL, which it used to be', () => {
+    // Silently ignored would mean both halves falling back to mainnet.
+    expect(() => new AuthClient({ identityProvider: 'https://id.ai/authorize' as never })).toThrow(
+      TypeError,
+    );
+    expect(
+      () => new AuthClient({ identityProvider: new URL('https://id.ai/authorize') as never }),
+    ).toThrow(TypeError);
+  });
+
   it('should sign users out', async () => {
     const client = new AuthClient();
     await client.signOut();
@@ -438,18 +495,21 @@ describe('AuthClient signIn', () => {
     await expect(client.signIn()).rejects.toThrow('connection failed');
   });
 
-  it('should forward targets and maxTimeToLive to the delegation request', async () => {
+  it('asks for a session, carrying maxTimeToLive and no targets', async () => {
     const client = new AuthClient();
     const transport = FakeTransport.last();
     handleSignIn(transport);
 
-    const target = Principal.fromText('aaaaa-aa');
-    await client.signIn({ targets: [target], maxTimeToLive: 1_000_000n });
+    await client.signIn({ maxTimeToLive: 1_000_000n });
 
     const req = transport.requests[0];
-    expect(req.method).toBe('icrc34_delegation');
-    expect(req.params?.targets).toEqual([target.toText()]);
+    expect(req.method).toBe('ii_session_delegation');
+    expect(req.params?.sessionPublicKey).toEqual(expect.any(String));
     expect(req.params?.maxTimeToLive).toBe('1000000');
+    // A session chain is restricted to Internet Identity, so an application has
+    // no targets to ask for: what it may call is decided by the delegations
+    // minted from the session, not by the session itself.
+    expect(req.params?.targets).toBeUndefined();
   });
 
   it('should forward derivationOrigin on every request as icrc95DerivationOrigin', async () => {
@@ -586,6 +646,55 @@ describe('AuthClient signIn', () => {
     expect(client.isAuthenticated()).toBe(false);
   });
 
+  it('restores a session and adopts the app credential rather than minting again', async () => {
+    const credentialStorage = new IdbCredentialStorage();
+    const stateStorage = new MemoryStateStorage();
+    const first = new AuthClient({
+      credentialStorage,
+      stateStorage,
+      idleOptions: { disableIdle: true },
+    });
+    handleSignIn(FakeTransport.last());
+    await first.signIn();
+    const after = minted.count;
+
+    const second = new AuthClient({
+      credentialStorage,
+      stateStorage,
+      idleOptions: { disableIdle: true },
+    });
+    const identity = await second.getIdentity();
+
+    expect(identity.getPrincipal().isAnonymous()).toBe(false);
+    expect(minted.count).toBe(after); // what was stored was enough
+  });
+
+  it('mints on a load that finds no app credential, which is where the account comes from', async () => {
+    const credentialStorage = new IdbCredentialStorage();
+    const stateStorage = new MemoryStateStorage();
+    const first = new AuthClient({
+      credentialStorage,
+      stateStorage,
+      idleOptions: { disableIdle: true },
+    });
+    handleSignIn(FakeTransport.last());
+    await first.signIn();
+
+    // As TAB-5 leaves things once a delegation has run out.
+    await credentialStorage.remove(SLOTS.app);
+    const after = minted.count;
+
+    const second = new AuthClient({
+      credentialStorage,
+      stateStorage,
+      idleOptions: { disableIdle: true },
+    });
+    const identity = await second.getIdentity();
+
+    expect(minted.count).toBe(after + 1);
+    expect(identity.getPrincipal().isAnonymous()).toBe(false);
+  });
+
   it('does not restore a session the state does not back, and drops it', async () => {
     const credentialStorage = new IdbCredentialStorage();
     const stateStorage = new MemoryStateStorage();
@@ -611,6 +720,136 @@ describe('AuthClient signIn', () => {
     expect(await credentialStorage.get(SLOTS.session)).toBeNull();
   });
 
+  it('mints inside the ceremony, so the identity it returns already holds one', async () => {
+    const storage = spyStorage();
+    const client = new AuthClient({
+      credentialStorage: storage,
+      idleOptions: { disableIdle: true },
+    });
+    handleSignIn(FakeTransport.last());
+
+    const before = minted.count;
+    const identity = (await client.signIn()) as DelegationIdentity;
+
+    // A delta: the counter is shared across this file, so an absolute number
+    // would pass on mints another test made.
+    expect(minted.count).toBe(before + 1);
+    expect(identity.getDelegation().delegations).toHaveLength(1);
+    expect(await storage.get(SLOTS.app)).not.toBeNull();
+  });
+
+  it('records the account the mint reported, not the session chain it was signed with', async () => {
+    const stateStorage = new MemoryStateStorage();
+    const client = new AuthClient({ stateStorage, idleOptions: { disableIdle: true } });
+    handleSignIn(FakeTransport.last());
+
+    const identity = await client.signIn();
+
+    // The session chain is rooted at the session's own key; only a mint reports
+    // the key an application's canisters see.
+    const accountDer = minted.accountKey?.getPublicKey().toDer();
+    const account = Principal.selfAuthenticating(new Uint8Array(accountDer ?? []));
+    expect(stateStorage.get()?.principal.toText()).toBe(account.toText());
+    expect(identity.getPrincipal().toText()).toBe(account.toText());
+  });
+
+  it('refuses a session chain issued to a different key', async () => {
+    const client = new AuthClient({ idleOptions: { disableIdle: true } });
+    const other = Ed25519KeyIdentity.generate();
+    handleSignIn(FakeTransport.last(), {
+      result: encodeDelegationChainResponse(
+        await DelegationChain.create(
+          Ed25519KeyIdentity.generate(),
+          other.getPublicKey(),
+          new Date(Date.now() + 3.6e6),
+          { targets: [II_CANISTER] },
+        ),
+      ),
+    });
+
+    await expect(client.signIn()).rejects.toThrow(/does not delegate to the key/);
+  });
+
+  it('replaces the app credential rather than clearing it while signing in', async () => {
+    const storage = spyStorage();
+    const client = new AuthClient({
+      credentialStorage: storage,
+      idleOptions: { disableIdle: true },
+    });
+    handleSignIn(FakeTransport.last());
+    await client.signIn();
+    const first = await storage.get(SLOTS.app);
+
+    handleSignIn(FakeTransport.last());
+    await client.signIn();
+
+    // The slot every tab of this origin reads is never emptied: a ceremony mints
+    // into its own slot and the promotion overwrites, so a sign-in that failed
+    // would have cost the other tabs nothing.
+    expect(storage.remove).not.toHaveBeenCalledWith(SLOTS.app);
+    expect((await storage.get(SLOTS.app))?.chain?.toJSON()).not.toEqual(first?.chain?.toJSON());
+    // And the ceremony's own slot does not outlive it.
+    expect(await storage.get(SLOTS.appPending)).toBeNull();
+  });
+
+  it('leaves the shared app credential alone when a ceremony fails', async () => {
+    const storage = spyStorage();
+    const client = new AuthClient({
+      credentialStorage: storage,
+      idleOptions: { disableIdle: true },
+    });
+    handleSignIn(FakeTransport.last());
+    await client.signIn();
+    const before = await storage.get(SLOTS.app);
+
+    // A ceremony that never resolves: nothing shared may change on its account.
+    minted.refuse = true;
+    await expect(client.signIn()).rejects.toThrow();
+    minted.refuse = false;
+
+    expect((await storage.get(SLOTS.app))?.chain?.toJSON()).toEqual(before?.chain?.toJSON());
+  });
+
+  it('ends the session at the canister when signing out', async () => {
+    const client = new AuthClient({ idleOptions: { disableIdle: true } });
+    handleSignIn(FakeTransport.last());
+    await client.signIn();
+    const before = minted.revoked;
+
+    await client.signOut();
+
+    expect(minted.revoked).toBe(before + 1);
+  });
+
+  it('carries the configured canister and agent options to the minter', async () => {
+    const canisterId = Principal.fromText('aaaaa-aa');
+    const agentOptions = { host: 'https://example.test' };
+    const client = new AuthClient({
+      identityProvider: { canisterId },
+      agentOptions,
+      idleOptions: { disableIdle: true },
+    });
+    handleSignIn(FakeTransport.last());
+    await client.signIn();
+
+    expect(minted.createdWith.at(-1)).toEqual({ canisterId, agentOptions });
+  });
+
+  it('clears both credentials on sign-out, not just the session', async () => {
+    const credentialStorage = new MemoryCredentialStorage();
+    const client = new AuthClient({ credentialStorage, idleOptions: { disableIdle: true } });
+    handleSignIn(FakeTransport.last());
+    await client.signIn();
+    expect(await credentialStorage.get(SLOTS.app)).not.toBeNull();
+
+    await client.signOut();
+
+    // Teardown covers every slot rather than whichever one a caller names, so a
+    // delegation cannot outlive the sign-in it was minted under.
+    expect(await credentialStorage.get(SLOTS.session)).toBeNull();
+    expect(await credentialStorage.get(SLOTS.app)).toBeNull();
+  });
+
   it('clears the state storage on sign-out', async () => {
     const stateStorage = new MemoryStateStorage();
     const client = new AuthClient({ stateStorage, idleOptions: { disableIdle: true } });
@@ -634,18 +873,24 @@ describe('AuthClient idle behavior', () => {
     handleSignIn(FakeTransport.last());
     await client.signIn();
 
-    expect(storage.remove).not.toHaveBeenCalled();
+    expect(storage.remove).not.toHaveBeenCalledWith(SLOTS.session);
 
     await new Promise((r) => setTimeout(r, 1100));
 
-    expect(storage.remove).toHaveBeenCalled();
+    expect(storage.remove).toHaveBeenCalledWith(SLOTS.session);
     expect(window.location.reload).toHaveBeenCalled();
     expect(client.isAuthenticated()).toBe(false);
   });
 
   it('does not reload when idle sign-out fails (would otherwise restore the session)', async () => {
     const storage = spyStorage();
-    storage.remove = vi.fn().mockRejectedValue(new Error('storage unavailable'));
+    const remove = storage.remove;
+    // Only the session's removal fails: sign-in clears the app slot first, and a
+    // sign-in that could not start would not reach the idle timer at all.
+    storage.remove = vi.fn(async (slot: string) => {
+      if (slot === SLOTS.session) throw new Error('storage unavailable');
+      return remove(slot);
+    });
     const client = new AuthClient({
       credentialStorage: storage,
       idleOptions: { idleTimeout: 1000 },
@@ -672,7 +917,7 @@ describe('AuthClient idle behavior', () => {
 
     await new Promise((r) => setTimeout(r, 1100));
 
-    expect(storage.remove).not.toHaveBeenCalled();
+    expect(storage.remove).not.toHaveBeenCalledWith(SLOTS.session);
     expect(window.location.reload).not.toHaveBeenCalled();
   });
 
