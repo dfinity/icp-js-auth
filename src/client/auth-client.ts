@@ -19,7 +19,6 @@ import {
   KEY_STORAGE_DELEGATION,
   KEY_STORAGE_KEY,
   KEY_VECTOR,
-  LocalStorage,
   type StoredKey,
 } from './storage.js';
 
@@ -609,9 +608,7 @@ export class AuthClient {
   // storage. If found and still valid, sets #identity and #chain so the
   // client is ready to use without a new signIn().
   async #hydrate(): Promise<void> {
-    const key =
-      this.#options.identity ??
-      (await restoreKey(this.#storage, this.#options.keyType ?? ECDSA_KEY_LABEL));
+    const key = this.#options.identity ?? (await restoreKey(this.#storage));
     if (!key) return;
 
     const chain = await restoreChain(this.#storage, this.#stateStorage);
@@ -717,12 +714,8 @@ async function persistKey(
  */
 async function restoreKey(
   storage: AuthClientStorage,
-  keyType: BaseKeyType,
 ): Promise<SignIdentity | PartialIdentity | null> {
-  let stored = await storage.get(KEY_STORAGE_KEY);
-  if (!stored) {
-    stored = await migrateFromLocalStorage(storage, keyType);
-  }
+  const stored = await storage.get(KEY_STORAGE_KEY);
   if (!stored) return null;
 
   try {
@@ -910,36 +903,6 @@ async function deleteStorage(
   await storage.remove(KEY_STORAGE_KEY);
   await storage.remove(KEY_STORAGE_DELEGATION);
   await storage.remove(KEY_VECTOR);
-}
-
-/**
- * One-time migration: moves a legacy session stored in localStorage
- * into the primary storage, then cleans up the old entries.
- * @param storage - The target storage backend.
- * @param keyType - The expected key algorithm (only ECDSA keys are migrated).
- */
-async function migrateFromLocalStorage(
-  storage: AuthClientStorage,
-  keyType: BaseKeyType,
-): Promise<StoredKey | null> {
-  try {
-    const fallback = new LocalStorage();
-    const localChain = await fallback.get(KEY_STORAGE_DELEGATION);
-    const localKey = await fallback.get(KEY_STORAGE_KEY);
-
-    if (!localChain || !localKey || keyType !== ECDSA_KEY_LABEL) return null;
-
-    console.log('Discovered an identity stored in localstorage. Migrating to IndexedDB');
-    await storage.set(KEY_STORAGE_DELEGATION, localChain);
-    await storage.set(KEY_STORAGE_KEY, localKey);
-    await fallback.remove(KEY_STORAGE_DELEGATION);
-    await fallback.remove(KEY_STORAGE_KEY);
-
-    return localKey;
-  } catch (error) {
-    console.error(`error while attempting to recover localstorage: ${error}`);
-    return null;
-  }
 }
 
 /**

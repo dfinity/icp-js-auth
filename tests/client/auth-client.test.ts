@@ -10,7 +10,6 @@ import {
   IdbStorage,
   KEY_STORAGE_DELEGATION,
   KEY_STORAGE_KEY,
-  LocalStorage,
 } from '../../src/client/storage.ts';
 import { FakeTransport } from './fake-transport.ts';
 
@@ -610,24 +609,6 @@ describe('Migration from localStorage', () => {
 
     // No migration should have occurred (no set calls for delegation/key)
     expect(storage.set).not.toHaveBeenCalled();
-  });
-
-  it('should migrate storage from localStorage', async () => {
-    const legacyStorage = new LocalStorage();
-    const storage: AuthClientStorage = {
-      remove: vi.fn(),
-      get: vi.fn().mockResolvedValue(null),
-      set: vi.fn(),
-    };
-
-    await legacyStorage.set(KEY_STORAGE_DELEGATION, 'test');
-    await legacyStorage.set(KEY_STORAGE_KEY, 'key');
-
-    new AuthClient({ storage });
-    await new Promise((r) => setTimeout(r, 0)); // wait for hydration
-
-    expect(storage.set).toHaveBeenCalledWith(KEY_STORAGE_DELEGATION, 'test');
-    expect(storage.set).toHaveBeenCalledWith(KEY_STORAGE_KEY, 'key');
   });
 });
 
