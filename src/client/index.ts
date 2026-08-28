@@ -2,6 +2,7 @@
  * @module api/client
  */
 
+export { type AppDelegationSource, SessionGoneError } from './app-delegation-source.js';
 export * from './auth-client.js';
 export type { Credential, CredentialStorage } from './credential-storage.js';
 export { DB_VERSION, type DBCreateOptions, IdbKeyVal } from './db.js';
@@ -9,6 +10,7 @@ export { IdbCredentialStorage } from './idb-credential-storage.js';
 export * from './idle-manager.js';
 export { LocalCredentialStorage } from './local-credential-storage.js';
 export { MemoryCredentialStorage } from './memory-credential-storage.js';
+export { SessionIdentity, type SessionIdentityOptions } from './session-identity.js';
 export {
   LocalStateStorage,
   MemoryStateStorage,
