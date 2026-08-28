@@ -12,6 +12,7 @@ import type { Credential, CredentialStorage } from '../../src/client/credential-
 import { IdbCredentialStorage } from '../../src/client/idb-credential-storage.ts';
 import { IdleManager } from '../../src/client/idle-manager.ts';
 import { MemoryCredentialStorage } from '../../src/client/memory-credential-storage.ts';
+import type { SessionIdentity } from '../../src/client/session-identity.ts';
 import { slotsFor } from '../../src/client/slots.ts';
 import { MemoryStateStorage } from '../../src/client/state-storage.ts';
 import { FakeTransport } from './fake-transport.ts';
@@ -1030,6 +1031,147 @@ describe('AuthClient signIn', () => {
     // delegation cannot outlive the sign-in it was minted under.
     expect(await credentialStorage.get(SLOTS.session)).toBeNull();
     expect(await credentialStorage.get(SLOTS.app)).toBeNull();
+  });
+
+  it('mints on the page load that restores a session, before any request', async () => {
+    // Memory-backed: these tests move a fake clock, and IndexedDB does not
+    // settle while one is installed.
+    const credentialStorage = new MemoryCredentialStorage();
+    const stateStorage = new MemoryStateStorage();
+    const first = new AuthClient({ credentialStorage, stateStorage });
+    handleSignIn(FakeTransport.last());
+    await first.signIn();
+    first.dispose();
+
+    // As TAB-5 leaves things once the delegation has run out, so a load is due.
+    await credentialStorage.remove(APP_SLOT);
+    minted.count = 0;
+    const restored = new AuthClient({ credentialStorage, stateStorage });
+
+    // `pageshow` fires as part of the load, which is before the asynchronous
+    // restore has produced an identity. The refresh has to wait for it, or the
+    // load mints nothing and the first user action pays for the round trip.
+    globalThis.dispatchEvent(new Event('pageshow'));
+    for (let i = 0; i < 200 && minted.count === 0; i++) {
+      await new Promise((resolve) => setTimeout(resolve, 5));
+    }
+
+    expect(minted.count).toBeGreaterThan(0);
+    restored.dispose();
+  });
+
+  it('mints when the tab comes back, if one is due', async () => {
+    const client = new AuthClient({ credentialStorage: new MemoryCredentialStorage() });
+    handleSignIn(FakeTransport.last());
+    const identity = (await client.signIn()) as SessionIdentity;
+    const held = identity.getDelegation();
+
+    // The clock moves while the tab is in the background; its own timers do not
+    // run, which is the case this trigger exists for.
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(new Date(Date.now() + 4 * 60 * 1000 + 50_000));
+    document.dispatchEvent(new Event('visibilitychange'));
+    for (let turn = 0; turn < 100 && identity.getDelegation() === held; turn++) {
+      await new Promise((resolve) => setTimeout(resolve, 1));
+    }
+    vi.useRealTimers();
+
+    expect(identity.getDelegation()).not.toBe(held);
+    client.dispose();
+  });
+
+  it('does not refresh the identity a ceremony is in the middle of replacing', async () => {
+    const client = new AuthClient({ credentialStorage: new MemoryCredentialStorage() });
+    // Answers the first ceremony only, so the second stays in flight.
+    let answered = 0;
+    FakeTransport.last().onRequest(async (req) => {
+      if (req.method !== 'ii_session_delegation' || req.id == null) return;
+      if (answered++ > 0) return;
+      return { jsonrpc: '2.0', id: req.id, ...(await conformantSignInBody(req.params as never)) };
+    });
+    const identity = (await client.signIn()) as SessionIdentity;
+    const held = identity.getDelegation();
+
+    // A ceremony in flight. A redirect backgrounds the tab and foregrounds it
+    // again on the way back, which is this event; without the guard it would
+    // mint for the session the ceremony is replacing.
+    const inFlight = client.signIn().catch(() => undefined);
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(new Date(Date.now() + 4 * 60 * 1000 + 50_000));
+    document.dispatchEvent(new Event('visibilitychange'));
+    for (let turn = 0; turn < 20; turn++) await new Promise((resolve) => setTimeout(resolve, 1));
+    vi.useRealTimers();
+
+    // Asserted on this client's own identity: the event reaches every client the
+    // suite has left hooked to this document, so a global mint count would not
+    // say which one minted.
+    expect(identity.getDelegation()).toBe(held);
+    client.dispose();
+    void inFlight;
+  });
+
+  it('installs nothing when disposed while the restore is in flight', async () => {
+    const credentialStorage = new MemoryCredentialStorage();
+    const stateStorage = new MemoryStateStorage();
+    const first = new AuthClient({ credentialStorage, stateStorage });
+    handleSignIn(FakeTransport.last());
+    await first.signIn();
+    first.dispose();
+
+    // The constructor starts the restore without awaiting it, so this disposes
+    // one that is still resolving.
+    const second = new AuthClient({ credentialStorage, stateStorage });
+    second.dispose();
+    const identity = await second.getIdentity();
+
+    // An identity installed after dispose would schedule refreshes nothing stops.
+    expect(identity.getPrincipal().isAnonymous()).toBe(true);
+  });
+
+  it('stays silent when the restore itself fails', async () => {
+    const credentialStorage = spyStorage();
+    credentialStorage.get = vi.fn().mockRejectedValue(new Error('storage unavailable'));
+    const client = new AuthClient({ credentialStorage });
+
+    // Nothing is waiting on a foreground refresh, so a failed restore must not
+    // surface as an unhandled rejection from the event handler.
+    globalThis.dispatchEvent(new Event('pageshow'));
+    await new Promise((resolve) => setTimeout(resolve, 10));
+
+    expect(client.isAuthenticated()).toBe(false);
+    client.dispose();
+  });
+
+  it('costs nothing to glance at a tab whose delegation is healthy', async () => {
+    const client = new AuthClient({ credentialStorage: new MemoryCredentialStorage() });
+    handleSignIn(FakeTransport.last());
+    const identity = (await client.signIn()) as SessionIdentity;
+    const held = identity.getDelegation();
+
+    document.dispatchEvent(new Event('visibilitychange'));
+    await Promise.resolve();
+
+    expect(identity.getDelegation()).toBe(held);
+    client.dispose();
+  });
+
+  it('hooks nothing when foreground refresh is turned off', async () => {
+    const client = new AuthClient({
+      disableForegroundRefresh: true,
+      credentialStorage: new MemoryCredentialStorage(),
+    });
+    handleSignIn(FakeTransport.last());
+    const identity = (await client.signIn()) as SessionIdentity;
+    const held = identity.getDelegation();
+
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(new Date(Date.now() + 4 * 60 * 1000 + 50_000));
+    document.dispatchEvent(new Event('visibilitychange'));
+    for (let turn = 0; turn < 20; turn++) await new Promise((resolve) => setTimeout(resolve, 1));
+    vi.useRealTimers();
+
+    expect(identity.getDelegation()).toBe(held);
+    client.dispose();
   });
 
   it('clears the state storage on sign-out', async () => {
