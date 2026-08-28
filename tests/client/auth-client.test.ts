@@ -38,6 +38,17 @@ function fromBase64(value: string): Uint8Array {
   return bytes;
 }
 
+// The state a stored chain puts an origin in, so a test that seeds storage
+// directly seeds what AuthClient reads to decide it is signed in.
+function stateFor(chain: DelegationChain): MemoryStateStorage {
+  const storage = new MemoryStateStorage();
+  storage.set({
+    principal: Principal.selfAuthenticating(new Uint8Array(chain.publicKey)),
+    expiration: chain.delegations[0]!.delegation.expiration,
+  });
+  return storage;
+}
+
 async function createTestDelegation(key: Ed25519KeyIdentity, expiration?: Date) {
   const exp = expiration ?? new Date(Date.now() + 24 * 60 * 60 * 1000); // 1 day from now
   return DelegationChain.create(key, key.getPublicKey(), exp);
@@ -160,7 +171,7 @@ describe('AuthClient', () => {
       }),
       set: vi.fn(),
     };
-    const client = new AuthClient({ identity, storage });
+    const client = new AuthClient({ identity, storage, stateStorage: stateFor(chain) });
     const resolved = await client.getIdentity();
     expect(resolved.getPrincipal().isAnonymous()).toBe(false);
   });
@@ -401,6 +412,23 @@ describe('AuthClient signIn', () => {
     expect(client.isAuthenticated()).toBe(false);
   });
 
+  it('does not restore a session the state does not back, and drops it', async () => {
+    const storage = new IdbStorage();
+    const stateStorage = new MemoryStateStorage();
+    const first = new AuthClient({ storage, stateStorage, idleOptions: { disableIdle: true } });
+    handleSignIn(FakeTransport.last());
+    await first.signIn();
+    expect(await storage.get(KEY_STORAGE_DELEGATION)).not.toBeNull();
+
+    // Only the state goes; the delegation is left exactly where it was.
+    stateStorage.remove();
+
+    const second = new AuthClient({ storage, stateStorage, idleOptions: { disableIdle: true } });
+    const identity = await second.getIdentity();
+    expect(identity.getPrincipal().isAnonymous()).toBe(true);
+    expect(await storage.get(KEY_STORAGE_DELEGATION)).toBeNull();
+  });
+
   it('clears the state storage on sign-out', async () => {
     const stateStorage = new MemoryStateStorage();
     const client = new AuthClient({ stateStorage, idleOptions: { disableIdle: true } });
@@ -521,7 +549,7 @@ describe('Session restoration', () => {
       set: vi.fn(),
     };
 
-    const client = new AuthClient({ storage });
+    const client = new AuthClient({ storage, stateStorage: stateFor(chain) });
     const identity = await client.getIdentity();
     expect(identity.getPrincipal().isAnonymous()).toBe(false);
   });

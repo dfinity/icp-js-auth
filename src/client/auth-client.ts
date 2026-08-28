@@ -617,6 +617,16 @@ export class AuthClient {
     const chain = await restoreChain(this.#storage, this.#stateStorage);
     if (!chain) return;
 
+    // The state decides whether this origin is signed in, so a chain it does not
+    // back belongs to a sign-in that has ended: drop it rather than restore it,
+    // or getIdentity() would hand back an identity isAuthenticated() calls
+    // signed out. Asked after the chain is read, so a visitor who was never
+    // signed in removes nothing.
+    if (this.#stateStorage.get() === null) {
+      await deleteStorage(this.#storage, this.#stateStorage);
+      return;
+    }
+
     this.#chain = chain;
     if ('toDer' in key) {
       this.#identity = PartialDelegationIdentity.fromDelegation(key, chain);
