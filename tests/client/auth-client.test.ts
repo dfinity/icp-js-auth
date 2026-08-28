@@ -4,6 +4,7 @@ import { Principal } from '@icp-sdk/core/principal';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { AuthClient } from '../../src/client/auth-client.ts';
 import { IdleManager } from '../../src/client/idle-manager.ts';
+import { MemoryStateStorage } from '../../src/client/state-storage.ts';
 import {
   type AuthClientStorage,
   IdbStorage,
@@ -358,7 +359,7 @@ describe('AuthClient signIn', () => {
     expect(storedKeys[0]).not.toEqual(storedKeys[1]);
   });
 
-  it('should set the localStorage expiration flag after sign-in', async () => {
+  it('should report the user as authenticated after sign-in', async () => {
     const client = new AuthClient({ idleOptions: { disableIdle: true } });
     handleSignIn(FakeTransport.last());
     expect(client.isAuthenticated()).toBe(false);
@@ -366,13 +367,50 @@ describe('AuthClient signIn', () => {
     expect(client.isAuthenticated()).toBe(true);
   });
 
-  it('should clear the localStorage expiration flag on sign-out', async () => {
+  it('should report the user as not authenticated after sign-out', async () => {
     const client = new AuthClient({ idleOptions: { disableIdle: true } });
     handleSignIn(FakeTransport.last());
     await client.signIn();
     expect(client.isAuthenticated()).toBe(true);
     await client.signOut();
     expect(client.isAuthenticated()).toBe(false);
+  });
+
+  it('records the account and the expiry in the supplied state storage', async () => {
+    const stateStorage = new MemoryStateStorage();
+    const client = new AuthClient({ stateStorage, idleOptions: { disableIdle: true } });
+    handleSignIn(FakeTransport.last());
+    await client.signIn();
+
+    const state = stateStorage.get();
+    const identity = await client.getIdentity();
+    expect(state?.principal.toText()).toBe(identity.getPrincipal().toText());
+    expect(state?.expiration).toBeGreaterThan(BigInt(Date.now()) * BigInt(1_000_000));
+  });
+
+  it('answers isAuthenticated from the state storage and not from the delegation', async () => {
+    const stateStorage = new MemoryStateStorage();
+    const client = new AuthClient({ stateStorage, idleOptions: { disableIdle: true } });
+    handleSignIn(FakeTransport.last());
+    await client.signIn();
+    expect(client.isAuthenticated()).toBe(true);
+
+    // The delegation is untouched; only the state is gone.
+    stateStorage.remove();
+
+    expect(client.isAuthenticated()).toBe(false);
+  });
+
+  it('clears the state storage on sign-out', async () => {
+    const stateStorage = new MemoryStateStorage();
+    const client = new AuthClient({ stateStorage, idleOptions: { disableIdle: true } });
+    handleSignIn(FakeTransport.last());
+    await client.signIn();
+    expect(stateStorage.get()).not.toBeNull();
+
+    await client.signOut();
+
+    expect(stateStorage.get()).toBeNull();
   });
 });
 

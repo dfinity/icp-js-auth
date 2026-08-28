@@ -8,10 +8,11 @@ import {
   PartialDelegationIdentity,
   type PartialIdentity,
 } from '@icp-sdk/core/identity';
-import type { Principal } from '@icp-sdk/core/principal';
+import { Principal } from '@icp-sdk/core/principal';
 import { Signer } from '@icp-sdk/signer';
 import { PostMessageTransport, UrlTransport } from '@icp-sdk/signer/web';
 import { IdleManager, type IdleManagerOptions } from './idle-manager.js';
+import { LocalStateStorage, type StateStorage } from './state-storage.js';
 import {
   type AuthClientStorage,
   IdbStorage,
@@ -32,10 +33,6 @@ const DEFAULT_MAX_TIME_TO_LIVE = BigInt(8) * NANOSECONDS_PER_HOUR;
 const ECDSA_KEY_LABEL = 'ECDSA';
 const ED25519_KEY_LABEL = 'Ed25519';
 type BaseKeyType = typeof ECDSA_KEY_LABEL | typeof ED25519_KEY_LABEL;
-
-// localStorage key used to cache the delegation expiration so that
-// isAuthenticated() can answer synchronously without hitting IndexedDB.
-const KEY_STORAGE_EXPIRATION = 'ic-delegation_expiration';
 
 // Storage key prefix for a redirect flow's session key, held only while the
 // flow is in progress (keyed by a per-flow id) and removed once the delegation
@@ -79,6 +76,17 @@ export interface AuthClientCreateOptions {
    * @default IdbStorage
    */
   storage?: AuthClientStorage;
+
+  /**
+   * Where the state of the sign-in is kept: which account is signed in here,
+   * and until when. Defaults to `localStorage`.
+   *
+   * This is what {@link AuthClient.isAuthenticated} answers from, which is why
+   * it is a store of its own rather than something read back out of
+   * {@link AuthClientCreateOptions.storage}: the state has to be readable
+   * without awaiting, and a credential store does not have to be.
+   */
+  stateStorage?: StateStorage;
 
   /**
    * Type of session key to generate on each sign-in.
@@ -193,6 +201,7 @@ export class AuthClient {
   #identity: Identity | PartialIdentity = new AnonymousIdentity();
   #chain: DelegationChain | null = null;
   #storage: AuthClientStorage;
+  #stateStorage: StateStorage;
   #signer: Signer;
   // Set only in redirect mode, so the redirect-specific paths (nonce/key
   // journaling) can reach `memoize`. Undefined in the default 'window' mode.
@@ -204,6 +213,7 @@ export class AuthClient {
   constructor(options: AuthClientCreateOptions = {}) {
     this.#options = options;
     this.#storage = options.storage ?? new IdbStorage();
+    this.#stateStorage = options.stateStorage ?? new LocalStateStorage();
 
     const identityProviderUrl = new URL(
       options.identityProvider?.toString() || IDENTITY_PROVIDER_DEFAULT,
@@ -258,11 +268,12 @@ export class AuthClient {
    * Checks whether the user has an active, non-expired session.
    */
   isAuthenticated(): boolean {
-    // Uses a cached expiration in localStorage to avoid an async IndexedDB read.
-    const expiration = getExpirationFlag();
-    if (expiration === null) return false;
+    // Reads the state rather than the delegation, so the answer needs no
+    // asynchronous store and a page load can render on it.
+    const state = this.#stateStorage.get();
+    if (state === null) return false;
     const nowNs = BigInt(Date.now()) * BigInt(1_000_000);
-    return nowNs < expiration;
+    return nowNs < state.expiration;
   }
 
   /**
@@ -339,7 +350,7 @@ export class AuthClient {
     }
 
     // Persist so the session survives page reloads.
-    await persistChain(this.#storage, this.#chain);
+    await persistChain(this.#storage, this.#stateStorage, this.#chain);
     await persistKey(this.#storage, key);
 
     // The flow is complete: the delegation is bound to this key and stored, so
@@ -537,7 +548,7 @@ export class AuthClient {
     // Wait for the constructor's session restore: hydration racing the
     // deletion below could re-populate the identity from already-read state.
     await this.#init();
-    await deleteStorage(this.#storage);
+    await deleteStorage(this.#storage, this.#stateStorage);
 
     this.#identity = new AnonymousIdentity();
     this.#chain = null;
@@ -603,7 +614,7 @@ export class AuthClient {
       (await restoreKey(this.#storage, this.#options.keyType ?? ECDSA_KEY_LABEL));
     if (!key) return;
 
-    const chain = await restoreChain(this.#storage);
+    const chain = await restoreChain(this.#storage, this.#stateStorage);
     if (!chain) return;
 
     this.#chain = chain;
@@ -819,12 +830,17 @@ function serializeKey(key: SignIdentity | PartialIdentity): StoredKey {
 }
 
 /**
- * Saves the delegation chain and caches its earliest expiration
- * in localStorage so {@link AuthClient.isAuthenticated} can check it synchronously.
+ * Saves the delegation chain and records the state it puts this origin in, so
+ * {@link AuthClient.isAuthenticated} can answer without reading the chain back.
  * @param storage - The storage backend.
+ * @param stateStorage - Where the state of the sign-in is kept.
  * @param chain - The delegation chain to persist.
  */
-async function persistChain(storage: AuthClientStorage, chain: DelegationChain): Promise<void> {
+async function persistChain(
+  storage: AuthClientStorage,
+  stateStorage: StateStorage,
+  chain: DelegationChain,
+): Promise<void> {
   await storage.set(KEY_STORAGE_DELEGATION, JSON.stringify(chain.toJSON()));
 
   let earliest: bigint | null = null;
@@ -834,7 +850,12 @@ async function persistChain(storage: AuthClientStorage, chain: DelegationChain):
     }
   }
   if (earliest !== null) {
-    localStorage.setItem(KEY_STORAGE_EXPIRATION, earliest.toString());
+    // Both fields come off the chain: it is rooted at the account's key, and
+    // the sign-in lasts as long as its earliest delegation.
+    stateStorage.set({
+      principal: Principal.selfAuthenticating(new Uint8Array(chain.publicKey)),
+      expiration: earliest,
+    });
   }
 }
 
@@ -843,20 +864,23 @@ async function persistChain(storage: AuthClientStorage, chain: DelegationChain):
  * storage if the chain is expired or corrupted.
  * @param storage - The storage backend.
  */
-async function restoreChain(storage: AuthClientStorage): Promise<DelegationChain | null> {
+async function restoreChain(
+  storage: AuthClientStorage,
+  stateStorage: StateStorage,
+): Promise<DelegationChain | null> {
   try {
     const raw = await storage.get(KEY_STORAGE_DELEGATION);
     if (!raw || typeof raw !== 'string') return null;
 
     const chain = DelegationChain.fromJSON(raw);
     if (!isDelegationValid(chain)) {
-      await deleteStorage(storage);
+      await deleteStorage(storage, stateStorage);
       return null;
     }
     return chain;
   } catch (e) {
     console.error(e);
-    await deleteStorage(storage);
+    await deleteStorage(storage, stateStorage);
     return null;
   }
 }
@@ -864,19 +888,18 @@ async function restoreChain(storage: AuthClientStorage): Promise<DelegationChain
 /**
  * Clears all session data from storage.
  * @param storage - The storage backend.
+ * @param stateStorage - Where the state of the sign-in is kept.
  */
-async function deleteStorage(storage: AuthClientStorage): Promise<void> {
+async function deleteStorage(
+  storage: AuthClientStorage,
+  stateStorage: StateStorage,
+): Promise<void> {
+  // The state goes first: it is what says whether this origin is signed in, and
+  // a teardown that failed halfway must not leave it saying yes.
+  stateStorage.remove();
   await storage.remove(KEY_STORAGE_KEY);
   await storage.remove(KEY_STORAGE_DELEGATION);
   await storage.remove(KEY_VECTOR);
-  localStorage.removeItem(KEY_STORAGE_EXPIRATION);
-}
-
-/** Reads the cached delegation expiration from localStorage (nanoseconds). */
-function getExpirationFlag(): bigint | null {
-  const value = localStorage.getItem(KEY_STORAGE_EXPIRATION);
-  if (value === null) return null;
-  return BigInt(value);
 }
 
 /**
