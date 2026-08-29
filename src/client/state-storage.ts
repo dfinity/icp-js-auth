@@ -79,6 +79,10 @@ const DEFAULT_KEY = 'ic-session-state';
  * @see implements {@link StateStorage}
  */
 export class LocalStateStorage implements StateStorage {
+  // Fired on a same-tab write: `storage` reaches the other tabs of an origin and
+  // deliberately not the one that wrote.
+  #subscribers = new Set<() => void>();
+
   /**
    * @param key - Storage key for the state. Change it only to avoid a collision
    *   with another client under the same origin.
@@ -103,10 +107,51 @@ export class LocalStateStorage implements StateStorage {
       this.key,
       `${state.principal.toText()}|${state.expiration.toString()}`,
     );
+    this.#fire();
   }
 
   public remove(): void {
     this.#localStorage().removeItem(this.key);
+    this.#fire();
+  }
+
+  /**
+   * Fires when the state changes, here or in another tab of this origin.
+   *
+   * `localStorage` raises `storage` in every tab except the one that wrote, so
+   * that event carries a change between tabs and a same-tab write is announced
+   * directly. Either way the record is readable before it is announced, so a
+   * listener asking who is signed in sees what it was told about.
+   */
+  public subscribe(listener: () => void): () => void {
+    let last = this.#raw();
+    const check = (): void => {
+      const now = this.#raw();
+      if (now !== last) {
+        last = now;
+        listener();
+      }
+    };
+    this.#subscribers.add(check);
+
+    const onStorage = (event: StorageEvent): void => {
+      // `key` is null when a tab cleared the whole store, which changes this too.
+      if (event.key === this.key || event.key === null) check();
+    };
+    globalThis.addEventListener('storage', onStorage);
+
+    return () => {
+      this.#subscribers.delete(check);
+      globalThis.removeEventListener('storage', onStorage);
+    };
+  }
+
+  #fire(): void {
+    for (const check of this.#subscribers) check();
+  }
+
+  #raw(): string | null {
+    return this.#localStorage().getItem(this.key);
   }
 
   #localStorage(): Storage {

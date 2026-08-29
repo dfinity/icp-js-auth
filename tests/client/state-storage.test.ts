@@ -1,5 +1,5 @@
 import { Principal } from '@icp-sdk/core/principal';
-import { beforeEach, describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   LocalStateStorage,
   MemoryStateStorage,
@@ -64,6 +64,41 @@ describe('LocalStateStorage', () => {
     storage.set(state);
 
     expect(storage.get()?.expiration).toBe(state.expiration);
+  });
+
+  it('tells a subscriber about a write here and about one in another tab', () => {
+    const storage = new LocalStateStorage();
+    const listener = vi.fn();
+    const unsubscribe = storage.subscribe(listener);
+
+    storage.set(state);
+    expect(listener).toHaveBeenCalledTimes(1);
+
+    // `storage` does not fire in the tab that wrote, so this is how another
+    // tab's sign-out arrives: the value is already there, and the event says so.
+    localStorage.removeItem(storage.key);
+    globalThis.dispatchEvent(new StorageEvent('storage', { key: storage.key }));
+    expect(listener).toHaveBeenCalledTimes(2);
+
+    // Something else changing is not this changing.
+    globalThis.dispatchEvent(new StorageEvent('storage', { key: 'unrelated' }));
+    expect(listener).toHaveBeenCalledTimes(2);
+
+    unsubscribe();
+    storage.set(state);
+    expect(listener).toHaveBeenCalledTimes(2);
+  });
+
+  it('announces a change only once it can be read', () => {
+    const storage = new LocalStateStorage();
+    let seen: unknown = 'not read';
+    storage.subscribe(() => {
+      seen = storage.get();
+    });
+
+    storage.set(state);
+
+    expect(seen).toEqual(state);
   });
 
   it.each([
