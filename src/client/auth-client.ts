@@ -249,6 +249,23 @@ export type SessionStatus =
   | { status: 'signed-out' };
 
 /**
+ * Thrown when a sign-in exists within the state store's reach but this origin
+ * holds no credential for it.
+ *
+ * A sibling subdomain reads the shared record on its first load and is in exactly
+ * this position: someone is signed in, and it has nothing to act with until it
+ * acquires its own. Catching this is where a silent re-issue belongs.
+ */
+export class SessionNotHeldError extends Error {
+  constructor(
+    message = 'A sign-in exists for this domain, but this origin holds no credential for it',
+  ) {
+    super(message);
+    this.name = 'SessionNotHeldError';
+  }
+}
+
+/**
  * Manages authentication and identity for Internet Computer web apps.
  *
  * `getStatus()`, `isAuthenticated()` and `getPrincipal()` are synchronous, so a
@@ -352,6 +369,16 @@ export class AuthClient {
    */
   async getIdentity(): Promise<Identity> {
     await this.#init();
+
+    // The state names an account and this origin holds nothing for it — a
+    // sibling subdomain that has not acquired its own credential. Handing back an
+    // anonymous identity here is the dangerous answer: calls would go out
+    // unauthenticated while `isAuthenticated()` and the shared record both say
+    // someone is signed in. Failing by name is what lets a caller acquire one.
+    const state = this.#stateStorage.get();
+    if (state !== null && !state.held && this.#identity instanceof AnonymousIdentity) {
+      throw new SessionNotHeldError();
+    }
     return this.#identity;
   }
 
@@ -981,6 +1008,18 @@ export class AuthClient {
       // Disposed while this was in flight: install nothing, and stop the refresh
       // this identity has already scheduled for itself.
       identity.dispose();
+      return;
+    }
+
+    // The state decides who is signed in here, and a sibling subdomain can have
+    // changed it while this origin was away. Credentials rooted at an account the
+    // state no longer names belong to a sign-in that has ended, so they go rather
+    // than being restored — the app credential with them, since `#openSession`
+    // may have minted one for an account the state no longer names.
+    const state = this.#stateStorage.get();
+    if (state === null || state.principal.toText() !== identity.getPrincipal().toText()) {
+      identity.dispose();
+      await this.#dropSession();
       return;
     }
     this.#identity = identity;
