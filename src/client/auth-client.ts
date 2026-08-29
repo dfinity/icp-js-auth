@@ -196,6 +196,28 @@ export interface SignedAttributes {
  *   ? await authClient.getIdentity()
  *   : await authClient.signIn();
  */
+/**
+ * What the state adds up to for this origin, once the clock is applied.
+ *
+ * The record says what is signed in and whether this origin holds a credential
+ * for it; this says what that means. The principal is present in every case
+ * where a record exists, which is what a silent re-issue needs in order to name
+ * the account it is for.
+ */
+export type SessionStatus =
+  | { status: 'signed-in'; principal: Principal }
+  /**
+   * A sign-in this origin has no credential for, so it cannot act on it yet.
+   *
+   * Only reachable where the record reaches past this origin: a sibling
+   * subdomain signed in and this one has not acquired its own credential. The
+   * silent re-issue that fixes it can still fail, and the fallback is asking the
+   * user.
+   */
+  | { status: 'signed-in-elsewhere'; principal: Principal }
+  | { status: 'expired'; principal: Principal }
+  | { status: 'signed-out' };
+
 export class AuthClient {
   #identity: Identity | PartialIdentity = new AnonymousIdentity();
   #chain: DelegationChain | null = null;
@@ -267,15 +289,37 @@ export class AuthClient {
    * Checks whether the user has an active, non-expired session.
    */
   isAuthenticated(): boolean {
-    // Reads the state rather than the delegation, so the answer needs no
-    // asynchronous store and a page load can render on it.
+    return this.getStatus().status === 'signed-in';
+  }
+
+  /**
+   * What this origin's sign-in amounts to right now.
+   *
+   * Four cases, tested in one place so an application does not have to know the
+   * order in which they exclude each other. Reading the record directly means
+   * recombining `held` and the expiry at every call site, which is where the
+   * difference between "signed in here" and "signed in on this domain" gets lost.
+   *
+   * Reads the state rather than the delegation, so the answer needs no
+   * asynchronous store and a page load can render on it.
+   */
+  getStatus(): SessionStatus {
     const state = this.#stateStorage.get();
+    if (state === null) return { status: 'signed-out' };
+
+    const { principal } = state;
+    // Expiry first: a record that has run out says nothing about who may act,
+    // whoever it belongs to, and an application showing "your session ended"
+    // wants that ahead of the rest.
+    if (BigInt(Date.now()) * BigInt(1_000_000) >= state.expiration) {
+      return { status: 'expired', principal };
+    }
     // `held` is what separates "this origin can act" from "someone is signed in
-    // within this store's reach" — the second is true on a sibling subdomain that
-    // has not acquired a credential of its own.
-    if (state === null || !state.held) return false;
-    const nowNs = BigInt(Date.now()) * BigInt(1_000_000);
-    return nowNs < state.expiration;
+    // within this store's reach" — the second is a sibling subdomain that has not
+    // acquired a credential of its own.
+    return state.held
+      ? { status: 'signed-in', principal }
+      : { status: 'signed-in-elsewhere', principal };
   }
 
   /**
@@ -612,10 +656,14 @@ export class AuthClient {
   // client is ready to use without a new signIn().
   async #hydrate(): Promise<void> {
     const key = this.#options.identity ?? (await restoreKey(this.#storage));
-    if (!key) return;
-
-    const chain = await restoreChain(this.#storage, this.#stateStorage);
-    if (!chain) return;
+    const chain = key ? await restoreChain(this.#storage, this.#stateStorage) : null;
+    if (!key || !chain) {
+      // Nothing to restore, so this origin cannot act — and saying otherwise is
+      // what the state leading forbids. Discarded rather than removed, because a
+      // record that reaches past this origin belongs to whoever published it.
+      if (this.#stateStorage.get()?.held) this.#stateStorage.discard?.();
+      return;
+    }
 
     // The state decides whether this origin is signed in, so a chain it does not
     // back belongs to a sign-in that has ended: drop it rather than restore it,
@@ -710,10 +758,9 @@ async function persistKey(
 }
 
 /**
- * Loads a session key from storage. Falls back to migrating a legacy
- * key from localStorage if nothing is found in the primary store.
+ * Loads a session key from storage, reading it by the shape it was stored in:
+ * a `CryptoKeyPair` is ECDSA, a JSON string is Ed25519.
  * @param storage - The storage backend.
- * @param keyType - The expected key algorithm (determines deserialization).
  */
 async function restoreKey(
   storage: AuthClientStorage,
@@ -802,9 +849,8 @@ async function unregisterPendingKey(storage: AuthClientStorage, slot: string): P
 
 /**
  * Loads a session key from a specific storage slot, deserializing by stored
- * shape (`CryptoKeyPair` → ECDSA, JSON string → Ed25519). Unlike
- * {@link restoreKey} it does not migrate from localStorage — it reads only the
- * given slot, as used for a redirect flow's per-flow pending key.
+ * shape (`CryptoKeyPair` → ECDSA, JSON string → Ed25519), as used for a
+ * redirect flow's per-flow pending key.
  * @param storage - The storage backend.
  * @param storageKey - The slot to read.
  */

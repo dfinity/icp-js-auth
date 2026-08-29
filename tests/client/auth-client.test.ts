@@ -175,6 +175,75 @@ describe('AuthClient', () => {
     expect(resolved.getPrincipal().isAnonymous()).toBe(false);
   });
 
+  it('stops claiming a sign-in it has nothing left to restore', async () => {
+    // A record naming a sign-in with nothing behind it: a credential store
+    // cleared on its own, or one that does not survive a reload paired with a
+    // state that does.
+    const stateStorage = new MemoryStateStorage();
+    stateStorage.set({
+      principal: Principal.selfAuthenticating(new Uint8Array([1, 2, 3])),
+      expiration: (BigInt(Date.now()) + 3_600_000n) * 1_000_000n,
+    });
+    const storage: AuthClientStorage = {
+      get: vi.fn().mockResolvedValue(null),
+      set: vi.fn(),
+      remove: vi.fn(),
+    };
+
+    const client = new AuthClient({ storage, stateStorage });
+    await client.getIdentity();
+
+    // Saying "signed in" with nothing to act with is what the state leading forbids.
+    expect(stateStorage.get()).toBeNull();
+    expect(client.isAuthenticated()).toBe(false);
+  });
+
+  it.each([
+    ['signed-out', null, false],
+    ['signed-in', { held: true, ms: 3_600_000 }, true],
+    ['signed-in-elsewhere', { held: false, ms: 3_600_000 }, false],
+    ['expired', { held: true, ms: -1000 }, false],
+  ] as const)('reports %s', (expected, shape, authenticated) => {
+    const principal = Principal.selfAuthenticating(new Uint8Array([1, 2, 3]));
+    const stateStorage = {
+      get: () =>
+        shape === null
+          ? null
+          : {
+              principal,
+              expiration: (BigInt(Date.now()) + BigInt(shape.ms)) * 1_000_000n,
+              held: shape.held,
+            },
+      set: vi.fn(),
+      remove: vi.fn(),
+    };
+
+    const client = new AuthClient({ stateStorage, idleOptions: { disableIdle: true } });
+
+    expect(client.getStatus().status).toBe(expected);
+    // The predicate is the same rule, so the two can never disagree.
+    expect(client.isAuthenticated()).toBe(authenticated);
+  });
+
+  it('carries the account in every case where a record exists', () => {
+    const principal = Principal.selfAuthenticating(new Uint8Array([1, 2, 3]));
+    const stateStorage = {
+      get: () => ({
+        principal,
+        expiration: (BigInt(Date.now()) - 1_000n) * 1_000_000n,
+        held: false,
+      }),
+      set: vi.fn(),
+      remove: vi.fn(),
+    };
+
+    const status = new AuthClient({ stateStorage, idleOptions: { disableIdle: true } }).getStatus();
+
+    // A silent re-issue needs it to name the account, so the type carries it
+    // wherever there is one to carry.
+    expect(status.status === 'signed-out' ? null : status.principal).toEqual(principal);
+  });
+
   it('is not authenticated by a record this origin does not hold', async () => {
     // What a store whose record reaches further than one origin reports on an
     // origin that has not acquired a credential of its own.
