@@ -6,10 +6,13 @@ import {
   type SessionState,
 } from '../../src/client/state-storage.ts';
 
-const state: SessionState = {
+const state = {
   principal: Principal.selfAuthenticating(new Uint8Array([1, 2, 3])),
   expiration: BigInt('1893456000000000000'),
 };
+
+/** What a store hands back: what was written, plus the fact it is held here. */
+const held: SessionState = { ...state, held: true };
 
 describe('MemoryStateStorage', () => {
   it('holds a state and gives it back', () => {
@@ -17,10 +20,17 @@ describe('MemoryStateStorage', () => {
     expect(storage.get()).toBeNull();
 
     storage.set(state);
-    expect(storage.get()).toEqual(state);
+    expect(storage.get()).toEqual(held);
 
     storage.remove();
     expect(storage.get()).toBeNull();
+  });
+
+  it('reports a record it has as held, because nothing else can have written it', () => {
+    const storage = new MemoryStateStorage();
+    storage.set(state);
+
+    expect(storage.get()?.held).toBe(true);
   });
 
   it('shares nothing between instances', () => {
@@ -41,7 +51,7 @@ describe('LocalStateStorage', () => {
     expect(storage.get()).toBeNull();
 
     storage.set(state);
-    expect(storage.get()).toEqual(state);
+    expect(storage.get()).toEqual(held);
 
     storage.remove();
     expect(storage.get()).toBeNull();
@@ -50,7 +60,16 @@ describe('LocalStateStorage', () => {
   it('is read by another instance under the same key, which is what makes it an origin-wide answer', () => {
     new LocalStateStorage().set(state);
 
-    expect(new LocalStateStorage().get()).toEqual(state);
+    expect(new LocalStateStorage().get()).toEqual(held);
+  });
+
+  it('discards what it holds, which for a store that publishes nothing is a removal', () => {
+    const storage = new LocalStateStorage();
+    storage.set(state);
+
+    storage.discard();
+
+    expect(storage.get()).toBeNull();
   });
 
   it('keeps clients under different keys apart', () => {
@@ -98,7 +117,7 @@ describe('LocalStateStorage', () => {
 
     storage.set(state);
 
-    expect(seen).toEqual(state);
+    expect(seen).toEqual(held);
   });
 
   it.each([

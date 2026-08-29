@@ -270,7 +270,10 @@ export class AuthClient {
     // Reads the state rather than the delegation, so the answer needs no
     // asynchronous store and a page load can render on it.
     const state = this.#stateStorage.get();
-    if (state === null) return false;
+    // `held` is what separates "this origin can act" from "someone is signed in
+    // within this store's reach" — the second is true on a sibling subdomain that
+    // has not acquired a credential of its own.
+    if (state === null || !state.held) return false;
     const nowNs = BigInt(Date.now()) * BigInt(1_000_000);
     return nowNs < state.expiration;
   }

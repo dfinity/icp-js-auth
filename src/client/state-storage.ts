@@ -10,8 +10,20 @@ import { Principal } from '@icp-sdk/core/principal';
  */
 export interface SessionState {
   principal: Principal;
+
   /** Nanoseconds since the epoch, matching `Delegation.expiration`. */
   expiration: bigint;
+
+  /**
+   * Whether this origin holds a credential for that account, or only knows the
+   * sign-in exists.
+   *
+   * Derived on read and never published: where the record reaches further than
+   * one origin, the record itself cannot carry a per-origin fact. A sibling
+   * subdomain that has not acquired its own credential reads the sign-in with
+   * `held: false`, which is what tells it to acquire one.
+   */
+  held: boolean;
 }
 
 /**
@@ -26,12 +38,29 @@ export interface SessionState {
  * browser knows it rather than an authority against the network.
  */
 export interface StateStorage {
-  /** The state, or `null` where this origin is not signed in. */
+  /** The state, or `null` where nothing is signed in within this store's reach. */
   get(): SessionState | null;
 
-  set(state: SessionState): void;
+  set(state: Omit<SessionState, 'held'>): void;
 
+  /**
+   * Removes the state, and anything this store publishes beyond this origin.
+   *
+   * What signing out does: the user ended the sign-in, so a sibling reading a
+   * shared record must stop seeing one.
+   */
   remove(): void;
+
+  /**
+   * Removes what this origin holds, leaving anything shared alone.
+   *
+   * What finding out does, which is a different act. An origin whose chain turns
+   * out to be dead cannot tell whether the session was revoked or replaced by a
+   * sibling signing in — and in the second case the shared record was written by
+   * that sibling a moment ago, so retracting it would tell it that the session it
+   * just obtained is gone. Implemented where the two differ.
+   */
+  discard?(): void;
 
   /**
    * Registers a listener fired when the state changes outside this client.
@@ -51,18 +80,24 @@ export interface StateStorage {
  * @see implements {@link StateStorage}
  */
 export class MemoryStateStorage implements StateStorage {
-  #state: SessionState | null = null;
+  #state: Omit<SessionState, 'held'> | null = null;
 
   public get(): SessionState | null {
-    return this.#state;
+    // Nothing reaches past this instance, so a record here is always one it holds.
+    return this.#state === null ? null : { ...this.#state, held: true };
   }
 
-  public set(state: SessionState): void {
+  public set(state: Omit<SessionState, 'held'>): void {
     this.#state = state;
   }
 
   public remove(): void {
     this.#state = null;
+  }
+
+  /** The same as {@link remove}: this store publishes nothing at all. */
+  public discard(): void {
+    this.remove();
   }
 }
 
@@ -96,13 +131,19 @@ export class LocalStateStorage implements StateStorage {
     const [principalText, expiration] = raw.split('|');
     if (principalText === undefined || expiration === undefined) return null;
     try {
-      return { principal: Principal.fromText(principalText), expiration: BigInt(expiration) };
+      return {
+        principal: Principal.fromText(principalText),
+        expiration: BigInt(expiration),
+        // This record is written by this origin and read by no other, so having
+        // one and holding a credential for it are the same thing.
+        held: true,
+      };
     } catch {
       return null;
     }
   }
 
-  public set(state: SessionState): void {
+  public set(state: Omit<SessionState, 'held'>): void {
     this.#localStorage().setItem(
       this.key,
       `${state.principal.toText()}|${state.expiration.toString()}`,
@@ -113,6 +154,11 @@ export class LocalStateStorage implements StateStorage {
   public remove(): void {
     this.#localStorage().removeItem(this.key);
     this.#fire();
+  }
+
+  /** The same as {@link remove}: this store publishes nothing beyond the origin. */
+  public discard(): void {
+    this.remove();
   }
 
   /**

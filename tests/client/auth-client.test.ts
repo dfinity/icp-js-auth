@@ -175,6 +175,26 @@ describe('AuthClient', () => {
     expect(resolved.getPrincipal().isAnonymous()).toBe(false);
   });
 
+  it('is not authenticated by a record this origin does not hold', async () => {
+    // What a store whose record reaches further than one origin reports on an
+    // origin that has not acquired a credential of its own.
+    const stateStorage = {
+      get: () => ({
+        principal: Principal.selfAuthenticating(new Uint8Array([1, 2, 3])),
+        expiration: (BigInt(Date.now()) + 3_600_000n) * 1_000_000n,
+        held: false,
+      }),
+      set: vi.fn(),
+      remove: vi.fn(),
+    };
+
+    const client = new AuthClient({ stateStorage, idleOptions: { disableIdle: true } });
+
+    // Someone is signed in within that store's reach; this origin cannot act.
+    expect(stateStorage.get()).not.toBeNull();
+    expect(client.isAuthenticated()).toBe(false);
+  });
+
   it('should sign users out', async () => {
     const client = new AuthClient();
     await client.signOut();
