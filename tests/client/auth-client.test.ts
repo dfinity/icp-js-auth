@@ -555,6 +555,53 @@ describe('AuthClient', () => {
     expect(url.searchParams.has('openid')).toBe(false);
   });
 
+  it.each(['none', 'login'] as const)(
+    'should pass prompt=%s search param to the transport',
+    (prompt) => {
+      new AuthClient({ prompt });
+      const url = new URL(FakeTransport.last().options.url ?? '');
+      expect(url.searchParams.get('prompt')).toBe(prompt);
+    },
+  );
+
+  it('should pass the hint principal as text in the search param', () => {
+    new AuthClient({ hint: Principal.fromText('2vxsx-fae') });
+    const url = new URL(FakeTransport.last().options.url ?? '');
+    expect(url.searchParams.get('hint')).toBe('2vxsx-fae');
+  });
+
+  it('should include neither prompt nor hint when they are not set', () => {
+    new AuthClient();
+    const url = new URL(FakeTransport.last().options.url ?? '');
+    expect(url.searchParams.has('prompt')).toBe(false);
+    expect(url.searchParams.has('hint')).toBe(false);
+  });
+
+  it('acquires silently for the account the state names, without a ceremony', async () => {
+    // What a sibling subdomain's sign-in leaves for this origin: a shared state
+    // naming an account, and no credentials of its own.
+    const stateStorage = new MemoryStateStorage();
+    const signedIn = new AuthClient({ stateStorage, idleOptions: { disableIdle: true } });
+    handleSignIn(FakeTransport.last());
+    await signedIn.signIn();
+    const account = stateStorage.get()?.principal;
+
+    const sibling = new AuthClient({
+      stateStorage,
+      credentialStorage: new MemoryCredentialStorage(),
+      prompt: 'none',
+      hint: account,
+      idleOptions: { disableIdle: true },
+    });
+    handleSignIn(FakeTransport.last());
+    const identity = await sibling.signIn();
+
+    const url = new URL(FakeTransport.last().options.url ?? '');
+    expect(url.searchParams.get('prompt')).toBe('none');
+    expect(url.searchParams.get('hint')).toBe(account?.toText());
+    expect(identity.getPrincipal().isAnonymous()).toBe(false);
+  });
+
   it('should forward windowOpenerFeatures to the transport', () => {
     new AuthClient({ windowOpenerFeatures: 'width=500,height=600' });
     expect(FakeTransport.last().options.windowOpenerFeatures).toBe('width=500,height=600');
