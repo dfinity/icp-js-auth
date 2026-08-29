@@ -1,6 +1,6 @@
 import { DelegationChain, Ed25519KeyIdentity } from '@icp-sdk/core/identity';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { SESSION_SLOT } from '../../src/client/credential-storage.ts';
+import { PENDING_SLOT, SESSION_SLOT } from '../../src/client/credential-storage.ts';
 import { IdbKeyVal } from '../../src/client/db.ts';
 import { IdbCredentialStorage } from '../../src/client/idb-credential-storage.ts';
 
@@ -46,9 +46,9 @@ describe('IdbCredentialStorage', () => {
     const storage = testStorage();
     const identity = await storage.create();
 
-    await storage.set('pending', { identity });
+    await storage.set(PENDING_SLOT, { identity });
 
-    const stored = await storage.get('pending');
+    const stored = await storage.get(PENDING_SLOT);
     expect(stored?.identity.getPublicKey().toDer()).toEqual(identity.getPublicKey().toDer());
     expect(stored?.chain).toBeUndefined();
   });

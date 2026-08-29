@@ -4,6 +4,19 @@ import type { DelegationChain } from '@icp-sdk/core/identity';
 /** Where the session's key and the chain issued to it are kept. */
 export const SESSION_SLOT = 'session';
 
+/** Where the key an application signs with is kept, with its delegation. */
+export const APP_SLOT = 'app';
+
+/**
+ * Where a ceremony keeps the credential it minted until its session is stored.
+ *
+ * The store reaches every tab of the origin, so writing to {@link APP_SLOT}
+ * during a ceremony — or clearing it first — would change what those tabs act
+ * with before the sign-in has succeeded. This is promoted instead, once there is
+ * a session behind it.
+ */
+export const APP_PENDING_SLOT = 'app-pending';
+
 /**
  * Where a sign-in ceremony keeps its key until it returns.
  *
@@ -11,6 +24,31 @@ export const SESSION_SLOT = 'session';
  * or never comes back cannot take a working session with it.
  */
 export const PENDING_SLOT = 'session-pending';
+
+/**
+ * The slots one client writes under, prefixed where a namespace is set.
+ *
+ * Assigned in one place rather than defaulted by each store: implementations
+ * choosing their own is what produced three colliding slots in the arrangement
+ * this replaces, and one assigner cannot collide with itself. A namespace moves
+ * all of them at once, so an application running two clients under one origin
+ * separates them with one string rather than renaming some and missing others.
+ * @param namespace - Prefix for every slot, or `undefined` for the bare names.
+ */
+export function slotsFor(namespace?: string): {
+  session: string;
+  app: string;
+  pending: string;
+  appPending: string;
+} {
+  const prefix = namespace === undefined ? '' : `${namespace}:`;
+  return {
+    session: `${prefix}${SESSION_SLOT}`,
+    app: `${prefix}${APP_SLOT}`,
+    pending: `${prefix}${PENDING_SLOT}`,
+    appPending: `${prefix}${APP_PENDING_SLOT}`,
+  };
+}
 
 /**
  * An identity, and the delegation that authorises it.

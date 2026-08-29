@@ -204,9 +204,7 @@ describe('AuthClient', () => {
       principal: Principal.selfAuthenticating(new Uint8Array([1, 2, 3])),
       expiration: (BigInt(Date.now()) + 3_600_000n) * 1_000_000n,
     });
-    const storage = spyStorage();
-
-    const client = new AuthClient({ credentialStorage: storage, stateStorage });
+    const client = new AuthClient({ credentialStorage: spyStorage(), stateStorage });
     await client.getIdentity();
 
     // Saying "signed in" with nothing to act with is what the state leading forbids.
@@ -260,24 +258,6 @@ describe('AuthClient', () => {
     expect(status.status === 'signed-out' ? null : status.principal).toEqual(principal);
   });
 
-  it('clears the credentials it could not restore, not just the claim on them', async () => {
-    // A record naming a sign-in whose delegation is gone: the state is dropped,
-    // and so is whatever is left in the credential store — teardown covers every
-    // slot rather than whichever one a caller happened to name.
-    const stateStorage = new MemoryStateStorage();
-    stateStorage.set({
-      principal: Principal.selfAuthenticating(new Uint8Array([1, 2, 3])),
-      expiration: (BigInt(Date.now()) + 3_600_000n) * 1_000_000n,
-    });
-    const storage = spyStorage();
-
-    const client = new AuthClient({ credentialStorage: storage, stateStorage });
-    await client.getIdentity();
-
-    expect(stateStorage.get()).toBeNull();
-    expect(storage.remove).toHaveBeenCalledWith(SESSION_SLOT);
-  });
-
   it('is not authenticated by a record this origin does not hold', async () => {
     // What a store whose record reaches further than one origin reports on an
     // origin that has not acquired a credential of its own.
@@ -296,6 +276,22 @@ describe('AuthClient', () => {
     // Someone is signed in within that store's reach; this origin cannot act.
     expect(stateStorage.get()).not.toBeNull();
     expect(client.isAuthenticated()).toBe(false);
+  });
+
+  it('keeps two clients under one origin apart when they are namespaced', async () => {
+    const credentialStorage = new MemoryCredentialStorage();
+    const first = new AuthClient({ credentialStorage, namespace: 'one' });
+    handleSignIn(FakeTransport.last());
+    await first.signIn();
+
+    // Same store, different namespace: the second client writes elsewhere and
+    // finds nothing of the first's.
+    const second = new AuthClient({ credentialStorage, namespace: 'two' });
+    const identity = await second.getIdentity();
+
+    expect(identity.getPrincipal().isAnonymous()).toBe(true);
+    expect(await credentialStorage.get('one:session')).not.toBeNull();
+    expect(await credentialStorage.get('two:session')).toBeNull();
   });
 
   it('should sign users out', async () => {

@@ -9,12 +9,7 @@ import {
 import { Principal } from '@icp-sdk/core/principal';
 import { Signer } from '@icp-sdk/signer';
 import { PostMessageTransport, UrlTransport } from '@icp-sdk/signer/web';
-import {
-  type Credential,
-  type CredentialStorage,
-  PENDING_SLOT,
-  SESSION_SLOT,
-} from './credential-storage.js';
+import { type Credential, type CredentialStorage, slotsFor } from './credential-storage.js';
 import { IdbCredentialStorage } from './idb-credential-storage.js';
 import { IdleManager, type IdleManagerOptions } from './idle-manager.js';
 import { LocalStateStorage, type StateStorage } from './state-storage.js';
@@ -50,6 +45,18 @@ export interface AuthClientCreateOptions {
    * @default IdbStorage
    */
   credentialStorage?: CredentialStorage;
+
+  /**
+   * Prefix for every slot this client writes under.
+   *
+   * Slots are assigned in one place rather than defaulted by each store, and this
+   * moves all of them at once — so an application running two clients under one
+   * origin separates them with a single string and cannot rename some while
+   * missing others.
+   *
+   * Leave it unset unless a second client shares this origin.
+   */
+  namespace?: string;
 
   /**
    * Where the state of the sign-in is kept: which account is signed in here,
@@ -189,6 +196,7 @@ export class AuthClient {
   #identity: Identity | PartialIdentity = new AnonymousIdentity();
   #chain: DelegationChain | null = null;
   #credentialStorage: CredentialStorage;
+  readonly #slots: ReturnType<typeof slotsFor>;
   #stateStorage: StateStorage;
   #signer: Signer;
   // Set only in redirect mode, so the redirect-specific paths (nonce/key
@@ -201,6 +209,7 @@ export class AuthClient {
   constructor(options: AuthClientCreateOptions = {}) {
     this.#options = options;
     this.#credentialStorage = options.credentialStorage ?? new IdbCredentialStorage();
+    this.#slots = slotsFor(options.namespace);
     this.#stateStorage = options.stateStorage ?? new LocalStateStorage();
 
     const identityProviderUrl = new URL(
@@ -395,7 +404,7 @@ export class AuthClient {
     // fail signIn(), and the next ceremony overwrites what is left behind.
     if (pending) {
       try {
-        await this.#credentialStorage.remove(PENDING_SLOT);
+        await this.#credentialStorage.remove(this.#slots.pending);
       } catch {
         // ignore
       }
@@ -445,18 +454,18 @@ export class AuthClient {
     // still holds the key this ceremony started with.
     let acquired: SignIdentity | null = null;
     const startedWith = await transport.memoize(async () => {
-      const stored = await this.#credentialStorage.get(PENDING_SLOT);
+      const stored = await this.#credentialStorage.get(this.#slots.pending);
       if (stored !== null) {
         acquired = stored.identity;
       } else {
         acquired = await this.#credentialStorage.create();
-        await this.#credentialStorage.set(PENDING_SLOT, { identity: acquired });
+        await this.#credentialStorage.set(this.#slots.pending, { identity: acquired });
       }
       return publicKeyOf(acquired);
     });
 
     const key: SignIdentity | PartialIdentity | null =
-      acquired ?? (await this.#credentialStorage.get(PENDING_SLOT))?.identity ?? null;
+      acquired ?? (await this.#credentialStorage.get(this.#slots.pending))?.identity ?? null;
     if (key === null) {
       throw new Error('Session key missing after acquisition');
     }
@@ -691,7 +700,7 @@ export class AuthClient {
     // A PartialIdentity is the caller's own and cannot sign, so there is nothing
     // worth storing: the client uses it for this run and restores nothing later.
     if (!('toDer' in identity)) {
-      await this.#credentialStorage.set(SESSION_SLOT, { identity, chain });
+      await this.#credentialStorage.set(this.#slots.session, { identity, chain });
     }
 
     let earliest: bigint | null = null;
@@ -715,7 +724,7 @@ export class AuthClient {
    * delegation has expired or the record cannot be read.
    */
   async #restoreSession(): Promise<Credential | null> {
-    const credential = await this.#credentialStorage.get(SESSION_SLOT);
+    const credential = await this.#credentialStorage.get(this.#slots.session);
     if (credential === null) return null;
 
     // A record with no chain is not a session: only a ceremony's own slot may
@@ -757,7 +766,7 @@ export class AuthClient {
   // origin is signed in, and a teardown that failed partway must not leave it
   // saying yes.
   async #clearCredentials(): Promise<void> {
-    await this.#credentialStorage.remove(SESSION_SLOT);
+    await this.#credentialStorage.remove(this.#slots.session);
   }
 
   #registerDefaultIdleCallback() {

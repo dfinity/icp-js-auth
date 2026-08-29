@@ -1,6 +1,6 @@
 import { DelegationChain, Ed25519KeyIdentity } from '@icp-sdk/core/identity';
 import { beforeEach, describe, expect, it } from 'vitest';
-import { PENDING_SLOT, SESSION_SLOT } from '../../src/client/credential-storage.ts';
+import { PENDING_SLOT, SESSION_SLOT, slotsFor } from '../../src/client/credential-storage.ts';
 import { LocalCredentialStorage } from '../../src/client/local-credential-storage.ts';
 import { MemoryCredentialStorage } from '../../src/client/memory-credential-storage.ts';
 
@@ -8,6 +8,29 @@ const testChain = async () => {
   const key = Ed25519KeyIdentity.generate();
   return DelegationChain.create(key, key.getPublicKey(), new Date(Date.now() + 3.6e6));
 };
+
+describe('slotsFor', () => {
+  it('names the slots a client writes under', () => {
+    expect(slotsFor()).toEqual({
+      session: 'session',
+      app: 'app',
+      pending: 'session-pending',
+      appPending: 'app-pending',
+    });
+  });
+
+  it('moves every slot at once, so none can be renamed while another is missed', () => {
+    const slots = slotsFor('second');
+
+    expect(slots).toEqual({
+      session: 'second:session',
+      app: 'second:app',
+      pending: 'second:session-pending',
+      appPending: 'second:app-pending',
+    });
+    expect(Object.values(slots)).toEqual(Object.values(slotsFor()).map((slot) => `second:${slot}`));
+  });
+});
 
 describe('MemoryCredentialStorage', () => {
   it('reports what it is: seen by no other tab, and gone on a reload', () => {
