@@ -704,7 +704,9 @@ describe('AuthClient signIn', () => {
     handleSignIn(FakeTransport.last());
     await first.signIn();
 
-    // As TAB-5 leaves things once a delegation has run out.
+    // Put the store in the state a spent delegation leaves it in. The removal
+    // itself is TAB-5's, covered in session-identity.test.ts; here it is setup
+    // for what a load does when it finds no app credential.
     await credentialStorage.remove(SLOTS.app);
     const after = minted.count;
 
