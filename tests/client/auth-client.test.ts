@@ -2,12 +2,13 @@ import type { PublicKey } from '@icp-sdk/core/agent';
 import { DelegationChain, Ed25519KeyIdentity } from '@icp-sdk/core/identity';
 import { Principal } from '@icp-sdk/core/principal';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { slotsFor } from '../../src/client/slots.ts';
+
+/** The bare names, which is what a client with no namespace writes under. */
+const SLOTS = slotsFor();
+
 import { AuthClient } from '../../src/client/auth-client.ts';
-import {
-  type Credential,
-  type CredentialStorage,
-  SESSION_SLOT,
-} from '../../src/client/credential-storage.ts';
+import type { Credential, CredentialStorage } from '../../src/client/credential-storage.ts';
 import { IdbCredentialStorage } from '../../src/client/idb-credential-storage.ts';
 import { IdleManager } from '../../src/client/idle-manager.ts';
 import { MemoryCredentialStorage } from '../../src/client/memory-credential-storage.ts';
@@ -57,7 +58,7 @@ function spyStorage(seed?: Credential): CredentialStorage & {
     }),
     remove: vi.fn((slot: string) => inner.remove(slot)),
   };
-  if (seed) void inner.set(SESSION_SLOT, seed as never);
+  if (seed) void inner.set(SLOTS.session, seed as never);
   return storage;
 }
 
@@ -467,7 +468,7 @@ describe('AuthClient signIn', () => {
     handleSignIn(FakeTransport.last());
     await client.signIn();
 
-    const session = storage.writes.filter((write) => write.slot === SESSION_SLOT);
+    const session = storage.writes.filter((write) => write.slot === SLOTS.session);
     expect(session).toHaveLength(1);
     expect(session[0]?.credential.identity).toBeDefined();
     expect(session[0]?.credential.chain).toBeDefined();
@@ -481,7 +482,7 @@ describe('AuthClient signIn', () => {
     await client.signIn();
 
     const keys = storage.writes
-      .filter((write) => write.slot === SESSION_SLOT)
+      .filter((write) => write.slot === SLOTS.session)
       .map((write) => write.credential.identity.getPublicKey().toDer().toString());
     expect(keys).toHaveLength(2);
     expect(keys[0]).not.toEqual(keys[1]);
@@ -595,7 +596,7 @@ describe('AuthClient signIn', () => {
     });
     handleSignIn(FakeTransport.last());
     await first.signIn();
-    expect(await credentialStorage.get(SESSION_SLOT)).not.toBeNull();
+    expect(await credentialStorage.get(SLOTS.session)).not.toBeNull();
 
     // Only the state goes; the credential is left exactly where it was.
     stateStorage.remove();
@@ -607,7 +608,7 @@ describe('AuthClient signIn', () => {
     });
     const identity = await second.getIdentity();
     expect(identity.getPrincipal().isAnonymous()).toBe(true);
-    expect(await credentialStorage.get(SESSION_SLOT)).toBeNull();
+    expect(await credentialStorage.get(SLOTS.session)).toBeNull();
   });
 
   it('clears the state storage on sign-out', async () => {
@@ -696,9 +697,9 @@ describe('IdbCredentialStorage', () => {
     const storage = new IdbCredentialStorage();
     const identity = await storage.create();
     const chain = await createTestDelegation(Ed25519KeyIdentity.generate());
-    await storage.set(SESSION_SLOT, { identity, chain });
+    await storage.set(SLOTS.session, { identity, chain });
 
-    const stored = await storage.get(SESSION_SLOT);
+    const stored = await storage.get(SLOTS.session);
     expect(stored?.identity.getPublicKey().toDer()).toEqual(identity.getPublicKey().toDer());
     expect(stored?.chain?.toJSON()).toEqual(chain.toJSON());
   });
@@ -737,8 +738,8 @@ describe('Session restoration', () => {
     const identity = await client.getIdentity();
 
     expect(identity.getPrincipal().isAnonymous()).toBe(true);
-    expect(storage.remove).toHaveBeenCalledWith(SESSION_SLOT);
-    expect(await storage.get(SESSION_SLOT)).toBeNull();
+    expect(storage.remove).toHaveBeenCalledWith(SLOTS.session);
+    expect(await storage.get(SLOTS.session)).toBeNull();
   });
 
   it('should clear storage when the delegation has expired', async () => {

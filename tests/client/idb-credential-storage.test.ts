@@ -1,6 +1,10 @@
 import { DelegationChain, Ed25519KeyIdentity } from '@icp-sdk/core/identity';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { PENDING_SLOT, SESSION_SLOT } from '../../src/client/credential-storage.ts';
+import { slotsFor } from '../../src/client/slots.ts';
+
+/** The bare names, which is what a client with no namespace writes under. */
+const SLOTS = slotsFor();
+
 import { IdbKeyVal } from '../../src/client/db.ts';
 import { IdbCredentialStorage } from '../../src/client/idb-credential-storage.ts';
 
@@ -35,9 +39,9 @@ describe('IdbCredentialStorage', () => {
     const identity = await storage.create();
     const chain = await testChain();
 
-    await storage.set(SESSION_SLOT, { identity, chain });
+    await storage.set(SLOTS.session, { identity, chain });
 
-    const stored = await storage.get(SESSION_SLOT);
+    const stored = await storage.get(SLOTS.session);
     expect(stored?.identity.getPublicKey().toDer()).toEqual(identity.getPublicKey().toDer());
     expect(stored?.chain?.toJSON()).toEqual(chain.toJSON());
   });
@@ -46,9 +50,9 @@ describe('IdbCredentialStorage', () => {
     const storage = testStorage();
     const identity = await storage.create();
 
-    await storage.set(PENDING_SLOT, { identity });
+    await storage.set(SLOTS.sessionPending, { identity });
 
-    const stored = await storage.get(PENDING_SLOT);
+    const stored = await storage.get(SLOTS.sessionPending);
     expect(stored?.identity.getPublicKey().toDer()).toEqual(identity.getPublicKey().toDer());
     expect(stored?.chain).toBeUndefined();
   });
@@ -62,15 +66,15 @@ describe('IdbCredentialStorage', () => {
   it('reports nothing stored rather than throwing on a record it cannot read', async () => {
     const storage = testStorage();
     const identity = await storage.create();
-    await storage.set(SESSION_SLOT, { identity, chain: await testChain() });
+    await storage.set(SLOTS.session, { identity, chain: await testChain() });
 
     const db = await IdbKeyVal.create({
       dbName: `storage-db-${testCounter}`,
       storeName: `storage-store-${testCounter}`,
     });
-    await db.set(SESSION_SLOT, { keyPair: identity.getKeyPair(), chain: 'not a chain' });
+    await db.set(SLOTS.session, { keyPair: identity.getKeyPair(), chain: 'not a chain' });
 
-    expect(await storage.get(SESSION_SLOT)).toBeNull();
+    expect(await storage.get(SLOTS.session)).toBeNull();
   });
 
   it('should share a single IdbKeyVal across concurrent first accesses', async () => {

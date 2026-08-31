@@ -9,9 +9,10 @@ import {
 import { Principal } from '@icp-sdk/core/principal';
 import { Signer } from '@icp-sdk/signer';
 import { PostMessageTransport, UrlTransport } from '@icp-sdk/signer/web';
-import { type Credential, type CredentialStorage, slotsFor } from './credential-storage.js';
+import type { Credential, CredentialStorage } from './credential-storage.js';
 import { IdbCredentialStorage } from './idb-credential-storage.js';
 import { IdleManager, type IdleManagerOptions } from './idle-manager.js';
+import { type Slots, slotsFor } from './slots.js';
 import { LocalStateStorage, type StateStorage } from './state-storage.js';
 
 const NANOSECONDS_PER_SECOND = BigInt(1_000_000_000);
@@ -196,7 +197,7 @@ export class AuthClient {
   #identity: Identity | PartialIdentity = new AnonymousIdentity();
   #chain: DelegationChain | null = null;
   #credentialStorage: CredentialStorage;
-  readonly #slots: ReturnType<typeof slotsFor>;
+  readonly #slots: Slots;
   #stateStorage: StateStorage;
   #signer: Signer;
   // Set only in redirect mode, so the redirect-specific paths (nonce/key
@@ -404,7 +405,7 @@ export class AuthClient {
     // fail signIn(), and the next ceremony overwrites what is left behind.
     if (pending) {
       try {
-        await this.#credentialStorage.remove(this.#slots.pending);
+        await this.#credentialStorage.remove(this.#slots.sessionPending);
       } catch {
         // ignore
       }
@@ -465,18 +466,18 @@ export class AuthClient {
     // still holds the key this ceremony started with.
     let acquired: SignIdentity | null = null;
     const startedWith = await transport.memoize(async () => {
-      const stored = await this.#credentialStorage.get(this.#slots.pending);
+      const stored = await this.#credentialStorage.get(this.#slots.sessionPending);
       if (stored !== null) {
         acquired = stored.identity;
       } else {
         acquired = await this.#credentialStorage.create();
-        await this.#credentialStorage.set(this.#slots.pending, { identity: acquired });
+        await this.#credentialStorage.set(this.#slots.sessionPending, { identity: acquired });
       }
       return publicKeyOf(acquired);
     });
 
     const key: SignIdentity | PartialIdentity | null =
-      acquired ?? (await this.#credentialStorage.get(this.#slots.pending))?.identity ?? null;
+      acquired ?? (await this.#credentialStorage.get(this.#slots.sessionPending))?.identity ?? null;
     if (key === null) {
       throw new Error('Session key missing after acquisition');
     }

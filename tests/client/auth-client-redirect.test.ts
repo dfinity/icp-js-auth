@@ -1,8 +1,13 @@
 import type { PublicKey } from '@icp-sdk/core/agent';
 import { DelegationChain, Ed25519KeyIdentity } from '@icp-sdk/core/identity';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { slotsFor } from '../../src/client/slots.ts';
+
+/** The bare names, which is what a client with no namespace writes under. */
+const SLOTS = slotsFor();
+
 import { AuthClient } from '../../src/client/auth-client.ts';
-import { PENDING_SLOT } from '../../src/client/credential-storage.ts';
+
 import { IdleManager } from '../../src/client/idle-manager.ts';
 import { LocalCredentialStorage } from '../../src/client/local-credential-storage.ts';
 import { MemoryCredentialStorage } from '../../src/client/memory-credential-storage.ts';
@@ -93,7 +98,7 @@ const flush = async () => {
 };
 
 const hasPendingKey = async (storage: LocalCredentialStorage) =>
-  (await storage.get(PENDING_SLOT)) !== null;
+  (await storage.get(SLOTS.sessionPending)) !== null;
 
 beforeEach(() => {
   vi.unstubAllGlobals();
@@ -170,7 +175,7 @@ describe('AuthClient redirect (UrlTransport) sign-in', () => {
     const storage = createDurableStorage();
     const remove = storage.remove.bind(storage);
     storage.remove = async (slot) => {
-      if (slot === PENDING_SLOT) throw new Error('storage unavailable');
+      if (slot === SLOTS.sessionPending) throw new Error('storage unavailable');
       return remove(slot);
     };
 
@@ -256,7 +261,7 @@ describe('AuthClient redirect (UrlTransport) sign-in', () => {
     await flush();
 
     // Another ceremony in this browser takes the slot while the first is away.
-    await storage.set(PENDING_SLOT, { identity: await storage.create() });
+    await storage.set(SLOTS.sessionPending, { identity: await storage.create() });
 
     // Load 2: the delegation replayed from the journal was minted for a key
     // that is no longer there, so the flow cannot finish.

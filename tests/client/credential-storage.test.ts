@@ -1,38 +1,16 @@
 import { DelegationChain, Ed25519KeyIdentity } from '@icp-sdk/core/identity';
 import { beforeEach, describe, expect, it } from 'vitest';
-import { PENDING_SLOT, SESSION_SLOT, slotsFor } from '../../src/client/credential-storage.ts';
 import { LocalCredentialStorage } from '../../src/client/local-credential-storage.ts';
 import { MemoryCredentialStorage } from '../../src/client/memory-credential-storage.ts';
+import { slotsFor } from '../../src/client/slots.ts';
+
+/** The bare names, which is what a client with no namespace writes under. */
+const SLOTS = slotsFor();
 
 const testChain = async () => {
   const key = Ed25519KeyIdentity.generate();
   return DelegationChain.create(key, key.getPublicKey(), new Date(Date.now() + 3.6e6));
 };
-
-describe('slotsFor', () => {
-  it('names everything a client writes under, the state record included', () => {
-    expect(slotsFor()).toEqual({
-      session: 'session',
-      app: 'app',
-      pending: 'session-pending',
-      appPending: 'app-pending',
-      state: 'ic-session-state',
-    });
-  });
-
-  it('moves every slot at once, so none can be renamed while another is missed', () => {
-    const slots = slotsFor('second');
-
-    expect(slots).toEqual({
-      session: 'second:session',
-      app: 'second:app',
-      pending: 'second:session-pending',
-      appPending: 'second:app-pending',
-      state: 'second:ic-session-state',
-    });
-    expect(Object.values(slots)).toEqual(Object.values(slotsFor()).map((slot) => `second:${slot}`));
-  });
-});
 
 describe('MemoryCredentialStorage', () => {
   it('reports what it is: seen by no other tab, and gone on a reload', () => {
@@ -47,9 +25,9 @@ describe('MemoryCredentialStorage', () => {
     const identity = await storage.create();
     const chain = await testChain();
 
-    await storage.set(SESSION_SLOT, { identity, chain });
+    await storage.set(SLOTS.session, { identity, chain });
 
-    const stored = await storage.get(SESSION_SLOT);
+    const stored = await storage.get(SLOTS.session);
     expect(stored?.identity).toBe(identity);
     expect(stored?.chain).toBe(chain);
   });
@@ -58,20 +36,20 @@ describe('MemoryCredentialStorage', () => {
     const storage = new MemoryCredentialStorage();
     const session = await storage.create();
     const pending = await storage.create();
-    await storage.set(SESSION_SLOT, { identity: session, chain: await testChain() });
-    await storage.set(PENDING_SLOT, { identity: pending });
+    await storage.set(SLOTS.session, { identity: session, chain: await testChain() });
+    await storage.set(SLOTS.sessionPending, { identity: pending });
 
-    await storage.remove(PENDING_SLOT);
+    await storage.remove(SLOTS.sessionPending);
 
-    expect(await storage.get(SESSION_SLOT)).not.toBeNull();
-    expect(await storage.get(PENDING_SLOT)).toBeNull();
+    expect(await storage.get(SLOTS.session)).not.toBeNull();
+    expect(await storage.get(SLOTS.sessionPending)).toBeNull();
   });
 
   it('shares nothing between instances, which is what makes a tab alone', async () => {
     const one = new MemoryCredentialStorage();
-    await one.set(SESSION_SLOT, { identity: await one.create(), chain: await testChain() });
+    await one.set(SLOTS.session, { identity: await one.create(), chain: await testChain() });
 
-    expect(await new MemoryCredentialStorage().get(SESSION_SLOT)).toBeNull();
+    expect(await new MemoryCredentialStorage().get(SLOTS.session)).toBeNull();
   });
 
   it('generates a key whose private half cannot be read back', async () => {
@@ -98,9 +76,9 @@ describe('LocalCredentialStorage', () => {
     const identity = await storage.create();
     const chain = await testChain();
 
-    await storage.set(SESSION_SLOT, { identity, chain });
+    await storage.set(SLOTS.session, { identity, chain });
 
-    const stored = await storage.get(SESSION_SLOT);
+    const stored = await storage.get(SLOTS.session);
     expect(stored?.identity.toJSON()).toEqual(identity.toJSON());
     expect(stored?.chain?.toJSON()).toEqual(chain.toJSON());
   });
@@ -113,22 +91,22 @@ describe('LocalCredentialStorage', () => {
 
   it('is read by another instance under the same prefix', async () => {
     const identity = await new LocalCredentialStorage().create();
-    await new LocalCredentialStorage().set(SESSION_SLOT, { identity });
+    await new LocalCredentialStorage().set(SLOTS.session, { identity });
 
-    expect(await new LocalCredentialStorage().get(SESSION_SLOT)).not.toBeNull();
+    expect(await new LocalCredentialStorage().get(SLOTS.session)).not.toBeNull();
   });
 
   it('keeps clients under different prefixes apart', async () => {
     const one = new LocalCredentialStorage('one-');
-    await one.set(SESSION_SLOT, { identity: await one.create() });
+    await one.set(SLOTS.session, { identity: await one.create() });
 
-    expect(await new LocalCredentialStorage('two-').get(SESSION_SLOT)).toBeNull();
+    expect(await new LocalCredentialStorage('two-').get(SLOTS.session)).toBeNull();
   });
 
   it('reports nothing stored rather than throwing on a record it cannot read', async () => {
     const storage = new LocalCredentialStorage();
-    localStorage.setItem(`ic-${SESSION_SLOT}`, 'not a credential');
+    localStorage.setItem(`ic-${SLOTS.session}`, 'not a credential');
 
-    expect(await storage.get(SESSION_SLOT)).toBeNull();
+    expect(await storage.get(SLOTS.session)).toBeNull();
   });
 });

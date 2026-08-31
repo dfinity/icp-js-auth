@@ -104,7 +104,7 @@ export class MemoryStateStorage implements StateStorage {
 // Distinct from the slot the delegation itself is stored under: what is written
 // here is two public fields about a sign-in, not the credential behind it. The
 // name comes from `slotsFor`, which is the one place that knows the whole set.
-import { STATE_KEY } from './credential-storage.js';
+import { slotsFor } from './slots.js';
 
 /**
  * State in `localStorage`, so every tab of an origin agrees on it and it
@@ -123,7 +123,7 @@ export class LocalStateStorage implements StateStorage {
    * @param key - Storage key for the state. Change it only to avoid a collision
    *   with another client under the same origin.
    */
-  constructor(public readonly key = STATE_KEY) {}
+  constructor(public readonly key = slotsFor().state) {}
 
   public get(): SessionState | null {
     const raw = this.#localStorage().getItem(this.key);

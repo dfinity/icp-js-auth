@@ -1,6 +1,10 @@
 import { DelegationChain, Ed25519KeyIdentity } from '@icp-sdk/core/identity';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { APP_SLOT, PENDING_SLOT, SESSION_SLOT } from '../../src/client/credential-storage.ts';
+import { slotsFor } from '../../src/client/slots.ts';
+
+/** The bare names, which is what a client with no namespace writes under. */
+const SLOTS = slotsFor();
+
 import { SharedMemoryCredentialStorage } from '../../src/client/shared-memory-credential-storage.ts';
 
 /**
@@ -71,9 +75,9 @@ describe('SharedMemoryCredentialStorage', () => {
     const storage = track(open());
     const identity = await storage.create();
 
-    await storage.set(SESSION_SLOT, { identity });
+    await storage.set(SLOTS.session, { identity });
 
-    const stored = await storage.get(SESSION_SLOT);
+    const stored = await storage.get(SLOTS.session);
     // The same object, not a round trip: it is what lets a non-extractable key be
     // held at all.
     expect(stored?.identity).toBe(identity);
@@ -81,7 +85,7 @@ describe('SharedMemoryCredentialStorage', () => {
 
   it('reports nothing for a slot never written', async () => {
     const storage = track(open());
-    expect(await storage.get(APP_SLOT)).toBeNull();
+    expect(await storage.get(SLOTS.app)).toBeNull();
   });
 
   it('replicates a write to a peer that is already running', async () => {
@@ -95,10 +99,10 @@ describe('SharedMemoryCredentialStorage', () => {
       Ed25519KeyIdentity.generate().getPublicKey(),
       new Date(Date.now() + 60_000),
     );
-    await first.set(APP_SLOT, { identity, chain });
+    await first.set(SLOTS.app, { identity, chain });
     await settle();
 
-    const stored = await second.get(APP_SLOT);
+    const stored = await second.get(SLOTS.app);
     expect(stored).not.toBeNull();
     // Reconstructed from the handle and the chain's JSON, so it signs for the
     // same key without key material having crossed.
@@ -112,27 +116,27 @@ describe('SharedMemoryCredentialStorage', () => {
     await settle();
 
     const identity = await first.create();
-    await first.set(SESSION_SLOT, { identity });
+    await first.set(SLOTS.session, { identity });
     await settle();
-    expect(await second.get(SESSION_SLOT)).not.toBeNull();
+    expect(await second.get(SLOTS.session)).not.toBeNull();
 
-    await first.remove(SESSION_SLOT);
+    await first.remove(SLOTS.session);
     await settle();
 
-    expect(await second.get(SESSION_SLOT)).toBeNull();
+    expect(await second.get(SLOTS.session)).toBeNull();
   });
 
   it('starts cold and reads what a peer already held', async () => {
     const first = track(open());
     const identity = await first.create();
-    await first.set(PENDING_SLOT, { identity });
+    await first.set(SLOTS.sessionPending, { identity });
     await settle();
 
     // Constructed after the write, so nothing was broadcast to it: what it reads
     // can only have come from asking.
     const second = track(open());
 
-    const stored = await second.get(PENDING_SLOT);
+    const stored = await second.get(SLOTS.sessionPending);
     expect(stored?.identity.getPublicKey().toDer()).toEqual(identity.getPublicKey().toDer());
   });
 
@@ -145,7 +149,7 @@ describe('SharedMemoryCredentialStorage', () => {
     // Nothing holds a presence lock, so a read has nothing to wait on and must
     // answer rather than hanging until something times out.
     const alone = track(open());
-    await expect(alone.get(SESSION_SLOT)).resolves.toBeNull();
+    await expect(alone.get(SLOTS.session)).resolves.toBeNull();
   });
 
   it('stops waiting when the peer it was waiting for goes away', async () => {
@@ -158,7 +162,7 @@ describe('SharedMemoryCredentialStorage', () => {
     locks.reset();
 
     const second = track(open());
-    await expect(second.get(SESSION_SLOT)).resolves.toBeNull();
+    await expect(second.get(SLOTS.session)).resolves.toBeNull();
   });
 
   it('keeps its own write when an answer describes an older moment', async () => {
@@ -167,20 +171,20 @@ describe('SharedMemoryCredentialStorage', () => {
     // which write lands first, which is not what this is about.
     const storage = track(open());
     const mine = await storage.create();
-    await storage.set(SESSION_SLOT, { identity: mine });
+    await storage.set(SLOTS.session, { identity: mine });
 
     const older = await storage.create();
     const peer = new BroadcastChannel('test-credentials');
     peer.postMessage({
       kind: 'offer',
-      entries: [{ slot: SESSION_SLOT, keyPair: older.getKeyPair() }],
+      entries: [{ slot: SLOTS.session, keyPair: older.getKeyPair() }],
     });
     await settle();
     peer.close();
 
     // An answer fills gaps. It never replaces a write made since the question,
     // because the answer describes a moment already past.
-    expect((await storage.get(SESSION_SLOT))?.identity).toBe(mine);
+    expect((await storage.get(SLOTS.session))?.identity).toBe(mine);
   });
 
   it('carries a key as a handle that cannot be exported', async () => {
@@ -189,10 +193,10 @@ describe('SharedMemoryCredentialStorage', () => {
     await settle();
 
     const identity = await first.create();
-    await first.set(SESSION_SLOT, { identity });
+    await first.set(SLOTS.session, { identity });
     await settle();
 
-    const stored = await second.get(SESSION_SLOT);
+    const stored = await second.get(SLOTS.session);
     // What crosses is a handle, not key material: the peer can sign with it and
     // nothing can read the private half back out.
     expect(stored?.identity.getKeyPair().privateKey.extractable).toBe(false);
@@ -209,13 +213,13 @@ describe('SharedMemoryCredentialStorage', () => {
     // through a deploy, or an application posting on it. Neither may throw here
     // or leave a slot holding something unusable.
     const intruder = new BroadcastChannel('test-credentials');
-    intruder.postMessage({ kind: 'put', slot: SESSION_SLOT });
+    intruder.postMessage({ kind: 'put', slot: SLOTS.session });
     intruder.postMessage('not an object');
-    intruder.postMessage({ kind: 'nonsense', slot: SESSION_SLOT });
+    intruder.postMessage({ kind: 'nonsense', slot: SLOTS.session });
     await settle();
     intruder.close();
 
-    expect(await storage.get(SESSION_SLOT)).toBeNull();
+    expect(await storage.get(SLOTS.session)).toBeNull();
   });
 
   it('takes nothing in once closed', async () => {
@@ -225,12 +229,12 @@ describe('SharedMemoryCredentialStorage', () => {
 
     second.close();
     const identity = await first.create();
-    await first.set(APP_SLOT, { identity });
+    await first.set(SLOTS.app, { identity });
     await settle();
 
     // Closing stops the replication as well as letting go of the name, so a
     // closed instance does not go on collecting credentials it will never use.
-    expect(await second.get(APP_SLOT)).toBeNull();
+    expect(await second.get(SLOTS.app)).toBeNull();
   });
 
   it('keeps two names apart', async () => {
@@ -239,10 +243,10 @@ describe('SharedMemoryCredentialStorage', () => {
     await settle();
 
     const identity = await mine.create();
-    await mine.set(SESSION_SLOT, { identity });
+    await mine.set(SLOTS.session, { identity });
     await settle();
 
-    expect(await theirs.get(SESSION_SLOT)).toBeNull();
+    expect(await theirs.get(SLOTS.session)).toBeNull();
   });
 
   it('starts alone where the environment has no locks', async () => {
@@ -251,6 +255,6 @@ describe('SharedMemoryCredentialStorage', () => {
     // Nothing can be enumerated, so waiting could only cost a load. Answering is
     // what keeps coordination able to suppress a mint without being required for
     // one.
-    await expect(storage.get(SESSION_SLOT)).resolves.toBeNull();
+    await expect(storage.get(SLOTS.session)).resolves.toBeNull();
   });
 });

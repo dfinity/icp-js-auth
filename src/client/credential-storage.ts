@@ -1,65 +1,6 @@
 import type { SignIdentity } from '@icp-sdk/core/agent';
 import type { DelegationChain } from '@icp-sdk/core/identity';
 
-/** Where the session's key and the chain issued to it are kept. */
-export const SESSION_SLOT = 'session';
-
-/** Where the key an application signs with is kept, with its delegation. */
-export const APP_SLOT = 'app';
-
-/**
- * Where a ceremony keeps the credential it minted until its session is stored.
- *
- * The store reaches every tab of the origin, so writing to {@link APP_SLOT}
- * during a ceremony — or clearing it first — would change what those tabs act
- * with before the sign-in has succeeded. This is promoted instead, once there is
- * a session behind it.
- */
-export const APP_PENDING_SLOT = 'app-pending';
-
-/**
- * Where a sign-in ceremony keeps its key until it returns.
- *
- * Its own slot rather than {@link SESSION_SLOT}, so a ceremony that is cancelled
- * or never comes back cannot take a working session with it.
- */
-export const PENDING_SLOT = 'session-pending';
-
-/** Where the state of a sign-in is kept, when nothing names it otherwise. */
-export const STATE_KEY = 'ic-session-state';
-
-/**
- * Every name one client writes under, prefixed where a namespace is set.
- *
- * Assigned in one place rather than defaulted by each store: implementations
- * choosing their own is what produced three colliding slots in the arrangement
- * this replaces, and one assigner cannot collide with itself. A namespace moves
- * all of them at once, so an application running two clients under one origin
- * separates them with one string rather than renaming some and missing others.
- *
- * The state record is named here too, and not because it is a credential slot —
- * it is not. It is named here because this is the only place that knows the whole
- * set, and a namespace that moved the credentials while leaving the record fixed
- * would give two clients separate keys and one shared answer to who is signed in.
- * @param namespace - Prefix for every name, or `undefined` for the bare ones.
- */
-export function slotsFor(namespace?: string): {
-  session: string;
-  app: string;
-  pending: string;
-  appPending: string;
-  state: string;
-} {
-  const prefix = namespace === undefined ? '' : `${namespace}:`;
-  return {
-    session: `${prefix}${SESSION_SLOT}`,
-    app: `${prefix}${APP_SLOT}`,
-    pending: `${prefix}${PENDING_SLOT}`,
-    appPending: `${prefix}${APP_PENDING_SLOT}`,
-    state: `${prefix}${STATE_KEY}`,
-  };
-}
-
 /**
  * An identity, and the delegation that authorises it.
  *
@@ -72,7 +13,7 @@ export interface Credential<T extends SignIdentity = SignIdentity> {
   identity: T;
 
   /**
-   * Absent only while a ceremony is in flight, under {@link PENDING_SLOT}: there
+   * Absent only while a ceremony is in flight, under the session-pending slot: there
    * is a key, and no delegation for it yet.
    */
   chain?: DelegationChain;
