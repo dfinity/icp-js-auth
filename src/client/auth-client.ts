@@ -82,7 +82,12 @@ export interface AuthClientCreateOptions {
 
   /**
    * Idle timeout configuration.
-   * @default after 10 minutes, invalidates the identity
+   *
+   * The default callback signs out and reloads, which since sessions also ends
+   * the session at the canister — so an idle timeout is a full sign-out and not
+   * merely a local one. Replace it with `onIdle`, or turn it off with
+   * `disableDefaultIdleCallback`, where that is more than an application wants.
+   * @default after 10 minutes, signs out and reloads
    */
   idleOptions?: IdleOptions;
 
@@ -207,16 +212,6 @@ export interface SignedAttributes {
 }
 
 /**
- * Manages authentication and identity for Internet Computer web apps.
- *
- * @example
- * const authClient = new AuthClient();
- *
- * const identity = authClient.isAuthenticated()
- *   ? await authClient.getIdentity()
- *   : await authClient.signIn();
- */
-/**
  * What the state adds up to for this origin, once the clock is applied.
  *
  * The record says what is signed in and whether this origin holds a credential
@@ -238,6 +233,19 @@ export type SessionStatus =
   | { status: 'expired'; principal: Principal }
   | { status: 'signed-out' };
 
+/**
+ * Manages authentication and identity for Internet Computer web apps.
+ *
+ * `getStatus()`, `isAuthenticated()` and `getPrincipal()` are synchronous, so a
+ * page renders on them; `getIdentity()` is what an agent signs with.
+ *
+ * @example
+ * const authClient = new AuthClient();
+ *
+ * const identity = authClient.isAuthenticated()
+ *   ? await authClient.getIdentity()
+ *   : await authClient.signIn();
+ */
 export class AuthClient {
   #identity: Identity | PartialIdentity = new AnonymousIdentity();
   #credentialStorage: CredentialStorage;
@@ -787,15 +795,6 @@ export class AuthClient {
   }
 
   /**
-   * Builds the identity an application acts with, from a session it holds.
-   *
-   * The account's key is what an identity answers for its principal, and only a
-   * mint reports it — the session chain is rooted at the session's own key. So
-   * where an app credential is stored its root is taken, and where there is none
-   * one is minted, which a load owes anyway: nothing usable is held, so a mint is
-   * due before anything asks for an identity.
-   */
-  /**
    * Moves what a ceremony minted into the slot every tab acts with.
    *
    * Overwrites rather than clearing and re-filling, so there is no moment where
@@ -824,6 +823,18 @@ export class AuthClient {
     });
   }
 
+  /**
+   * Builds the identity an application acts with, from a session it holds.
+   *
+   * Little more than a constructor call: the identity resolves the account key it
+   * needs, so this passes the session's own shape and the slot to use and nothing
+   * more.
+   * @param key - The session key, which signs the mints.
+   * @param sessionChain - The chain that authorises it, and whose earliest
+   *   delegation bounds how long anything can be minted.
+   * @param source - A minter already built for this session, where the caller has
+   *   one. A sign-in does; a page load does not.
+   */
   async #openSession(
     key: SignIdentity,
     sessionChain: DelegationChain,

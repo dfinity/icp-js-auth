@@ -365,16 +365,10 @@ export class SessionIdentity extends DelegationIdentity {
    * Whatever another tab minted arrives this way: sharing is a read of the store
    * rather than a conversation, which works whether the other tabs are running,
    * frozen, or gone.
+   *
+   * Takes no lock, so it declines a spent record rather than evicting it. The
+   * mint that follows evicts under the lock, per {@link readSlot}.
    */
-  /**
-   * @param holdingLock - Whether the caller holds the mint lock, and may
-   *   therefore remove a spent record. A lock-free read MUST NOT: the store
-   *   reaches every tab of the origin, so another tab may have minted and
-   *   written a fresh credential between this read and the removal, and the
-   *   removal would take its work. Declining is enough there — the mint that
-   *   follows takes the lock and evicts under it.
-   */
-  /** A read that takes no lock, so it declines a spent record rather than evicting it. */
   #readStored(): Promise<Held | undefined> {
     return readSlot({
       storage: this.#storage,
