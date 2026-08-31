@@ -231,6 +231,7 @@ describe('AuthClient', () => {
             },
       set: vi.fn(),
       remove: vi.fn(),
+      discard: vi.fn(),
     };
 
     const client = new AuthClient({ stateStorage, idleOptions: { disableIdle: true } });
@@ -250,6 +251,7 @@ describe('AuthClient', () => {
       }),
       set: vi.fn(),
       remove: vi.fn(),
+      discard: vi.fn(),
     };
 
     const status = new AuthClient({ stateStorage, idleOptions: { disableIdle: true } }).getStatus();
@@ -270,6 +272,7 @@ describe('AuthClient', () => {
       }),
       set: vi.fn(),
       remove: vi.fn(),
+      discard: vi.fn(),
     };
 
     const client = new AuthClient({ stateStorage, idleOptions: { disableIdle: true } });
