@@ -3,9 +3,13 @@ import { DelegationChain, Ed25519KeyIdentity } from '@icp-sdk/core/identity';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { SessionGoneError } from '../../src/client/app-delegation-source.ts';
-import { APP_SLOT, type CredentialStorage } from '../../src/client/credential-storage.ts';
+import type { CredentialStorage } from '../../src/client/credential-storage.ts';
 import { MemoryCredentialStorage } from '../../src/client/memory-credential-storage.ts';
 import { SessionIdentity } from '../../src/client/session-identity.ts';
+import { slotsFor } from '../../src/client/slots.ts';
+
+/** The bare names, which is what a client with no namespace writes under. */
+const SLOTS = slotsFor();
 
 const MINUTE = 60_000;
 const TTL = 5 * MINUTE;
@@ -68,7 +72,7 @@ function harness(
     sessionExpiresAtMs: Date.now() + (options.sessionMs ?? 30 * MINUTE),
     source: { mint },
     storage,
-    slot: options.slot ?? APP_SLOT,
+    slot: options.slot ?? SLOTS.app,
     onSessionGone,
   });
   const request = () =>
@@ -270,7 +274,7 @@ describe('SessionIdentity', () => {
     const { identity, request, inner } = harness();
     await request();
 
-    const stored = await inner.get(APP_SLOT);
+    const stored = await inner.get(SLOTS.app);
     expect(stored?.chain?.toJSON()).toEqual(identity.getDelegation().toJSON());
   });
 
@@ -311,7 +315,7 @@ describe('SessionIdentity', () => {
       new Date(Date.now() + TTL),
     );
     const storage = new MemoryCredentialStorage();
-    await storage.set(APP_SLOT, { identity: key as never, chain: foreign });
+    await storage.set(SLOTS.app, { identity: key as never, chain: foreign });
 
     const { request, mint } = harness({ storage });
     await request();
@@ -372,7 +376,7 @@ describe('SessionIdentity', () => {
     // The sign-out cleared this slot already. A credential written now would be
     // one minted under a session that has ended, and the next load would adopt
     // it.
-    expect(await storage.get(APP_SLOT)).toBeNull();
+    expect(await storage.get(SLOTS.app)).toBeNull();
     expect(onSessionGone).toHaveBeenCalledTimes(1);
   });
 
@@ -381,14 +385,14 @@ describe('SessionIdentity', () => {
     Object.defineProperty(storage, 'shared', { value: true });
     const held = await storage.create();
     const chain = await appDelegation(held);
-    await storage.set(APP_SLOT, { identity: held, chain });
+    await storage.set(SLOTS.app, { identity: held, chain });
 
     const mint = vi.fn();
     const identity = await SessionIdentity.create({
       sessionExpiresAtMs: Date.now() + 30 * MINUTE,
       source: { mint },
       storage,
-      slot: APP_SLOT,
+      slot: SLOTS.app,
       onSessionGone: vi.fn(),
     });
 
@@ -426,7 +430,7 @@ describe('SessionIdentity', () => {
       sessionExpiresAtMs: Date.now() + 30 * MINUTE,
       source: { mint },
       storage,
-      slot: APP_SLOT,
+      slot: SLOTS.app,
       onSessionGone: vi.fn(),
     });
 
@@ -434,7 +438,7 @@ describe('SessionIdentity', () => {
     // the lock could land on top of a credential a peer had just written, and
     // would not see the credential that peer left for it.
     expect(events).toEqual(['lock:app', 'mint']);
-    expect(await storage.get(APP_SLOT)).not.toBeNull();
+    expect(await storage.get(SLOTS.app)).not.toBeNull();
     expect(new Uint8Array(identity.getPublicKey().toDer())).toEqual(
       new Uint8Array(chain.publicKey),
     );
@@ -452,7 +456,7 @@ describe('SessionIdentity', () => {
     vi.stubGlobal('navigator', {
       locks: {
         request: async (_name: string, run: () => Promise<unknown>) => {
-          await storage.set(APP_SLOT, { identity: peerKey, chain: peerChain });
+          await storage.set(SLOTS.app, { identity: peerKey, chain: peerChain });
           return run();
         },
       },
@@ -463,7 +467,7 @@ describe('SessionIdentity', () => {
       sessionExpiresAtMs: Date.now() + 30 * MINUTE,
       source: { mint },
       storage,
-      slot: APP_SLOT,
+      slot: SLOTS.app,
       onSessionGone: vi.fn(),
     });
 
@@ -482,7 +486,7 @@ describe('SessionIdentity', () => {
         sessionExpiresAtMs: Date.now() + 1_000,
         source: { mint },
         storage,
-        slot: APP_SLOT,
+        slot: SLOTS.app,
         onSessionGone,
       }),
     ).rejects.toThrow(SessionGoneError);
@@ -504,7 +508,7 @@ describe('SessionIdentity', () => {
     };
 
     const spentKey = await storage.create();
-    await storage.set(APP_SLOT, {
+    await storage.set(SLOTS.app, {
       identity: spentKey,
       chain: await appDelegation(spentKey, -1_000),
     });
@@ -519,7 +523,7 @@ describe('SessionIdentity', () => {
     // Only the state is meant to outlive a delegation, and it records who is
     // signed in by itself, so a spent key and chain go on the read that declines
     // them rather than sitting there until a sign-out.
-    expect(removed).toEqual([APP_SLOT]);
+    expect(removed).toEqual([SLOTS.app]);
   });
 
   it('never removes a spent credential before it holds the lock', async () => {
@@ -542,7 +546,7 @@ describe('SessionIdentity', () => {
     };
 
     const spentKey = await storage.create();
-    await storage.set(APP_SLOT, {
+    await storage.set(SLOTS.app, {
       identity: spentKey,
       chain: await appDelegation(spentKey, -1_000),
     });
@@ -570,7 +574,7 @@ describe('SessionIdentity', () => {
     };
 
     const nearlyKey = await storage.create();
-    await storage.set(APP_SLOT, {
+    await storage.set(SLOTS.app, {
       identity: nearlyKey,
       chain: await appDelegation(nearlyKey, 5_000),
     });
@@ -602,7 +606,7 @@ describe('SessionIdentity', () => {
     // namespaced client would mint again on every load, and its sign-out would
     // clear a slot nothing was using.
     expect(await storage.get('ns:app')).not.toBeNull();
-    expect(await storage.get(APP_SLOT)).toBeNull();
+    expect(await storage.get(SLOTS.app)).toBeNull();
     expect(held).toEqual(['ns:app']);
   });
 
@@ -630,7 +634,7 @@ describe('SessionIdentity', () => {
     const harnessed = harness({ storage });
     await harnessed.request();
 
-    expect(held).toEqual([APP_SLOT]);
+    expect(held).toEqual([SLOTS.app]);
   });
 
   it('does not let a glance at a healthy tab cancel its own rotation', async () => {
