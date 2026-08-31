@@ -19,6 +19,10 @@ export { InteractionRequiredError, requestSessionDelegation } from './session-de
 export { SessionIdentity, type SessionIdentityOptions } from './session-identity.js';
 export { SessionMinter, type SessionMinterOptions } from './session-minter.js';
 export {
+  DEFAULT_SHARED_MEMORY_NAME,
+  SharedMemoryCredentialStorage,
+} from './shared-memory-credential-storage.js';
+export {
   LocalStateStorage,
   MemoryStateStorage,
   type SessionState,
