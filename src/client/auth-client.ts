@@ -16,7 +16,7 @@ import { PostMessageTransport, UrlTransport } from '@icp-sdk/signer/web';
 import { stealMintLock } from './app-lock.js';
 import { fromBase64, toBase64 } from './base64.js';
 import type { Credential, CredentialStorage } from './credential-storage.js';
-import { watchForeground } from './foreground-refresh.js';
+import { watchActivity, watchForeground } from './foreground-refresh.js';
 import { IdbCredentialStorage } from './idb-credential-storage.js';
 import { IdleManager, type IdleManagerOptions } from './idle-manager.js';
 import { requestSessionDelegation } from './session-delegation.js';
@@ -267,6 +267,11 @@ export class AuthClient {
   readonly #slots: Slots;
   readonly #canisterId: Principal;
   #unwatchForeground: (() => void) | undefined;
+  #unwatchActivity: (() => void) | undefined;
+  // `mousemove` fires by the dozen per second, and each call awaits a restore
+  // before it can decide there is nothing to do. One at a time is enough: the
+  // next event finds a fresher answer than the one already in flight anyway.
+  #refreshingInForeground = false;
   #disposed = false;
   /** Ceremonies in flight, which suppress the foreground refresh. */
   #ceremonies = 0;
@@ -303,11 +308,16 @@ export class AuthClient {
       options.identityProvider?.authorizeUrl?.toString() || IDENTITY_PROVIDER_DEFAULT,
     );
     if (!options.disableForegroundRefresh) {
-      // The identity decides whether a mint is due; this only says the moment is
+      // The identity decides whether a mint is due; these only say the moment is
       // a good one. Nothing is hooked where there is no DOM.
-      this.#unwatchForeground = watchForeground(() => {
+      //
+      // The page arriving and the user using it are the same claim — somebody is
+      // here — so both trigger the same refresh and one option governs both.
+      const refresh = (): void => {
         void this.#refreshInForeground();
-      });
+      };
+      this.#unwatchForeground = watchForeground(refresh);
+      this.#unwatchActivity = watchActivity(refresh);
     }
     if (options.openIdProvider) {
       identityProviderUrl.searchParams.set('openid', OPENID_PROVIDER_URLS[options.openIdProvider]);
@@ -431,6 +441,8 @@ export class AuthClient {
     if (this.#identity instanceof SessionIdentity) this.#identity.dispose();
     this.#unwatchForeground?.();
     this.#unwatchForeground = undefined;
+    this.#unwatchActivity?.();
+    this.#unwatchActivity = undefined;
   }
 
   /**
@@ -844,7 +856,16 @@ export class AuthClient {
    * leaves what is held in place for the next one to retry.
    */
   async #refreshInForeground(): Promise<void> {
-    if (this.#ceremonies > 0) return;
+    if (this.#ceremonies > 0 || this.#refreshingInForeground) return;
+    this.#refreshingInForeground = true;
+    try {
+      await this.#refreshIfDue();
+    } finally {
+      this.#refreshingInForeground = false;
+    }
+  }
+
+  async #refreshIfDue(): Promise<void> {
     // `pageshow` fires on the load itself, and this is what makes a page load
     // mint: without waiting for the restore, the load's own event finds an
     // anonymous identity and the first request pays for the mint instead.
