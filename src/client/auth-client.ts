@@ -769,7 +769,7 @@ export class AuthClient {
    * obtained is gone.
    */
   async #dropSession(): Promise<void> {
-    this.#stateStorage.discard?.();
+    this.#stateStorage.discard();
     await this.#clearCredentials();
   }
 
