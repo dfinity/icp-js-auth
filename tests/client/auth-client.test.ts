@@ -1084,6 +1084,49 @@ describe('AuthClient signIn', () => {
     client.dispose();
   });
 
+  it('mints when the user does something, if one is due', async () => {
+    const client = new AuthClient({ credentialStorage: new MemoryCredentialStorage() });
+    handleSignIn(FakeTransport.last());
+    const identity = (await client.signIn()) as SessionIdentity;
+    const held = identity.getDelegation();
+
+    // A user reading rather than clicking still keeps the session alive, which is
+    // what a bound on how long it goes unminted needs in order to be safe.
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(new Date(Date.now() + 4 * 60 * 1000 + 50_000));
+    document.dispatchEvent(new Event('mousemove'));
+    for (let turn = 0; turn < 100 && identity.getDelegation() === held; turn++) {
+      await new Promise((resolve) => setTimeout(resolve, 1));
+    }
+    vi.useRealTimers();
+
+    expect(identity.getDelegation()).not.toBe(held);
+    client.dispose();
+  });
+
+  it('mints once for a burst of activity, not once per event', async () => {
+    const client = new AuthClient({ credentialStorage: new MemoryCredentialStorage() });
+    handleSignIn(FakeTransport.last());
+    const identity = (await client.signIn()) as SessionIdentity;
+    const held = identity.getDelegation();
+    minted.count = 0;
+
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(new Date(Date.now() + 4 * 60 * 1000 + 50_000));
+    // A hand resting on a mouse, which is dozens of events a second.
+    for (let event = 0; event < 50; event++) {
+      document.dispatchEvent(new Event('mousemove'));
+    }
+    for (let turn = 0; turn < 100 && identity.getDelegation() === held; turn++) {
+      await new Promise((resolve) => setTimeout(resolve, 1));
+    }
+    vi.useRealTimers();
+
+    expect(identity.getDelegation()).not.toBe(held);
+    expect(minted.count).toBe(1);
+    client.dispose();
+  });
+
   it('does not refresh the identity a ceremony is in the middle of replacing', async () => {
     const client = new AuthClient({ credentialStorage: new MemoryCredentialStorage() });
     // Answers the first ceremony only, so the second stays in flight.
