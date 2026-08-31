@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
-import { watchForeground } from '../../src/client/foreground-refresh.ts';
+import { watchActivity, watchForeground } from '../../src/client/foreground-refresh.ts';
 
 afterEach(() => {
   vi.unstubAllGlobals();
@@ -73,5 +73,65 @@ describe('watchForeground', () => {
     vi.stubGlobal('document', {});
 
     expect(watchForeground(vi.fn())).toBeUndefined();
+  });
+});
+
+describe('watchActivity', () => {
+  it.each(['pointerdown', 'mousedown', 'mousemove', 'keydown', 'touchstart', 'wheel'])(
+    'fires on %s',
+    (event) => {
+      const onActivity = vi.fn();
+      const unwatch = watchActivity(onActivity);
+
+      document.dispatchEvent(new Event(event));
+
+      expect(onActivity).toHaveBeenCalledTimes(1);
+      unwatch?.();
+    },
+  );
+
+  it('fires on every event rather than once, leaving the throttle to the identity', () => {
+    const onActivity = vi.fn();
+    const unwatch = watchActivity(onActivity);
+
+    document.dispatchEvent(new Event('mousemove'));
+    document.dispatchEvent(new Event('mousemove'));
+    document.dispatchEvent(new Event('keydown'));
+
+    expect(onActivity).toHaveBeenCalledTimes(3);
+    unwatch?.();
+  });
+
+  it('ignores an event that means nobody is here', () => {
+    const onActivity = vi.fn();
+    const unwatch = watchActivity(onActivity);
+
+    document.dispatchEvent(new Event('scroll'));
+    document.dispatchEvent(new Event('visibilitychange'));
+
+    expect(onActivity).not.toHaveBeenCalled();
+    unwatch?.();
+  });
+
+  it('stops firing once unhooked', () => {
+    const onActivity = vi.fn();
+    watchActivity(onActivity)?.();
+
+    document.dispatchEvent(new Event('mousemove'));
+    document.dispatchEvent(new Event('keydown'));
+
+    expect(onActivity).not.toHaveBeenCalled();
+  });
+
+  it('hooks nothing where there is no DOM', () => {
+    vi.stubGlobal('document', undefined);
+
+    expect(watchActivity(vi.fn())).toBeUndefined();
+  });
+
+  it('hooks nothing where a document exists without event methods', () => {
+    vi.stubGlobal('document', {});
+
+    expect(watchActivity(vi.fn())).toBeUndefined();
   });
 });
