@@ -1,7 +1,12 @@
 import { Principal } from '@icp-sdk/core/principal';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { CookieStateStorage } from '../../src/client/cookie-state-storage.ts';
-import type { SessionState } from '../../src/client/state-storage.ts';
+import {
+  LocalStateStorage,
+  MemoryStateStorage,
+  type SessionState,
+  type StateStorage,
+} from '../../src/client/state-storage.ts';
 
 // jsdom serves this document from localhost, and `document.cookie` is scoped by
 // the document's own URL rather than by anything stubbed — so the tests write
@@ -181,5 +186,22 @@ describe('CookieStateStorage', () => {
     globalThis.dispatchEvent(new Event('focus'));
 
     expect(listener).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('resumable', () => {
+  it('is the one store that says a sign-in may be brought back', () => {
+    // Read as the client reads it: through the interface, where the property is
+    // optional and absent is the safe answer.
+    const stores: StateStorage[] = [
+      new MemoryStateStorage(),
+      new LocalStateStorage(),
+      new CookieStateStorage({ domain: 'localhost' }),
+    ];
+
+    // The cookie's record reaches past this origin, so a sibling arrives holding
+    // no credential and needs the provider to have kept the session. The other
+    // two are read by the origin that wrote them and nobody else.
+    expect(stores.map((store) => store.resumable === true)).toEqual([false, false, true]);
   });
 });

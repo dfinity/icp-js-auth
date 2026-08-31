@@ -44,6 +44,17 @@ export interface CookieStateStorageOptions {
  * @see implements {@link StateStorage}
  */
 export class CookieStateStorage implements StateStorage {
+  /**
+   * A sign-in kept here may be resumed without a ceremony.
+   *
+   * This is the store whose record reaches past one origin, so it is the store
+   * whose siblings arrive holding no credential and needing the identity
+   * provider to remember the session they can be given one from. Asking a
+   * provider to keep a sign-in is only worth the persistence where somebody is
+   * going to come back to it, and here somebody will.
+   */
+  public readonly resumable = true;
+
   readonly #attributes: string;
   #subscribers = new Set<() => void>();
 
