@@ -810,6 +810,7 @@ export class AuthClient {
       sessionExpiresAtMs: earliestExpiryMs(sessionChain),
       source: minter,
       storage: this.#credentialStorage,
+      slot: this.#slots.app,
       onSessionGone: () => {
         // Drops what this origin holds and leaves the record standing: a dead
         // chain can mean a sibling replaced the session rather than that it ended.

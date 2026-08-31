@@ -347,6 +347,30 @@ describe('AuthClient', () => {
     expect(localStorage.getItem('ic-session-state')).toBeNull();
   });
 
+  it('keeps a namespaced sign-in wholly inside its namespace', async () => {
+    const credentialStorage = new MemoryCredentialStorage();
+    const client = new AuthClient({
+      credentialStorage,
+      namespace: 'one',
+      idleOptions: { disableIdle: true },
+    });
+    handleSignIn(FakeTransport.last());
+    await client.signIn();
+
+    // Every name the sign-in touches carries the prefix. A bare one left behind
+    // is a credential the client never reads and never clears: the identity
+    // would mint again on the next load, and sign-out would miss it.
+    expect(await credentialStorage.get('one:session')).not.toBeNull();
+    expect(await credentialStorage.get('one:app')).not.toBeNull();
+    expect(await credentialStorage.get(SESSION_SLOT)).toBeNull();
+    expect(await credentialStorage.get(APP_SLOT)).toBeNull();
+
+    await client.signOut();
+
+    expect(await credentialStorage.get('one:session')).toBeNull();
+    expect(await credentialStorage.get('one:app')).toBeNull();
+  });
+
   it('refuses the identity provider as a bare URL, which it used to be', () => {
     // Silently ignored would mean both halves falling back to mainnet.
     expect(() => new AuthClient({ identityProvider: 'https://id.ai/authorize' as never })).toThrow(
