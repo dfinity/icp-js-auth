@@ -80,6 +80,7 @@ export async function requestSessionDelegation(
   params: {
     sessionPublicKey: DerEncodedPublicKey;
     maxTimeToLive?: bigint;
+    maxTimeToIdle?: bigint;
     derivationOrigin?: string;
   },
 ): Promise<DelegationChain> {
@@ -92,6 +93,9 @@ export async function requestSessionDelegation(
       ...(params.maxTimeToLive === undefined
         ? {}
         : { maxTimeToLive: params.maxTimeToLive.toString() }),
+      ...(params.maxTimeToIdle === undefined
+        ? {}
+        : { maxTimeToIdle: params.maxTimeToIdle.toString() }),
       ...(params.derivationOrigin === undefined
         ? {}
         : { icrc95DerivationOrigin: params.derivationOrigin }),
