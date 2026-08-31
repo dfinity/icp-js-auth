@@ -905,7 +905,6 @@ describe('AuthClient signIn', () => {
     const first = new AuthClient({
       credentialStorage,
       stateStorage,
-      idleOptions: { disableIdle: true },
     });
     handleSignIn(FakeTransport.last());
     await first.signIn();
@@ -921,7 +920,6 @@ describe('AuthClient signIn', () => {
     const second = new AuthClient({
       credentialStorage,
       stateStorage,
-      idleOptions: { disableIdle: true },
     });
     const identity = await second.getIdentity();
 
@@ -1324,7 +1322,6 @@ describe('AuthClient signIn', () => {
     const client = new AuthClient({
       credentialStorage,
       stateStorage,
-      idleOptions: { disableIdle: true },
     });
     handleSignIn(FakeTransport.last());
     const identity = (await client.signIn()) as SessionIdentity;
@@ -1353,7 +1350,6 @@ describe('AuthClient signIn', () => {
     const first = new AuthClient({
       credentialStorage,
       stateStorage,
-      idleOptions: { disableIdle: true },
     });
     handleSignIn(FakeTransport.last());
     await first.signIn();
@@ -1366,7 +1362,6 @@ describe('AuthClient signIn', () => {
     const second = new AuthClient({
       credentialStorage,
       stateStorage,
-      idleOptions: { disableIdle: true },
     });
     await second.getIdentity();
 
@@ -1380,7 +1375,7 @@ describe('AuthClient signIn', () => {
     // What a sibling subdomain has on its first load: the shared record, and no
     // credential of its own.
     const stateStorage = new CookieStateStorage({ domain: 'localhost' });
-    const signedIn = new AuthClient({ stateStorage, idleOptions: { disableIdle: true } });
+    const signedIn = new AuthClient({ stateStorage });
     handleSignIn(FakeTransport.last());
     await signedIn.signIn();
     signedIn.dispose();
@@ -1389,7 +1384,6 @@ describe('AuthClient signIn', () => {
     const sibling = new AuthClient({
       stateStorage,
       credentialStorage: new MemoryCredentialStorage(),
-      idleOptions: { disableIdle: true },
     });
 
     expect(stateStorage.get()).not.toBeNull();
