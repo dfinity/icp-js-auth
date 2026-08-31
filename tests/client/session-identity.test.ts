@@ -30,6 +30,7 @@ async function appDelegation(to: SignIdentity, lifetimeMs = TTL): Promise<Delega
 function harness(
   options: {
     slot?: string;
+    beforeMint?: () => Promise<void>;
     lifetimeMs?: number;
     sessionMs?: number;
     onSessionGone?: () => void;
@@ -54,6 +55,7 @@ function harness(
   };
   const newKey = storage.create;
   const mint = vi.fn(async (der: Uint8Array) => {
+    await options.beforeMint?.();
     const key = keys.find((candidate) =>
       new Uint8Array(candidate.getPublicKey().toDer()).every((b, i) => b === der[i]),
     );
@@ -316,6 +318,62 @@ describe('SessionIdentity', () => {
 
     // Not adopted, so it minted for itself rather than signing as someone else.
     expect(mint).toHaveBeenCalledOnce();
+  });
+
+  it('writes nothing when a sign-out takes the lock away mid-mint', async () => {
+    const holders: ((error: Error) => void)[] = [];
+    let steal!: () => void;
+    const request = vi.fn(
+      (_name: string, optionsOrRun: unknown, maybeRun?: () => unknown) =>
+        new Promise((resolve, reject) => {
+          const run = (
+            typeof optionsOrRun === 'function' ? optionsOrRun : maybeRun
+          ) as () => unknown;
+          holders.push(reject);
+          steal = () => {
+            for (const holder of holders) holder(new DOMException('lock stolen', 'AbortError'));
+          };
+          void Promise.resolve().then(run).then(resolve, reject);
+        }),
+    );
+    vi.stubGlobal('navigator', { locks: { request } });
+
+    const storage = new MemoryCredentialStorage();
+    Object.defineProperty(storage, 'shared', { value: true });
+    const onSessionGone = vi.fn();
+
+    // Two gates rather than counted microtasks: one says the mint is genuinely in
+    // flight, the other lets it finish. Nothing here depends on scheduling.
+    let mintStarted!: () => void;
+    const inFlight = new Promise<void>((resolve) => {
+      mintStarted = resolve;
+    });
+    let releaseMint!: () => void;
+    const heldOpen = new Promise<void>((resolve) => {
+      releaseMint = resolve;
+    });
+
+    const harnessed = harness({
+      storage,
+      onSessionGone,
+      // Held open where a real mint waits on its two canister calls.
+      beforeMint: () => {
+        mintStarted();
+        return heldOpen;
+      },
+    });
+
+    const pending = harnessed.request().catch(() => undefined);
+    await inFlight;
+    steal();
+    releaseMint();
+    await pending;
+
+    // The sign-out cleared this slot already. A credential written now would be
+    // one minted under a session that has ended, and the next load would adopt
+    // it.
+    expect(await storage.get(APP_SLOT)).toBeNull();
+    expect(onSessionGone).toHaveBeenCalledTimes(1);
   });
 
   it('reads, writes and locks on the slot it was given', async () => {

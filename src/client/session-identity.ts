@@ -238,7 +238,7 @@ export class SessionIdentity extends DelegationIdentity {
       throw new SessionGoneError('The session has expired');
     }
 
-    return withMintLock(this.#lockName, async () => {
+    return withMintLock(this.#lockName, async (stolen) => {
       // Read before minting, and adopt what is found. The lock alone would only
       // serialise: five tabs waking together would queue politely and then make
       // five calls one after another. This read is what turns serialising into
@@ -262,6 +262,16 @@ export class SessionIdentity extends DelegationIdentity {
       const credential = { identity, chain };
       if (!this.#isForThisSession(credential)) {
         throw new Error('The minted delegation is not for this account and key');
+      }
+
+      // Checked here, after the calls have returned and before anything is
+      // written: a sign-out elsewhere took the lock away while this was in
+      // flight, and it has already cleared the slot this would write to. Storing
+      // now would put a credential back for a session that has ended, and
+      // adopting it would have this tab go on signing with it.
+      if (stolen.aborted) {
+        this.#reportGone();
+        throw new SessionGoneError('The session ended while this mint was in flight');
       }
 
       // A credential that cannot be written is still one this tab can use. The
