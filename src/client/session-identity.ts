@@ -39,6 +39,129 @@ const sameKey = (a: Uint8Array, b: Uint8Array): boolean =>
 const delegatesTo = (chain: DelegationChain): Uint8Array | undefined =>
   chain.delegations[chain.delegations.length - 1]?.delegation.pubkey;
 
+const msLeftOf = (chain: DelegationChain): number => expiresAtMs(chain) - Date.now();
+
+/**
+ * Reads what the slot holds, or `undefined` where it holds nothing usable.
+ *
+ * @param evictSpent - Whether a spent record may be removed, which only a caller
+ *   holding the mint lock may do. The store reaches every tab of the origin, so a
+ *   lock-free read that removed what it declined could delete a credential
+ *   another tab minted between the read and the removal.
+ * @param verify - Rejects a credential not rooted at the account already
+ *   established. Absent on the first read of all, where there is no account to
+ *   compare against and the first mint is what establishes one.
+ */
+async function readSlot({
+  storage,
+  slot,
+  evictSpent,
+  verify,
+}: {
+  storage: CredentialStorage;
+  slot: string;
+  evictSpent: boolean;
+  verify?: (credential: Held) => boolean;
+}): Promise<Held | undefined> {
+  const stored = await storage.get(slot).catch(() => null);
+  if (!stored?.chain) return undefined;
+
+  // A spent credential goes rather than merely being declined. The state is the
+  // only thing meant to outlive a delegation, and it records who is signed in on
+  // its own, so nothing here is worth keeping once it can no longer sign. This is
+  // what bounds a stored credential at one delegation lifetime with nothing
+  // having to fire — there is no dependable signal for a browser closing.
+  //
+  // Both halves together, because they are one record: the key is the thing that
+  // signs, and a chain without it authorises nothing.
+  if (msLeftOf(stored.chain) <= 0) {
+    if (evictSpent) {
+      // Best effort. A credential that cannot be removed is still one this tab
+      // refuses, so a failure costs tidiness and not correctness.
+      await storage.remove(slot).catch(() => undefined);
+    }
+    return undefined;
+  }
+
+  const credential = { identity: stored.identity, chain: stored.chain };
+  if (verify !== undefined && !verify(credential)) return undefined;
+  return credential;
+}
+
+/**
+ * The one place an app credential is minted and written.
+ *
+ * Reads the slot under the lock and mints only where what it finds cannot be
+ * used. The lock alone would merely serialise: five tabs waking together would
+ * queue politely and then make five calls one after another. The read inside it
+ * is what turns serialising into suppressing, and it is why the floor is one mint
+ * per origin rather than one per tab.
+ *
+ * Shared by the first acquisition and by every rotation, so both go through the
+ * same lock and the same read. Having a second reader-and-writer outside the lock
+ * is how a load could land on top of a peer's freshly minted credential.
+ */
+async function acquireCredential({
+  storage,
+  slot,
+  source,
+  lockName,
+  verify,
+  onGone,
+}: {
+  storage: CredentialStorage;
+  slot: string;
+  source: AppDelegationSource;
+  lockName: string | null;
+  verify?: (credential: Held) => boolean;
+  onGone?: () => void;
+}): Promise<Held> {
+  return withMintLock(lockName, async (stolen) => {
+    const stored = await readSlot({ storage, slot, evictSpent: true, verify });
+    if (stored && msLeftOf(stored.chain) > PRE_MINT_THRESHOLD_MS) return stored;
+
+    const identity = await storage.create();
+    let chain: DelegationChain;
+    try {
+      chain = await source.mint(identity.getPublicKey().toDer());
+    } catch (error) {
+      if (error instanceof SessionGoneError) onGone?.();
+      throw error;
+    }
+
+    const credential = { identity, chain };
+    if (verify !== undefined && !verify(credential)) {
+      throw new Error('The minted delegation is not for this account and key');
+    }
+
+    // Checked here, after the calls have returned and before anything is written:
+    // a sign-out elsewhere took the lock away while this was in flight, and it
+    // has already cleared the slot this would write to. Storing now would put a
+    // credential back for a session that has ended.
+    if (stolen.aborted) {
+      onGone?.();
+      throw new SessionGoneError('The session ended while this mint was in flight');
+    }
+
+    // A credential that cannot be written is still one this tab can use. The cost
+    // of a failed write is that other tabs mint for themselves, which is what
+    // they do without a lock at all — it is not a reason to fail the request that
+    // is waiting on this.
+    await storage.set(slot, credential).catch(() => undefined);
+    return credential;
+  });
+}
+
+/** Whether a session has enough left that minting against it returns something usable. */
+const sessionHasLifeLeft = (sessionExpiresAtMs: number): boolean =>
+  sessionExpiresAtMs - Date.now() > BLOCK_MARGIN_MS;
+
+/** The lock a mint is serialised on, or `null` where none is worth taking. */
+const lockNameFor = (storage: CredentialStorage, slot: string): string | null =>
+  // A store no other tab can read has nothing another tab could adopt, so
+  // serialising would spread the mints without preventing any of them.
+  storage.shared ? slot : null;
+
 export interface SessionIdentityOptions {
   /** The account's key, which every app delegation is rooted at. */
   accountKey: DerEncodedPublicKey;
@@ -104,6 +227,53 @@ export class SessionIdentity extends DelegationIdentity {
   #scheduled: ReturnType<typeof setTimeout> | undefined;
   #reportedGone = false;
 
+  /**
+   * Builds an identity for a session, resolving the account key it needs.
+   *
+   * The account key cannot be worked out from the session — the session chain is
+   * rooted at the session's own key, and the state carries the account's
+   * principal, which is a hash of the account key rather than the key. So the
+   * only two places one can come from are a credential the store already holds
+   * and a mint, and a caller with neither has to wait for the mint before an
+   * identity exists at all.
+   *
+   * That resolution goes through the same locked read-or-mint every rotation
+   * uses, which is what keeps the app slot to one writer: doing it here, outside
+   * the lock, is how a page load could overwrite a credential a peer tab had just
+   * minted, and it would skip the read that lets this tab adopt that credential
+   * instead of paying for its own.
+   *
+   * The identity comes back already holding what was resolved, so a caller does
+   * not have to refresh it before use.
+   * @param options - As the constructor takes them, less the account key.
+   */
+  static async create(
+    options: Omit<SessionIdentityOptions, 'accountKey'>,
+  ): Promise<SessionIdentity> {
+    if (!sessionHasLifeLeft(options.sessionExpiresAtMs)) {
+      options.onSessionGone?.();
+      throw new SessionGoneError('The session has expired');
+    }
+
+    const credential = await acquireCredential({
+      storage: options.storage,
+      slot: options.slot,
+      source: options.source,
+      lockName: lockNameFor(options.storage, options.slot),
+      // No account is established yet, so there is nothing to check a candidate
+      // against: this is the mint that establishes one. Every later mint verifies
+      // against it, per {@link SessionIdentity.refresh}.
+      onGone: options.onSessionGone,
+    });
+
+    const identity = new SessionIdentity({
+      ...options,
+      accountKey: credential.chain.publicKey,
+    });
+    identity.#adopt(credential);
+    return identity;
+  }
+
   constructor(options: SessionIdentityOptions) {
     const held: { current?: Held } = {};
     // The base signs through this, so what it holds can be replaced without the
@@ -157,9 +327,7 @@ export class SessionIdentity extends DelegationIdentity {
 
     if (current === undefined) {
       // Nothing held yet, so what another tab left is worth having before minting.
-      // No lock here, so nothing is evicted: a spent record is declined and the
-      // mint below removes it under the lock.
-      const stored = await this.#readStored({ holdingLock: false });
+      const stored = await this.#readStored();
       if (stored && this.#msLeft(stored.chain) > PRE_MINT_THRESHOLD_MS) {
         this.#adopt(stored);
         return;
@@ -174,11 +342,8 @@ export class SessionIdentity extends DelegationIdentity {
     this.#scheduled = undefined;
   }
 
-  /** The name of the lock a mint is serialised on, or `null` where none is worth taking. */
   get #lockName(): string | null {
-    // A store no other tab can read has nothing another tab could adopt, so
-    // serialising would spread the mints without preventing any of them.
-    return this.#storage.shared ? this.#slot : null;
+    return lockNameFor(this.#storage, this.#slot);
   }
 
   #isForThisSession({ identity, chain }: Held): boolean {
@@ -209,31 +374,14 @@ export class SessionIdentity extends DelegationIdentity {
    *   removal would take its work. Declining is enough there — the mint that
    *   follows takes the lock and evicts under it.
    */
-  async #readStored({ holdingLock }: { holdingLock: boolean }): Promise<Held | undefined> {
-    const stored = await this.#storage.get(this.#slot).catch(() => null);
-    if (!stored?.chain) return undefined;
-
-    // A spent credential goes rather than merely being declined. The state is the
-    // only thing meant to outlive a delegation, and it records who is signed in
-    // on its own, so nothing here is worth keeping once it can no longer sign.
-    // This is what bounds a stored credential at one delegation lifetime with
-    // nothing having to fire — there is no dependable signal for a browser
-    // closing.
-    //
-    // Both halves together, because they are one record: the key is the thing
-    // that signs, and a chain without it authorises nothing.
-    if (this.#msLeft(stored.chain) <= 0) {
-      if (holdingLock) {
-        // Best effort. A credential that cannot be removed is still one this tab
-        // refuses, so a failure costs tidiness and not correctness.
-        await this.#storage.remove(this.#slot).catch(() => undefined);
-      }
-      return undefined;
-    }
-
-    const credential = { identity: stored.identity, chain: stored.chain };
-    if (!this.#isForThisSession(credential)) return undefined;
-    return credential;
+  /** A read that takes no lock, so it declines a spent record rather than evicting it. */
+  #readStored(): Promise<Held | undefined> {
+    return readSlot({
+      storage: this.#storage,
+      slot: this.#slot,
+      evictSpent: false,
+      verify: (candidate) => this.#isForThisSession(candidate),
+    });
   }
 
   async #usable(): Promise<Held> {
@@ -261,55 +409,23 @@ export class SessionIdentity extends DelegationIdentity {
     // A delegation lasts min(its ttl, what remains of the session), so minting
     // against an almost finished session returns one already too short to use,
     // and refreshing on the delegation alone would mint without end.
-    if (this.#sessionExpiresAtMs - Date.now() <= BLOCK_MARGIN_MS) {
+    if (!sessionHasLifeLeft(this.#sessionExpiresAtMs)) {
       this.#reportGone();
       throw new SessionGoneError('The session has expired');
     }
 
-    return withMintLock(this.#lockName, async (stolen) => {
-      // Read before minting, and adopt what is found. The lock alone would only
-      // serialise: five tabs waking together would queue politely and then make
-      // five calls one after another. This read is what turns serialising into
-      // suppressing, and it is why the floor is one mint per origin rather than
-      // one per tab.
-      const stored = await this.#readStored({ holdingLock: true });
-      if (stored && this.#msLeft(stored.chain) > PRE_MINT_THRESHOLD_MS) {
-        this.#adopt(stored);
-        return stored;
-      }
-
-      const identity = await this.#storage.create();
-      let chain: DelegationChain;
-      try {
-        chain = await this.#source.mint(identity.getPublicKey().toDer());
-      } catch (error) {
-        if (error instanceof SessionGoneError) this.#reportGone();
-        throw error;
-      }
-
-      const credential = { identity, chain };
-      if (!this.#isForThisSession(credential)) {
-        throw new Error('The minted delegation is not for this account and key');
-      }
-
-      // Checked here, after the calls have returned and before anything is
-      // written: a sign-out elsewhere took the lock away while this was in
-      // flight, and it has already cleared the slot this would write to. Storing
-      // now would put a credential back for a session that has ended, and
-      // adopting it would have this tab go on signing with it.
-      if (stolen.aborted) {
-        this.#reportGone();
-        throw new SessionGoneError('The session ended while this mint was in flight');
-      }
-
-      // A credential that cannot be written is still one this tab can use. The
-      // cost of a failed write is that other tabs mint for themselves, which is
-      // what they do without a lock at all — it is not a reason to fail the
-      // request that is waiting on this.
-      await this.#storage.set(this.#slot, credential).catch(() => undefined);
-      this.#adopt(credential);
-      return credential;
+    const credential = await acquireCredential({
+      storage: this.#storage,
+      slot: this.#slot,
+      source: this.#source,
+      lockName: this.#lockName,
+      // Every mint after the first must be rooted at the account already
+      // established: one that is not is a failed mint, never a new principal.
+      verify: (candidate) => this.#isForThisSession(candidate),
+      onGone: () => this.#reportGone(),
     });
+    this.#adopt(credential);
+    return credential;
   }
 
   #adopt(credential: Held): void {

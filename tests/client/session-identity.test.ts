@@ -376,6 +376,123 @@ describe('SessionIdentity', () => {
     expect(onSessionGone).toHaveBeenCalledTimes(1);
   });
 
+  it('resolves its account key from a credential the store already holds', async () => {
+    const storage = new MemoryCredentialStorage();
+    Object.defineProperty(storage, 'shared', { value: true });
+    const held = await storage.create();
+    const chain = await appDelegation(held);
+    await storage.set(APP_SLOT, { identity: held, chain });
+
+    const mint = vi.fn();
+    const identity = await SessionIdentity.create({
+      sessionExpiresAtMs: Date.now() + 30 * MINUTE,
+      source: { mint },
+      storage,
+      slot: APP_SLOT,
+      onSessionGone: vi.fn(),
+    });
+
+    // Nothing is minted: the account key is the root of what was already there,
+    // and the identity comes back holding it rather than needing a refresh.
+    expect(mint).not.toHaveBeenCalled();
+    expect(identity.getDelegation()).toBe(chain);
+    expect(new Uint8Array(identity.getPublicKey().toDer())).toEqual(
+      new Uint8Array(chain.publicKey),
+    );
+    identity.dispose();
+  });
+
+  it('mints under the lock to establish an account key when the store has none', async () => {
+    const events: string[] = [];
+    vi.stubGlobal('navigator', {
+      locks: {
+        request: async (name: string, run: () => Promise<unknown>) => {
+          events.push(`lock:${name}`);
+          return run();
+        },
+      },
+    });
+
+    const storage = new MemoryCredentialStorage();
+    Object.defineProperty(storage, 'shared', { value: true });
+    const appKey = await storage.create();
+    const chain = await appDelegation(appKey);
+    const mint = vi.fn(async () => {
+      events.push('mint');
+      return chain;
+    });
+
+    const identity = await SessionIdentity.create({
+      sessionExpiresAtMs: Date.now() + 30 * MINUTE,
+      source: { mint },
+      storage,
+      slot: APP_SLOT,
+      onSessionGone: vi.fn(),
+    });
+
+    // Under the lock, and after the read inside it: a load that minted outside
+    // the lock could land on top of a credential a peer had just written, and
+    // would not see the credential that peer left for it.
+    expect(events).toEqual(['lock:app', 'mint']);
+    expect(await storage.get(APP_SLOT)).not.toBeNull();
+    expect(new Uint8Array(identity.getPublicKey().toDer())).toEqual(
+      new Uint8Array(chain.publicKey),
+    );
+    identity.dispose();
+  });
+
+  it('adopts a peer credential written while it queued, rather than minting', async () => {
+    const storage = new MemoryCredentialStorage();
+    Object.defineProperty(storage, 'shared', { value: true });
+    const peerKey = await storage.create();
+    const peerChain = await appDelegation(peerKey);
+
+    // The peer writes while this acquisition is queued on the lock, which is what
+    // the read inside the lock exists to catch.
+    vi.stubGlobal('navigator', {
+      locks: {
+        request: async (_name: string, run: () => Promise<unknown>) => {
+          await storage.set(APP_SLOT, { identity: peerKey, chain: peerChain });
+          return run();
+        },
+      },
+    });
+
+    const mint = vi.fn();
+    const identity = await SessionIdentity.create({
+      sessionExpiresAtMs: Date.now() + 30 * MINUTE,
+      source: { mint },
+      storage,
+      slot: APP_SLOT,
+      onSessionGone: vi.fn(),
+    });
+
+    expect(mint).not.toHaveBeenCalled();
+    expect(identity.getDelegation()).toBe(peerChain);
+    identity.dispose();
+  });
+
+  it('refuses to build against a session with nothing left', async () => {
+    const storage = new MemoryCredentialStorage();
+    const onSessionGone = vi.fn();
+    const mint = vi.fn();
+
+    await expect(
+      SessionIdentity.create({
+        sessionExpiresAtMs: Date.now() + 1_000,
+        source: { mint },
+        storage,
+        slot: APP_SLOT,
+        onSessionGone,
+      }),
+    ).rejects.toThrow(SessionGoneError);
+
+    // Nothing is minted against a session that cannot back a usable delegation,
+    // and the caller is told rather than handed an identity that cannot sign.
+    expect(mint).not.toHaveBeenCalled();
+    expect(onSessionGone).toHaveBeenCalledTimes(1);
+  });
+
   it('removes a stored credential whose delegation has run out', async () => {
     const storage = new MemoryCredentialStorage();
     Object.defineProperty(storage, 'shared', { value: true });
