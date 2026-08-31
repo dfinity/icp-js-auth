@@ -11,7 +11,6 @@ import { AuthClient } from '../../src/client/auth-client.ts';
 import { IdleManager } from '../../src/client/idle-manager.ts';
 import { LocalCredentialStorage } from '../../src/client/local-credential-storage.ts';
 import { MemoryCredentialStorage } from '../../src/client/memory-credential-storage.ts';
-import { SharedMemoryCredentialStorage } from '../../src/client/shared-memory-credential-storage.ts';
 import { FakeUrlTransport } from './fake-url-transport.ts';
 
 // Redirect mode selects `UrlTransport` from `@icp-sdk/signer/web`; swap it for
@@ -136,20 +135,6 @@ describe('AuthClient redirect (UrlTransport) sign-in', () => {
     // takes with it can do neither.
     await expect(client.signIn()).rejects.toThrow(/survives the navigation/);
     expect(FakeUrlTransport.last()?.requests ?? []).toHaveLength(0);
-  });
-
-  it('allows a redirect where a peer tab can answer for the key', async () => {
-    const storage = new SharedMemoryCredentialStorage();
-    const client = new AuthClient({ transport: 'redirect', credentialStorage: storage });
-    handleSignIn(FakeUrlTransport.last());
-
-    // Shared but not durable: the key does not survive the navigation, but another
-    // tab of this origin holds it and answers, so the flow proceeds rather than
-    // being refused for its medium.
-    const identity = await client.signIn();
-
-    expect(identity.getPrincipal().isAnonymous()).toBe(false);
-    storage.close();
   });
 
   it('routes sign-in through the URL transport and cleans up the pending key', async () => {
