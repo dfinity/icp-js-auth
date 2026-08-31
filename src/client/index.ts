@@ -6,7 +6,7 @@ export { type AppDelegationSource, SessionGoneError } from './app-delegation-sou
 export * from './auth-client.js';
 export type { Credential, CredentialStorage } from './credential-storage.js';
 export { DB_VERSION, type DBCreateOptions, IdbKeyVal } from './db.js';
-export { watchForeground } from './foreground-refresh.js';
+export { watchActivity, watchForeground } from './foreground-refresh.js';
 export { IdbCredentialStorage } from './idb-credential-storage.js';
 export { LocalCredentialStorage } from './local-credential-storage.js';
 export { MemoryCredentialStorage } from './memory-credential-storage.js';
