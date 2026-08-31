@@ -50,7 +50,11 @@ Add a `/reauth` page that does this and returns the user to the path in `?next=`
 or home if there is nothing to answer with:
 
 ```typescript
-import { AuthClient, CookieStateStorage } from "@icp-sdk/auth/client";
+import {
+  AuthClient,
+  CookieStateStorage,
+  InteractionRequiredError,
+} from "@icp-sdk/auth/client";
 
 const stateStorage = new CookieStateStorage({ domain: "example.com" });
 const authClient = new AuthClient({
@@ -68,7 +72,7 @@ await authClient
     // was revoked or expired rather than replaced. That is the only reliable
     // evidence the shared record is stale, so this is the one place an origin
     // may retract what it did not write.
-    if (isInteractionRequired(error)) stateStorage.remove();
+    if (error instanceof InteractionRequiredError) stateStorage.remove();
     location.replace("/");
   });
 ```
@@ -100,8 +104,8 @@ if (authClient.getStatus().status === "signed-in-elsewhere") {
 ```
 
 `getStatus()` is what separates the two questions. `isAuthenticated()` answers
-*can this origin act*; the shared record answers *is anyone signed in on this
-domain*, which every sibling reads the same. A sibling that has not acquired a
+_can this origin act_; the shared record answers _is anyone signed in on this
+domain_, which every sibling reads the same. A sibling that has not acquired a
 credential of its own is `signed-in-elsewhere`, and that is the case this
 redirect exists for.
 
