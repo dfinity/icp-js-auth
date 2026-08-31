@@ -58,9 +58,27 @@ export interface StateStorage {
    * out to be dead cannot tell whether the session was revoked or replaced by a
    * sibling signing in — and in the second case the shared record was written by
    * that sibling a moment ago, so retracting it would tell it that the session it
-   * just obtained is gone. Implemented where the two differ.
+   * just obtained is gone.
+   *
+   * A store that publishes nothing beyond this origin answers it with
+   * {@link remove}, which is one line and the right answer.
    */
-  discard?(): void;
+  discard(): void;
+
+  /**
+   * Whether a sign-in kept in this store may be resumed without a ceremony.
+   *
+   * True only where the record reaches past this origin, because that is the
+   * case a silent re-issue exists for: a sibling reads the sign-in, holds no
+   * credential of its own, and needs the identity provider to remember the
+   * session it can extend. A store the origin keeps to itself has nothing to
+   * gain and would only be asking the provider to persist a sign-in on a device
+   * where nothing wanted one kept.
+   *
+   * Absent means false, which is the answer for a store that never considered
+   * the question.
+   */
+  readonly resumable?: boolean;
 
   /**
    * Registers a listener fired when the state changes outside this client.
