@@ -157,7 +157,9 @@ export class SessionIdentity extends DelegationIdentity {
 
     if (current === undefined) {
       // Nothing held yet, so what another tab left is worth having before minting.
-      const stored = await this.#readStored();
+      // No lock here, so nothing is evicted: a spent record is declined and the
+      // mint below removes it under the lock.
+      const stored = await this.#readStored({ holdingLock: false });
       if (stored && this.#msLeft(stored.chain) > PRE_MINT_THRESHOLD_MS) {
         this.#adopt(stored);
         return;
@@ -199,9 +201,35 @@ export class SessionIdentity extends DelegationIdentity {
    * rather than a conversation, which works whether the other tabs are running,
    * frozen, or gone.
    */
-  async #readStored(): Promise<Held | undefined> {
+  /**
+   * @param holdingLock - Whether the caller holds the mint lock, and may
+   *   therefore remove a spent record. A lock-free read MUST NOT: the store
+   *   reaches every tab of the origin, so another tab may have minted and
+   *   written a fresh credential between this read and the removal, and the
+   *   removal would take its work. Declining is enough there — the mint that
+   *   follows takes the lock and evicts under it.
+   */
+  async #readStored({ holdingLock }: { holdingLock: boolean }): Promise<Held | undefined> {
     const stored = await this.#storage.get(this.#slot).catch(() => null);
     if (!stored?.chain) return undefined;
+
+    // A spent credential goes rather than merely being declined. The state is the
+    // only thing meant to outlive a delegation, and it records who is signed in
+    // on its own, so nothing here is worth keeping once it can no longer sign.
+    // This is what bounds a stored credential at one delegation lifetime with
+    // nothing having to fire — there is no dependable signal for a browser
+    // closing.
+    //
+    // Both halves together, because they are one record: the key is the thing
+    // that signs, and a chain without it authorises nothing.
+    if (this.#msLeft(stored.chain) <= 0) {
+      if (holdingLock) {
+        // Best effort. A credential that cannot be removed is still one this tab
+        // refuses, so a failure costs tidiness and not correctness.
+        await this.#storage.remove(this.#slot).catch(() => undefined);
+      }
+      return undefined;
+    }
 
     const credential = { identity: stored.identity, chain: stored.chain };
     if (!this.#isForThisSession(credential)) return undefined;
@@ -244,7 +272,7 @@ export class SessionIdentity extends DelegationIdentity {
       // five calls one after another. This read is what turns serialising into
       // suppressing, and it is why the floor is one mint per origin rather than
       // one per tab.
-      const stored = await this.#readStored();
+      const stored = await this.#readStored({ holdingLock: true });
       if (stored && this.#msLeft(stored.chain) > PRE_MINT_THRESHOLD_MS) {
         this.#adopt(stored);
         return stored;

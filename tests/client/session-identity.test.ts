@@ -376,6 +376,97 @@ describe('SessionIdentity', () => {
     expect(onSessionGone).toHaveBeenCalledTimes(1);
   });
 
+  it('removes a stored credential whose delegation has run out', async () => {
+    const storage = new MemoryCredentialStorage();
+    Object.defineProperty(storage, 'shared', { value: true });
+    const removed: string[] = [];
+    const remove = storage.remove.bind(storage);
+    storage.remove = async (slot) => {
+      removed.push(slot);
+      return remove(slot);
+    };
+
+    const spentKey = await storage.create();
+    await storage.set(APP_SLOT, {
+      identity: spentKey,
+      chain: await appDelegation(spentKey, -1_000),
+    });
+
+    const harnessed = harness({ storage });
+    await harnessed.request();
+
+    // Observed as a removal rather than by reading the slot afterwards: the mint
+    // writes to the same slot, so the state after the fact is identical whether
+    // the spent record was removed or overwritten.
+    //
+    // Only the state is meant to outlive a delegation, and it records who is
+    // signed in by itself, so a spent key and chain go on the read that declines
+    // them rather than sitting there until a sign-out.
+    expect(removed).toEqual([APP_SLOT]);
+  });
+
+  it('never removes a spent credential before it holds the lock', async () => {
+    const events: string[] = [];
+    vi.stubGlobal('navigator', {
+      locks: {
+        request: async (_name: string, run: () => Promise<unknown>) => {
+          events.push('lock');
+          return run();
+        },
+      },
+    });
+
+    const storage = new MemoryCredentialStorage();
+    Object.defineProperty(storage, 'shared', { value: true });
+    const remove = storage.remove.bind(storage);
+    storage.remove = async (slot) => {
+      events.push('remove');
+      return remove(slot);
+    };
+
+    const spentKey = await storage.create();
+    await storage.set(APP_SLOT, {
+      identity: spentKey,
+      chain: await appDelegation(spentKey, -1_000),
+    });
+
+    // `refresh()` reads before taking the lock, which is what makes the ordering
+    // the thing to assert. The store reaches every tab of the origin, so a
+    // lock-free read that removed what it declined could delete a credential
+    // another tab minted between the read and the removal — and that is the
+    // ordinary case, since a delegation running out is exactly when several tabs
+    // wake and one of them mints.
+    const { identity } = harness({ storage });
+    await identity.refresh();
+
+    expect(events).toEqual(['lock', 'remove']);
+  });
+
+  it('keeps a credential it declines only for being close to expiry', async () => {
+    const storage = new MemoryCredentialStorage();
+    Object.defineProperty(storage, 'shared', { value: true });
+    const removed: string[] = [];
+    const remove = storage.remove.bind(storage);
+    storage.remove = async (slot) => {
+      removed.push(slot);
+      return remove(slot);
+    };
+
+    const nearlyKey = await storage.create();
+    await storage.set(APP_SLOT, {
+      identity: nearlyKey,
+      chain: await appDelegation(nearlyKey, 5_000),
+    });
+
+    const harnessed = harness({ storage });
+    await harnessed.request();
+
+    // Not expired, so removal is not what happens to it: it is replaced by the
+    // mint that follows. Evicting on the threshold rather than on expiry would
+    // empty the slot every time a tab woke near a rotation.
+    expect(removed).toEqual([]);
+  });
+
   it('reads, writes and locks on the slot it was given', async () => {
     const held: string[] = [];
     const request = vi.fn(async (name: string, run: () => Promise<unknown>) => {
