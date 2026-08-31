@@ -4,7 +4,9 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { AuthClient } from '../../src/client/auth-client.ts';
 import { PENDING_SLOT } from '../../src/client/credential-storage.ts';
 import { IdleManager } from '../../src/client/idle-manager.ts';
+import { LocalCredentialStorage } from '../../src/client/local-credential-storage.ts';
 import { MemoryCredentialStorage } from '../../src/client/memory-credential-storage.ts';
+import { SharedMemoryCredentialStorage } from '../../src/client/shared-memory-credential-storage.ts';
 import { FakeUrlTransport } from './fake-url-transport.ts';
 
 // Redirect mode selects `UrlTransport` from `@icp-sdk/signer/web`; swap it for
@@ -33,9 +35,14 @@ function fromBase64(value: string): Uint8Array {
   return bytes;
 }
 
-/** A shared in-memory store so two "loads" see the same persisted state. */
-function createSharedStorage(): MemoryCredentialStorage {
-  return new MemoryCredentialStorage();
+/**
+ * A durable store, which is what a redirect needs: the key is written before the
+ * navigation and read again on the load that comes back, so a store the document
+ * takes with it could not finish the flow. One instance stands in for the two
+ * "loads" here, and `localStorage` is cleared between tests.
+ */
+function createDurableStorage(): LocalCredentialStorage {
+  return new LocalCredentialStorage();
 }
 
 // A delegation chain delegating to the requested session key, as a conformant
@@ -85,7 +92,7 @@ const flush = async () => {
   for (let i = 0; i < 15; i++) await new Promise((r) => setTimeout(r, 0));
 };
 
-const hasPendingKey = async (storage: MemoryCredentialStorage) =>
+const hasPendingKey = async (storage: LocalCredentialStorage) =>
   (await storage.get(PENDING_SLOT)) !== null;
 
 beforeEach(() => {
@@ -113,8 +120,35 @@ afterEach(async () => {
 });
 
 describe('AuthClient redirect (UrlTransport) sign-in', () => {
+  it('refuses a redirect where no medium can answer for the key', async () => {
+    const client = new AuthClient({
+      transport: 'redirect',
+      credentialStorage: new MemoryCredentialStorage(),
+    });
+
+    // Refused before navigating rather than on the load that comes back: the key
+    // is written before the redirect and read after it, and a store the document
+    // takes with it can do neither.
+    await expect(client.signIn()).rejects.toThrow(/survives the navigation/);
+    expect(FakeUrlTransport.last()?.requests ?? []).toHaveLength(0);
+  });
+
+  it('allows a redirect where a peer tab can answer for the key', async () => {
+    const storage = new SharedMemoryCredentialStorage();
+    const client = new AuthClient({ transport: 'redirect', credentialStorage: storage });
+    handleSignIn(FakeUrlTransport.last());
+
+    // Shared but not durable: the key does not survive the navigation, but another
+    // tab of this origin holds it and answers, so the flow proceeds rather than
+    // being refused for its medium.
+    const identity = await client.signIn();
+
+    expect(identity.getPrincipal().isAnonymous()).toBe(false);
+    storage.close();
+  });
+
   it('routes sign-in through the URL transport and cleans up the pending key', async () => {
-    const storage = createSharedStorage();
+    const storage = createDurableStorage();
     const client = new AuthClient({ transport: 'redirect', credentialStorage: storage });
     handleSignIn(FakeUrlTransport.last());
 
@@ -133,7 +167,7 @@ describe('AuthClient redirect (UrlTransport) sign-in', () => {
   });
 
   it('completes sign-in even if pending-key cleanup fails', async () => {
-    const storage = createSharedStorage();
+    const storage = createDurableStorage();
     const remove = storage.remove.bind(storage);
     storage.remove = async (slot) => {
       if (slot === PENDING_SLOT) throw new Error('storage unavailable');
@@ -149,7 +183,7 @@ describe('AuthClient redirect (UrlTransport) sign-in', () => {
   });
 
   it('journals the derivation origin so it survives the redirect', async () => {
-    const storage = createSharedStorage();
+    const storage = createDurableStorage();
     const DERIVATION = 'https://derivation.example.com';
 
     // Load 1: derivation origin supplied — forwarded on the request and journaled.
@@ -182,7 +216,7 @@ describe('AuthClient redirect (UrlTransport) sign-in', () => {
   });
 
   it('reuses the session key across the redirect', async () => {
-    const storage = createSharedStorage();
+    const storage = createDurableStorage();
 
     // Load 1: navigates to the signer and never returns in-context.
     FakeUrlTransport.nextRespond = false;
@@ -212,7 +246,7 @@ describe('AuthClient redirect (UrlTransport) sign-in', () => {
   });
 
   it('refuses to finish when another sign-in took the pending slot', async () => {
-    const storage = createSharedStorage();
+    const storage = createDurableStorage();
 
     // Load 1: navigates to the signer and never returns in-context.
     FakeUrlTransport.nextRespond = false;
@@ -240,14 +274,14 @@ describe('AuthClient redirect (UrlTransport) sign-in', () => {
     // Load 1: the value is produced and journaled.
     const client1 = new AuthClient({
       transport: 'redirect',
-      credentialStorage: createSharedStorage(),
+      credentialStorage: createDurableStorage(),
     });
     const v1 = await client1.memoize(produce);
 
     // Load 2 (shared journal): the value replays without re-running produce.
     const client2 = new AuthClient({
       transport: 'redirect',
-      credentialStorage: createSharedStorage(),
+      credentialStorage: createDurableStorage(),
     });
     const v2 = await client2.memoize(produce);
 
@@ -261,7 +295,7 @@ describe('AuthClient redirect (UrlTransport) requestAttributes', () => {
   it('memoizes the nonce and forwards it as base64', async () => {
     const client = new AuthClient({
       transport: 'redirect',
-      credentialStorage: createSharedStorage(),
+      credentialStorage: createDurableStorage(),
     });
     handleAttributes(FakeUrlTransport.last());
 
@@ -277,7 +311,7 @@ describe('AuthClient redirect (UrlTransport) requestAttributes', () => {
   });
 
   it('reuses the memoized nonce across the redirect instead of re-fetching', async () => {
-    const storage = createSharedStorage();
+    const storage = createDurableStorage();
     let counter = 0;
     const thunk = vi.fn(() => Promise.resolve(new Uint8Array(32).fill(++counter))); // fresh each call
 

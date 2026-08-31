@@ -18,6 +18,10 @@ export * from './idle-manager.js';
 export { LocalCredentialStorage } from './local-credential-storage.js';
 export { MemoryCredentialStorage } from './memory-credential-storage.js';
 export {
+  DEFAULT_SHARED_MEMORY_NAME,
+  SharedMemoryCredentialStorage,
+} from './shared-memory-credential-storage.js';
+export {
   LocalStateStorage,
   MemoryStateStorage,
   type SessionState,

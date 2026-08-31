@@ -429,6 +429,17 @@ export class AuthClient {
   async #ensureSessionKeyForRedirectFlow(
     transport: UrlTransport,
   ): Promise<{ key: SignIdentity | PartialIdentity; pending?: boolean }> {
+    // A redirect leaves the document, so the key this flow starts with has to be
+    // readable again on the load that comes back. Two mediums answer for it: one
+    // that survives the teardown, or one another tab can be asked. A store that
+    // is neither cannot finish this flow, and refusing before navigating beats
+    // sending the user to the identity provider and failing on their return.
+    if (!this.#credentialStorage.durable && !this.#credentialStorage.shared) {
+      throw new Error(
+        'A redirect sign-in needs a credential store that survives the navigation or that another tab can answer for, and this one is neither. Use a durable store, a shared one, or the window transport.',
+      );
+    }
+
     if (this.#options.identity !== undefined) {
       return { key: this.#options.identity };
     }
