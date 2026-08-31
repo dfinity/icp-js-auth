@@ -1045,7 +1045,7 @@ describe('AuthClient signIn', () => {
 
     // Put the store in the state a spent delegation leaves it in, so this load is
     // due a mint. The removal is TAB-5's own, covered in session-identity.test.ts.
-    await credentialStorage.remove(APP_SLOT);
+    await credentialStorage.remove(SLOTS.app);
     minted.count = 0;
     const restored = new AuthClient({ credentialStorage, stateStorage });
 
