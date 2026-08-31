@@ -13,6 +13,7 @@ import {
 import { Principal } from '@icp-sdk/core/principal';
 import { Signer } from '@icp-sdk/signer';
 import { PostMessageTransport, UrlTransport } from '@icp-sdk/signer/web';
+import { stealMintLock } from './app-lock.js';
 import { fromBase64, toBase64 } from './base64.js';
 import type { Credential, CredentialStorage } from './credential-storage.js';
 import { IdbCredentialStorage } from './idb-credential-storage.js';
@@ -677,6 +678,13 @@ export class AuthClient {
     // Read before anything is cleared: the revoke call is made as the session,
     // so it needs what the wipe is about to remove.
     const session = await this.#credentialStorage.get(this.#slots.session).catch(() => null);
+
+    // Taken away rather than queued for. Waiting would make a sign-out the user
+    // asked for wait on a canister call in another tab; the tab that loses the
+    // lock finishes the call it cannot recall, sees that it lost it, and throws
+    // the result away rather than writing a credential into the slot cleared
+    // below. Nothing holds the lock where no other tab can read the store.
+    await stealMintLock(this.#credentialStorage.shared ? this.#slots.app : null);
 
     // Ending the session at the canister and clearing what is held here are
     // independent, so they run together: a slow or failing revoke must not hold

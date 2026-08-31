@@ -859,6 +859,52 @@ describe('AuthClient signIn', () => {
     expect(minted.createdWith.at(-1)).toEqual({ canisterId, agentOptions });
   });
 
+  it('takes the mint lock away on sign-out instead of queueing on it', async () => {
+    const stolen: { name: string; steal: boolean }[] = [];
+    const request = vi.fn(async (name: string, optionsOrRun: unknown, maybeRun?: () => unknown) => {
+      const options = (typeof optionsOrRun === 'function' ? {} : optionsOrRun) as {
+        steal?: boolean;
+      };
+      const run = (typeof optionsOrRun === 'function' ? optionsOrRun : maybeRun) as () => unknown;
+      stolen.push({ name, steal: options.steal === true });
+      return run();
+    });
+    vi.stubGlobal('navigator', { locks: { request } });
+
+    const credentialStorage = new IdbCredentialStorage(); // shared === true
+    const client = new AuthClient({
+      credentialStorage,
+      namespace: 'one',
+      idleOptions: { disableIdle: true },
+    });
+    handleSignIn(FakeTransport.last());
+    await client.signIn();
+
+    await client.signOut();
+
+    // Stolen, not queued: a sign-out must not wait on another tab's canister
+    // call. And named from the namespace, like everything else the client writes.
+    expect(stolen).toContainEqual({ name: 'one:app', steal: true });
+  });
+
+  it('does not touch the lock on sign-out where no other tab can read the store', async () => {
+    const request = vi.fn(async (_name: string, _options: unknown, run: () => unknown) => run());
+    vi.stubGlobal('navigator', { locks: { request } });
+
+    const client = new AuthClient({
+      credentialStorage: new MemoryCredentialStorage(), // shared === false
+      idleOptions: { disableIdle: true },
+    });
+    handleSignIn(FakeTransport.last());
+    await client.signIn();
+    request.mockClear();
+
+    await client.signOut();
+
+    // Nothing else can be holding it, so there is nothing to take away.
+    expect(request).not.toHaveBeenCalled();
+  });
+
   it('clears both credentials on sign-out, not just the session', async () => {
     const credentialStorage = new MemoryCredentialStorage();
     const client = new AuthClient({ credentialStorage, idleOptions: { disableIdle: true } });
