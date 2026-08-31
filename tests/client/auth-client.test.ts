@@ -4,12 +4,12 @@ import { Principal } from '@icp-sdk/core/principal';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { AuthClient } from '../../src/client/auth-client.ts';
 import { IdleManager } from '../../src/client/idle-manager.ts';
+import { MemoryStateStorage } from '../../src/client/state-storage.ts';
 import {
   type AuthClientStorage,
   IdbStorage,
   KEY_STORAGE_DELEGATION,
   KEY_STORAGE_KEY,
-  LocalStorage,
 } from '../../src/client/storage.ts';
 import { FakeTransport } from './fake-transport.ts';
 
@@ -35,6 +35,17 @@ function fromBase64(value: string): Uint8Array {
   const bytes = new Uint8Array(binary.length);
   for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
   return bytes;
+}
+
+// The state a stored chain puts an origin in, so a test that seeds storage
+// directly seeds what AuthClient reads to decide it is signed in.
+function stateFor(chain: DelegationChain): MemoryStateStorage {
+  const storage = new MemoryStateStorage();
+  storage.set({
+    principal: Principal.selfAuthenticating(new Uint8Array(chain.publicKey)),
+    expiration: chain.delegations[0]!.delegation.expiration,
+  });
+  return storage;
 }
 
 async function createTestDelegation(key: Ed25519KeyIdentity, expiration?: Date) {
@@ -159,9 +170,124 @@ describe('AuthClient', () => {
       }),
       set: vi.fn(),
     };
-    const client = new AuthClient({ identity, storage });
+    const client = new AuthClient({ identity, storage, stateStorage: stateFor(chain) });
     const resolved = await client.getIdentity();
     expect(resolved.getPrincipal().isAnonymous()).toBe(false);
+  });
+
+  it('stops claiming a sign-in it has nothing left to restore', async () => {
+    // A record naming a sign-in with nothing behind it: a credential store
+    // cleared on its own, or one that does not survive a reload paired with a
+    // state that does.
+    const stateStorage = new MemoryStateStorage();
+    stateStorage.set({
+      principal: Principal.selfAuthenticating(new Uint8Array([1, 2, 3])),
+      expiration: (BigInt(Date.now()) + 3_600_000n) * 1_000_000n,
+    });
+    const storage: AuthClientStorage = {
+      get: vi.fn().mockResolvedValue(null),
+      set: vi.fn(),
+      remove: vi.fn(),
+    };
+
+    const client = new AuthClient({ storage, stateStorage });
+    await client.getIdentity();
+
+    // Saying "signed in" with nothing to act with is what the state leading forbids.
+    expect(stateStorage.get()).toBeNull();
+    expect(client.isAuthenticated()).toBe(false);
+  });
+
+  it.each([
+    ['signed-out', null, false],
+    ['signed-in', { held: true, ms: 3_600_000 }, true],
+    ['signed-in-elsewhere', { held: false, ms: 3_600_000 }, false],
+    ['expired', { held: true, ms: -1000 }, false],
+  ] as const)('reports %s', (expected, shape, authenticated) => {
+    const principal = Principal.selfAuthenticating(new Uint8Array([1, 2, 3]));
+    const stateStorage = {
+      get: () =>
+        shape === null
+          ? null
+          : {
+              principal,
+              expiration: (BigInt(Date.now()) + BigInt(shape.ms)) * 1_000_000n,
+              held: shape.held,
+            },
+      set: vi.fn(),
+      remove: vi.fn(),
+      discard: vi.fn(),
+    };
+
+    const client = new AuthClient({ stateStorage, idleOptions: { disableIdle: true } });
+
+    expect(client.getStatus().status).toBe(expected);
+    // The predicate is the same rule, so the two can never disagree.
+    expect(client.isAuthenticated()).toBe(authenticated);
+  });
+
+  it('carries the account in every case where a record exists', () => {
+    const principal = Principal.selfAuthenticating(new Uint8Array([1, 2, 3]));
+    const stateStorage = {
+      get: () => ({
+        principal,
+        expiration: (BigInt(Date.now()) - 1_000n) * 1_000_000n,
+        held: false,
+      }),
+      set: vi.fn(),
+      remove: vi.fn(),
+      discard: vi.fn(),
+    };
+
+    const status = new AuthClient({ stateStorage, idleOptions: { disableIdle: true } }).getStatus();
+
+    // A silent re-issue needs it to name the account, so the type carries it
+    // wherever there is one to carry.
+    expect(status.status === 'signed-out' ? null : status.principal).toEqual(principal);
+  });
+
+  it('clears the credentials it could not restore, not just the claim on them', async () => {
+    // A record naming a sign-in whose delegation is gone: the state is dropped,
+    // and so is whatever is left in the credential store — teardown covers every
+    // slot rather than whichever one a caller happened to name.
+    const stateStorage = new MemoryStateStorage();
+    stateStorage.set({
+      principal: Principal.selfAuthenticating(new Uint8Array([1, 2, 3])),
+      expiration: (BigInt(Date.now()) + 3_600_000n) * 1_000_000n,
+    });
+    const storage: AuthClientStorage = {
+      get: vi.fn().mockResolvedValue(null),
+      set: vi.fn(),
+      remove: vi.fn(),
+    };
+
+    const client = new AuthClient({ storage, stateStorage });
+    await client.getIdentity();
+
+    expect(stateStorage.get()).toBeNull();
+    expect(storage.remove).toHaveBeenCalledWith(KEY_STORAGE_KEY);
+    expect(storage.remove).toHaveBeenCalledWith(KEY_STORAGE_DELEGATION);
+  });
+
+  it('is not authenticated by a record this origin does not hold', async () => {
+    // What a store whose record reaches further than one origin reports on an
+    // origin that has not acquired a credential of its own.
+    const stateStorage = {
+      get: () => ({
+        principal: Principal.selfAuthenticating(new Uint8Array([1, 2, 3])),
+        expiration: (BigInt(Date.now()) + 3_600_000n) * 1_000_000n,
+        held: false,
+      }),
+      set: vi.fn(),
+      remove: vi.fn(),
+      discard: vi.fn(),
+    };
+
+    const client = new AuthClient({ stateStorage, idleOptions: { disableIdle: true } });
+
+    // Someone is signed in within that store's reach; this origin cannot act.
+    expect(stateStorage.get()).not.toBeNull();
+    expect(client.isAuthenticated()).toBe(false);
   });
 
   it('should sign users out', async () => {
@@ -358,7 +484,7 @@ describe('AuthClient signIn', () => {
     expect(storedKeys[0]).not.toEqual(storedKeys[1]);
   });
 
-  it('should set the localStorage expiration flag after sign-in', async () => {
+  it('should report the user as authenticated after sign-in', async () => {
     const client = new AuthClient({ idleOptions: { disableIdle: true } });
     handleSignIn(FakeTransport.last());
     expect(client.isAuthenticated()).toBe(false);
@@ -366,13 +492,123 @@ describe('AuthClient signIn', () => {
     expect(client.isAuthenticated()).toBe(true);
   });
 
-  it('should clear the localStorage expiration flag on sign-out', async () => {
+  it('should report the user as not authenticated after sign-out', async () => {
     const client = new AuthClient({ idleOptions: { disableIdle: true } });
     handleSignIn(FakeTransport.last());
     await client.signIn();
     expect(client.isAuthenticated()).toBe(true);
     await client.signOut();
     expect(client.isAuthenticated()).toBe(false);
+  });
+
+  it('records the account and the expiry in the supplied state storage', async () => {
+    const stateStorage = new MemoryStateStorage();
+    const client = new AuthClient({ stateStorage, idleOptions: { disableIdle: true } });
+    handleSignIn(FakeTransport.last());
+    await client.signIn();
+
+    const state = stateStorage.get();
+    const identity = await client.getIdentity();
+    expect(state?.principal.toText()).toBe(identity.getPrincipal().toText());
+    expect(state?.expiration).toBeGreaterThan(BigInt(Date.now()) * BigInt(1_000_000));
+  });
+
+  it('names who is signed in synchronously, from the state', () => {
+    const stateStorage = new MemoryStateStorage();
+    const principal = Principal.selfAuthenticating(new Uint8Array([1, 2, 3]));
+    stateStorage.set({ principal, expiration: BigInt(Date.now() + 60_000) * 1_000_000n });
+    const client = new AuthClient({ stateStorage, idleOptions: { disableIdle: true } });
+
+    // No await, no store opened, no mint: this is the answer a page renders on.
+    expect(client.getPrincipal()?.toText()).toBe(principal.toText());
+  });
+
+  it('names nobody when no record exists', () => {
+    const client = new AuthClient({
+      stateStorage: new MemoryStateStorage(),
+      idleOptions: { disableIdle: true },
+    });
+    expect(client.getPrincipal()).toBeUndefined();
+  });
+
+  it('names nobody for a session that has expired, and agrees with isAuthenticated', () => {
+    const stateStorage = new MemoryStateStorage();
+    const principal = Principal.selfAuthenticating(new Uint8Array([4, 5, 6]));
+    stateStorage.set({ principal, expiration: BigInt(Date.now() - 60_000) * 1_000_000n });
+    const client = new AuthClient({ stateStorage, idleOptions: { disableIdle: true } });
+
+    // A principal here means calls made as it will be accepted. `if
+    // (getPrincipal())` is the check an application reaches for, so answering for
+    // a session that has ended would have it act on one.
+    expect(client.getPrincipal()).toBeUndefined();
+    expect(client.isAuthenticated()).toBe(false);
+
+    // Nothing is lost: getStatus() carries the account, with the status attached
+    // so it cannot be mistaken for permission to act.
+    const status = client.getStatus();
+    expect(status.status).toBe('expired');
+    expect(status.status !== 'signed-out' && status.principal.toText()).toBe(principal.toText());
+  });
+
+  it('never disagrees with isAuthenticated', () => {
+    const stateStorage = new MemoryStateStorage();
+    const client = new AuthClient({ stateStorage, idleOptions: { disableIdle: true } });
+    const principal = Principal.selfAuthenticating(new Uint8Array([7, 8, 9]));
+
+    for (const expiration of [
+      BigInt(Date.now() + 60_000) * 1_000_000n,
+      BigInt(Date.now() - 60_000) * 1_000_000n,
+    ]) {
+      stateStorage.set({ principal, expiration });
+      // One predicate, two return types. They are the same question, so an
+      // application cannot get a principal it is not allowed to act as.
+      expect(client.getPrincipal() !== undefined).toBe(client.isAuthenticated());
+    }
+
+    stateStorage.remove();
+    expect(client.getPrincipal() !== undefined).toBe(client.isAuthenticated());
+  });
+
+  it('answers isAuthenticated from the state storage and not from the delegation', async () => {
+    const stateStorage = new MemoryStateStorage();
+    const client = new AuthClient({ stateStorage, idleOptions: { disableIdle: true } });
+    handleSignIn(FakeTransport.last());
+    await client.signIn();
+    expect(client.isAuthenticated()).toBe(true);
+
+    // The delegation is untouched; only the state is gone.
+    stateStorage.remove();
+
+    expect(client.isAuthenticated()).toBe(false);
+  });
+
+  it('does not restore a session the state does not back, and drops it', async () => {
+    const storage = new IdbStorage();
+    const stateStorage = new MemoryStateStorage();
+    const first = new AuthClient({ storage, stateStorage, idleOptions: { disableIdle: true } });
+    handleSignIn(FakeTransport.last());
+    await first.signIn();
+    expect(await storage.get(KEY_STORAGE_DELEGATION)).not.toBeNull();
+
+    // Only the state goes; the delegation is left exactly where it was.
+    stateStorage.remove();
+
+    const second = new AuthClient({ storage, stateStorage, idleOptions: { disableIdle: true } });
+    const identity = await second.getIdentity();
+    expect(identity.getPrincipal().isAnonymous()).toBe(true);
+    expect(await storage.get(KEY_STORAGE_DELEGATION)).toBeNull();
+  });
+
+  it('clears the state storage on sign-out', async () => {
+    const stateStorage = new MemoryStateStorage();
+    const client = new AuthClient({ stateStorage, idleOptions: { disableIdle: true } });
+    handleSignIn(FakeTransport.last());
+    await client.signIn();
+    expect(stateStorage.get()).not.toBeNull();
+
+    await client.signOut();
+
+    expect(stateStorage.get()).toBeNull();
   });
 });
 
@@ -483,7 +719,7 @@ describe('Session restoration', () => {
       set: vi.fn(),
     };
 
-    const client = new AuthClient({ storage });
+    const client = new AuthClient({ storage, stateStorage: stateFor(chain) });
     const identity = await client.getIdentity();
     expect(identity.getPrincipal().isAnonymous()).toBe(false);
   });
@@ -544,24 +780,6 @@ describe('Migration from localStorage', () => {
 
     // No migration should have occurred (no set calls for delegation/key)
     expect(storage.set).not.toHaveBeenCalled();
-  });
-
-  it('should migrate storage from localStorage', async () => {
-    const legacyStorage = new LocalStorage();
-    const storage: AuthClientStorage = {
-      remove: vi.fn(),
-      get: vi.fn().mockResolvedValue(null),
-      set: vi.fn(),
-    };
-
-    await legacyStorage.set(KEY_STORAGE_DELEGATION, 'test');
-    await legacyStorage.set(KEY_STORAGE_KEY, 'key');
-
-    new AuthClient({ storage });
-    await new Promise((r) => setTimeout(r, 0)); // wait for hydration
-
-    expect(storage.set).toHaveBeenCalledWith(KEY_STORAGE_DELEGATION, 'test');
-    expect(storage.set).toHaveBeenCalledWith(KEY_STORAGE_KEY, 'key');
   });
 });
 
