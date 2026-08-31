@@ -363,8 +363,8 @@ describe('AuthClient', () => {
     // would mint again on the next load, and sign-out would miss it.
     expect(await credentialStorage.get('one:session')).not.toBeNull();
     expect(await credentialStorage.get('one:app')).not.toBeNull();
-    expect(await credentialStorage.get(SESSION_SLOT)).toBeNull();
-    expect(await credentialStorage.get(APP_SLOT)).toBeNull();
+    expect(await credentialStorage.get(SLOTS.session)).toBeNull();
+    expect(await credentialStorage.get(SLOTS.app)).toBeNull();
 
     await client.signOut();
 
@@ -423,7 +423,7 @@ describe('AuthClient', () => {
     // through it are not somewhere a back button should return to.
     expect(replace).toHaveBeenCalledWith('http://localhost/app');
     expect(storedAtEachNavigation).toEqual([true]);
-    expect(await credentialStorage.get(SESSION_SLOT)).not.toBeNull();
+    expect(await credentialStorage.get(SLOTS.session)).not.toBeNull();
   });
 
   it('ignores a cross-origin or javascript: returnTo on sign in', async () => {
@@ -622,7 +622,7 @@ describe('AuthClient signIn', () => {
     // have the application render a signed-in page and fail on its first request,
     // which is the outcome this refusal exists to avoid.
     expect(stateStorage.get()).toBeNull();
-    expect(await credentialStorage.get(APP_SLOT)).toBeNull();
+    expect(await credentialStorage.get(SLOTS.app)).toBeNull();
   });
 
   it('asks for a session, carrying maxTimeToLive and no targets', async () => {
