@@ -2,7 +2,7 @@ import type { DerEncodedPublicKey, HttpAgentRequest } from '@icp-sdk/core/agent'
 import { DelegationChain, DelegationIdentity } from '@icp-sdk/core/identity';
 import { type AppDelegationSource, SessionGoneError } from './app-delegation-source.js';
 import { withMintLock } from './app-lock.js';
-import { APP_SLOT, type Credential, type CredentialStorage } from './credential-storage.js';
+import type { Credential, CredentialStorage } from './credential-storage.js';
 
 /**
  * How much life a delegation needs left to be handed to a caller. Covers a
@@ -58,6 +58,17 @@ export interface SessionIdentityOptions {
   storage: CredentialStorage;
 
   /**
+   * The slot the app credential lives under, and the name of the lock that
+   * serialises minting into it.
+   *
+   * Taken rather than assumed, because the client assigns every name from one
+   * namespace: reaching for the bare constant here would read and write a slot
+   * the client never promotes into, so a namespaced client would mint again on
+   * every load and its sign-out would clear a slot nothing was using.
+   */
+  slot: string;
+
+  /**
    * Called once when the session turns out to be gone, so the client can drop
    * what it holds and tell its subscribers. Ending a session is the client's to
    * do; this only reports it.
@@ -82,6 +93,7 @@ export interface SessionIdentityOptions {
 export class SessionIdentity extends DelegationIdentity {
   readonly #source: AppDelegationSource;
   readonly #storage: CredentialStorage;
+  readonly #slot: string;
   readonly #onSessionGone: () => void;
   readonly #sessionExpiresAtMs: number;
   /** Reached by the base class's `sign`, so rotating does not change the object. */
@@ -111,6 +123,7 @@ export class SessionIdentity extends DelegationIdentity {
     this.#held = held;
     this.#source = options.source;
     this.#storage = options.storage;
+    this.#slot = options.slot;
     this.#onSessionGone = options.onSessionGone;
     this.#sessionExpiresAtMs = options.sessionExpiresAtMs;
   }
@@ -163,7 +176,7 @@ export class SessionIdentity extends DelegationIdentity {
   get #lockName(): string | null {
     // A store no other tab can read has nothing another tab could adopt, so
     // serialising would spread the mints without preventing any of them.
-    return this.#storage.shared ? APP_SLOT : null;
+    return this.#storage.shared ? this.#slot : null;
   }
 
   #isForThisSession({ identity, chain }: Held): boolean {
@@ -187,7 +200,7 @@ export class SessionIdentity extends DelegationIdentity {
    * frozen, or gone.
    */
   async #readStored(): Promise<Held | undefined> {
-    const stored = await this.#storage.get(APP_SLOT).catch(() => null);
+    const stored = await this.#storage.get(this.#slot).catch(() => null);
     if (!stored?.chain) return undefined;
 
     const credential = { identity: stored.identity, chain: stored.chain };
@@ -255,7 +268,7 @@ export class SessionIdentity extends DelegationIdentity {
       // cost of a failed write is that other tabs mint for themselves, which is
       // what they do without a lock at all — it is not a reason to fail the
       // request that is waiting on this.
-      await this.#storage.set(APP_SLOT, credential).catch(() => undefined);
+      await this.#storage.set(this.#slot, credential).catch(() => undefined);
       this.#adopt(credential);
       return credential;
     });

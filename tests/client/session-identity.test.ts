@@ -29,6 +29,7 @@ async function appDelegation(to: SignIdentity, lifetimeMs = TTL): Promise<Delega
 
 function harness(
   options: {
+    slot?: string;
     lifetimeMs?: number;
     sessionMs?: number;
     onSessionGone?: () => void;
@@ -65,6 +66,7 @@ function harness(
     sessionExpiresAtMs: Date.now() + (options.sessionMs ?? 30 * MINUTE),
     source: { mint },
     storage,
+    slot: options.slot ?? APP_SLOT,
     onSessionGone,
   });
   const request = () =>
@@ -314,6 +316,28 @@ describe('SessionIdentity', () => {
 
     // Not adopted, so it minted for itself rather than signing as someone else.
     expect(mint).toHaveBeenCalledOnce();
+  });
+
+  it('reads, writes and locks on the slot it was given', async () => {
+    const held: string[] = [];
+    const request = vi.fn(async (name: string, run: () => Promise<unknown>) => {
+      held.push(name);
+      return run();
+    });
+    vi.stubGlobal('navigator', { locks: { request } });
+
+    const storage = new MemoryCredentialStorage();
+    Object.defineProperty(storage, 'shared', { value: true });
+    const harnessed = harness({ storage, slot: 'ns:app' });
+    await harnessed.request();
+
+    // The client names every slot from one namespace, so reaching for the bare
+    // constant here would put the credential where the client never looks: a
+    // namespaced client would mint again on every load, and its sign-out would
+    // clear a slot nothing was using.
+    expect(await storage.get('ns:app')).not.toBeNull();
+    expect(await storage.get(APP_SLOT)).toBeNull();
+    expect(held).toEqual(['ns:app']);
   });
 
   it('takes no lock where no other tab can read the store', async () => {
