@@ -831,17 +831,12 @@ export class AuthClient {
   ): Promise<SessionIdentity> {
     const minter = source ?? (await this.#minterFor(key, sessionChain));
 
-    const stored = await this.#credentialStorage.get(this.#slots.app);
-    let accountKey = stored?.chain?.publicKey;
-    if (accountKey === undefined) {
-      const appKey = await this.#credentialStorage.create();
-      const appChain = await minter.mint(appKey.getPublicKey().toDer());
-      await this.#credentialStorage.set(this.#slots.app, { identity: appKey, chain: appChain });
-      accountKey = appChain.publicKey;
-    }
-
-    const identity = new SessionIdentity({
-      accountKey,
+    // The identity resolves its own account key, through the same locked
+    // read-or-mint every rotation uses. Doing it here instead meant a second
+    // writer of the app slot that took no lock: a load could overwrite a
+    // credential a peer tab had just minted, and would not see the credential
+    // that peer had left for it to adopt.
+    return SessionIdentity.create({
       sessionExpiresAtMs: earliestExpiryMs(sessionChain),
       source: minter,
       storage: this.#credentialStorage,
@@ -853,10 +848,6 @@ export class AuthClient {
         this.#identity = new AnonymousIdentity();
       },
     });
-    // Adopts what is stored, so the identity a caller is handed already holds a
-    // delegation rather than minting on its first request.
-    await identity.refresh();
-    return identity;
   }
 
   // Memoized — only runs #hydrate once, returns the same promise on repeat calls.

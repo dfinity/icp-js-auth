@@ -6,6 +6,7 @@ import {
 } from '@icp-sdk/core/identity';
 import { Principal } from '@icp-sdk/core/principal';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { SessionGoneError } from '../../src/client/app-delegation-source.ts';
 import { AuthClient } from '../../src/client/auth-client.ts';
 import type { Credential, CredentialStorage } from '../../src/client/credential-storage.ts';
 import { IdbCredentialStorage } from '../../src/client/idb-credential-storage.ts';
@@ -602,17 +603,43 @@ describe('AuthClient signIn', () => {
     await expect(client.signIn()).rejects.toThrow('connection failed');
   });
 
+  it('fails the sign-in when the session granted has nothing left to mint against', async () => {
+    const credentialStorage = new MemoryCredentialStorage();
+    const stateStorage = new MemoryStateStorage();
+    const client = new AuthClient({
+      credentialStorage,
+      stateStorage,
+      idleOptions: { disableIdle: true },
+    });
+    handleSignIn(FakeTransport.last());
+
+    // One millisecond of session: the fixture takes the chain's life from the
+    // requested ceiling. Nothing can be minted against it, so an identity built
+    // around it could never sign.
+    await expect(client.signIn({ maxTimeToLive: 1_000_000n })).rejects.toThrow(SessionGoneError);
+
+    // And nothing is recorded. Reporting a sign-in that cannot make a call would
+    // have the application render a signed-in page and fail on its first request,
+    // which is the outcome this refusal exists to avoid.
+    expect(stateStorage.get()).toBeNull();
+    expect(await credentialStorage.get(APP_SLOT)).toBeNull();
+  });
+
   it('asks for a session, carrying maxTimeToLive and no targets', async () => {
     const client = new AuthClient();
     const transport = FakeTransport.last();
     handleSignIn(transport);
 
-    await client.signIn({ maxTimeToLive: 1_000_000n });
+    // An hour, in nanoseconds. The value only has to survive onto the wire, but
+    // the fixture derives the session's own life from it — so a token number here
+    // would build a session already too short to mint against, which is a
+    // different outcome and not the one this test is about.
+    await client.signIn({ maxTimeToLive: 3_600_000_000_000n });
 
     const req = transport.requests[0];
     expect(req.method).toBe('ii_session_delegation');
     expect(req.params?.sessionPublicKey).toEqual(expect.any(String));
-    expect(req.params?.maxTimeToLive).toBe('1000000');
+    expect(req.params?.maxTimeToLive).toBe('3600000000000');
     // A session chain is restricted to Internet Identity, so an application has
     // no targets to ask for: what it may call is decided by the delegations
     // minted from the session, not by the session itself.
