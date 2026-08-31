@@ -396,7 +396,7 @@ export class AuthClient {
     }
 
     // Persist so the session survives page reloads.
-    await persistChain(this.#storage, this.#stateStorage, this.#chain);
+    await this.#persistChain(this.#chain);
     await persistKey(this.#storage, key);
 
     // The flow is complete: the delegation is bound to this key and stored, so
@@ -594,7 +594,7 @@ export class AuthClient {
     // Wait for the constructor's session restore: hydration racing the
     // deletion below could re-populate the identity from already-read state.
     await this.#init();
-    await deleteStorage(this.#storage, this.#stateStorage);
+    await this.#endSession();
 
     this.#identity = new AnonymousIdentity();
     this.#chain = null;
@@ -656,12 +656,12 @@ export class AuthClient {
   // client is ready to use without a new signIn().
   async #hydrate(): Promise<void> {
     const key = this.#options.identity ?? (await restoreKey(this.#storage));
-    const chain = key ? await restoreChain(this.#storage, this.#stateStorage) : null;
+    const chain = key ? await this.#restoreChain() : null;
     if (!key || !chain) {
       // Nothing to restore, so this origin cannot act — and saying otherwise is
       // what the state leading forbids. Discarded rather than removed, because a
       // record that reaches past this origin belongs to whoever published it.
-      if (this.#stateStorage.get()?.held) this.#stateStorage.discard?.();
+      if (this.#stateStorage.get()?.held) await this.#dropSession();
       return;
     }
 
@@ -671,7 +671,7 @@ export class AuthClient {
     // signed out. Asked after the chain is read, so a visitor who was never
     // signed in removes nothing.
     if (this.#stateStorage.get() === null) {
-      await deleteStorage(this.#storage, this.#stateStorage);
+      await this.#endSession();
       return;
     }
 
@@ -686,6 +686,86 @@ export class AuthClient {
       this.idleManager = IdleManager.create(this.#options.idleOptions);
       this.#registerDefaultIdleCallback();
     }
+  }
+
+  /**
+   * Saves the delegation chain and records the state it puts this origin in, so
+   * {@link isAuthenticated} can answer without reading the chain back.
+   */
+  async #persistChain(chain: DelegationChain): Promise<void> {
+    await this.#storage.set(KEY_STORAGE_DELEGATION, JSON.stringify(chain.toJSON()));
+
+    let earliest: bigint | null = null;
+    for (const { delegation } of chain.delegations) {
+      if (earliest === null || delegation.expiration < earliest) {
+        earliest = delegation.expiration;
+      }
+    }
+    if (earliest !== null) {
+      // Both fields come off the chain: it is rooted at the account's key, and
+      // the sign-in lasts as long as its earliest delegation.
+      this.#stateStorage.set({
+        principal: Principal.selfAuthenticating(new Uint8Array(chain.publicKey)),
+        expiration: earliest,
+      });
+    }
+  }
+
+  /**
+   * Loads the delegation chain. Returns `null` and ends the sign-in where the
+   * chain has expired or cannot be read.
+   */
+  async #restoreChain(): Promise<DelegationChain | null> {
+    try {
+      const raw = await this.#storage.get(KEY_STORAGE_DELEGATION);
+      if (!raw || typeof raw !== 'string') return null;
+
+      const chain = DelegationChain.fromJSON(raw);
+      if (!isDelegationValid(chain)) {
+        await this.#endSession();
+        return null;
+      }
+      return chain;
+    } catch (e) {
+      console.error(e);
+      await this.#endSession();
+      return null;
+    }
+  }
+
+  /**
+   * Ends the sign-in: what a user pressing sign out asks for.
+   *
+   * Retracts the state, including anything the store publishes beyond this
+   * origin, because a sibling reading a shared record must stop seeing one.
+   */
+  async #endSession(): Promise<void> {
+    this.#stateStorage.remove();
+    await this.#clearCredentials();
+  }
+
+  /**
+   * Drops this origin's claim on a sign-in without retracting what is published.
+   *
+   * What finding out does, which is a different act. An origin whose chain turns
+   * out to be dead cannot tell a revoked session from one a sibling replaced by
+   * signing in — and in the second case the shared record was written by that
+   * sibling a moment ago, so retracting it would tell it that the session it just
+   * obtained is gone.
+   */
+  async #dropSession(): Promise<void> {
+    this.#stateStorage.discard?.();
+    await this.#clearCredentials();
+  }
+
+  // Always every slot, so no caller can end a sign-in halfway by naming one. The
+  // state is retracted before this by both callers: it is what says whether this
+  // origin is signed in, and a teardown that failed partway must not leave it
+  // saying yes.
+  async #clearCredentials(): Promise<void> {
+    await this.#storage.remove(KEY_STORAGE_KEY);
+    await this.#storage.remove(KEY_STORAGE_DELEGATION);
+    await this.#storage.remove(KEY_VECTOR);
   }
 
   #registerDefaultIdleCallback() {
@@ -879,79 +959,6 @@ function serializeKey(key: SignIdentity | PartialIdentity): StoredKey {
   if (key instanceof ECDSAKeyIdentity) return key.getKeyPair();
   if (key instanceof Ed25519KeyIdentity) return JSON.stringify(key.toJSON());
   throw new Error('Unsupported key type');
-}
-
-/**
- * Saves the delegation chain and records the state it puts this origin in, so
- * {@link AuthClient.isAuthenticated} can answer without reading the chain back.
- * @param storage - The storage backend.
- * @param stateStorage - Where the state of the sign-in is kept.
- * @param chain - The delegation chain to persist.
- */
-async function persistChain(
-  storage: AuthClientStorage,
-  stateStorage: StateStorage,
-  chain: DelegationChain,
-): Promise<void> {
-  await storage.set(KEY_STORAGE_DELEGATION, JSON.stringify(chain.toJSON()));
-
-  let earliest: bigint | null = null;
-  for (const { delegation } of chain.delegations) {
-    if (earliest === null || delegation.expiration < earliest) {
-      earliest = delegation.expiration;
-    }
-  }
-  if (earliest !== null) {
-    // Both fields come off the chain: it is rooted at the account's key, and
-    // the sign-in lasts as long as its earliest delegation.
-    stateStorage.set({
-      principal: Principal.selfAuthenticating(new Uint8Array(chain.publicKey)),
-      expiration: earliest,
-    });
-  }
-}
-
-/**
- * Loads the delegation chain from storage. Returns `null` and wipes
- * storage if the chain is expired or corrupted.
- * @param storage - The storage backend.
- */
-async function restoreChain(
-  storage: AuthClientStorage,
-  stateStorage: StateStorage,
-): Promise<DelegationChain | null> {
-  try {
-    const raw = await storage.get(KEY_STORAGE_DELEGATION);
-    if (!raw || typeof raw !== 'string') return null;
-
-    const chain = DelegationChain.fromJSON(raw);
-    if (!isDelegationValid(chain)) {
-      await deleteStorage(storage, stateStorage);
-      return null;
-    }
-    return chain;
-  } catch (e) {
-    console.error(e);
-    await deleteStorage(storage, stateStorage);
-    return null;
-  }
-}
-
-/**
- * Clears all session data from storage.
- * @param storage - The storage backend.
- * @param stateStorage - Where the state of the sign-in is kept.
- */
-async function deleteStorage(
-  storage: AuthClientStorage,
-  stateStorage: StateStorage,
-): Promise<void> {
-  // The state goes first: it is what says whether this origin is signed in, and
-  // a teardown that failed halfway must not leave it saying yes.
-  stateStorage.remove();
-  await storage.remove(KEY_STORAGE_KEY);
-  await storage.remove(KEY_STORAGE_DELEGATION);
-  await storage.remove(KEY_VECTOR);
 }
 
 /**

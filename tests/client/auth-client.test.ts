@@ -244,6 +244,29 @@ describe('AuthClient', () => {
     expect(status.status === 'signed-out' ? null : status.principal).toEqual(principal);
   });
 
+  it('clears the credentials it could not restore, not just the claim on them', async () => {
+    // A record naming a sign-in whose delegation is gone: the state is dropped,
+    // and so is whatever is left in the credential store — teardown covers every
+    // slot rather than whichever one a caller happened to name.
+    const stateStorage = new MemoryStateStorage();
+    stateStorage.set({
+      principal: Principal.selfAuthenticating(new Uint8Array([1, 2, 3])),
+      expiration: (BigInt(Date.now()) + 3_600_000n) * 1_000_000n,
+    });
+    const storage: AuthClientStorage = {
+      get: vi.fn().mockResolvedValue(null),
+      set: vi.fn(),
+      remove: vi.fn(),
+    };
+
+    const client = new AuthClient({ storage, stateStorage });
+    await client.getIdentity();
+
+    expect(stateStorage.get()).toBeNull();
+    expect(storage.remove).toHaveBeenCalledWith(KEY_STORAGE_KEY);
+    expect(storage.remove).toHaveBeenCalledWith(KEY_STORAGE_DELEGATION);
+  });
+
   it('is not authenticated by a record this origin does not hold', async () => {
     // What a store whose record reaches further than one origin reports on an
     // origin that has not acquired a credential of its own.
