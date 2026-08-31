@@ -175,7 +175,15 @@ export interface IdleOptions extends IdleManagerOptions {
  */
 export interface AuthClientSignInOptions {
   /**
-   * Maximum lifetime of the delegation in nanoseconds.
+   * The longest the session may last, in nanoseconds.
+   *
+   * A ceiling rather than a request: what the user chooses at consent wins over
+   * it, an organization's cap narrows it further, and the canister clamps the
+   * result to between 10 minutes and 30 days.
+   *
+   * The default is what this option defaulted to when it capped a delegation
+   * rather than a session, kept so that no existing sign-in grows longer on
+   * upgrade. It is expected to rise in a later release.
    * @default 8 hours
    */
   maxTimeToLive?: bigint;
