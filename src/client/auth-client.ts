@@ -88,7 +88,10 @@ export interface AuthClientCreateOptions {
    * the session at the canister — so an idle timeout is a full sign-out and not
    * merely a local one. Replace it with `onIdle`, or turn it off with
    * `disableDefaultIdleCallback`, where that is more than an application wants.
-   * @default after 10 minutes, signs out and reloads
+   *
+   * Idleness is measured across the tabs of this origin, so the timeout is
+   * reached only where none of them has been used.
+   * @default after 10 minutes with no tab of this origin used, signs out and reloads
    */
   idleOptions?: IdleOptions;
 
