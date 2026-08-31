@@ -187,6 +187,18 @@ export interface AuthClientSignInOptions {
    * @default 8 hours
    */
   maxTimeToLive?: bigint;
+
+  /**
+   * Where to go once the sign-in completes, ignored unless it is a same-origin
+   * `http(s)` target.
+   *
+   * For the flow that leaves the page: a redirect sign-in comes back to whatever
+   * URL the ceremony was started from, which is rarely where the user was. It is
+   * journaled, so it survives the round trip, and the navigation replaces the
+   * current history entry rather than adding one — the sign-in page and the
+   * redirect chain are not somewhere a back button should return to.
+   */
+  returnTo?: string;
 }
 
 export interface SignedAttributes {
@@ -391,6 +403,18 @@ export class AuthClient {
   async signIn(options?: AuthClientSignInOptions): Promise<Identity> {
     const maxTimeToLive = options?.maxTimeToLive ?? DEFAULT_MAX_TIME_TO_LIVE;
 
+    // Journaled first, so a redirect flow finds it on the load that comes back:
+    // the ceremony returns to the URL it was started from, which is rarely where
+    // the user was. Journaled only when the caller gave one, so the journal of a
+    // flow that omits it is unchanged.
+    //
+    // Validated inside the producer, so what is written down is an already-safe
+    // href or nothing — never the raw value, which the journal would otherwise
+    // carry across the round trip for the return leg to trust.
+    const raw = options?.returnTo;
+    const returnTo =
+      raw === undefined ? undefined : this.memoize(() => sameOriginTarget(raw)?.href ?? null);
+
     // Start session-key acquisition BEFORE opening the channel, awaiting it only
     // after. In the redirect flow the acquisition's first `transport.memoize`
     // runs synchronously when invoked, so its in-flight bump lands in the same
@@ -486,6 +510,13 @@ export class AuthClient {
         // ignore
       }
     }
+
+    // Last, once the sign-in is stored, because this leaves the page: navigating
+    // earlier would abandon the flow partway. Replaced rather than pushed, so the
+    // sign-in page and the redirect chain are not what a back button returns to.
+    // `await` above resolved the journaled value to a validated href or null.
+    const target = await returnTo;
+    if (typeof target === 'string') location.replace(target);
 
     return this.#identity;
   }
@@ -713,22 +744,10 @@ export class AuthClient {
     await Promise.all([revoked, cleared]);
 
     if (options.returnTo !== undefined) {
-      // Navigate exactly as before (pushState, else location.href), but only to
-      // a validated same-origin http(s) target, and feed that validated
-      // `target.href` to both sinks rather than the raw `returnTo`. An invalid
-      // or cross-origin `returnTo` is ignored, so the fallback can no longer be
-      // turned into an open redirect or a `javascript:` execution.
-      let target: URL | undefined;
-      try {
-        target = new URL(options.returnTo, window.location.href);
-      } catch {
-        target = undefined;
-      }
-      if (
-        target !== undefined &&
-        (target.protocol === 'https:' || target.protocol === 'http:') &&
-        target.origin === window.location.origin
-      ) {
+      // The validated `href` reaches both sinks rather than the raw value, so
+      // neither can be turned into an open redirect or a `javascript:` execution.
+      const target = sameOriginTarget(options.returnTo);
+      if (target !== undefined) {
         try {
           window.history.pushState({}, '', target.href);
         } catch {
@@ -1008,6 +1027,31 @@ function keyMatchesChain(key: SignIdentity | PartialIdentity, chain: DelegationC
 /** A key's public half as text, for comparing two keys without holding both. */
 function publicKeyOf(key: SignIdentity | PartialIdentity): string {
   return toBase64(new Uint8Array(key.getPublicKey().toDer()));
+}
+
+/**
+ * The `returnTo` as a URL this origin may navigate to, or `undefined`.
+ *
+ * Same-origin and `http(s)` only. Anything else is ignored rather than refused,
+ * because a `returnTo` is a convenience and failing a sign-in or a sign-out over
+ * one would be worse than landing on the page the caller started from. Returning
+ * the parsed URL rather than a boolean is what lets callers navigate to
+ * `target.href` instead of to the raw value they were handed.
+ */
+function sameOriginTarget(returnTo: string): URL | undefined {
+  let target: URL;
+  try {
+    target = new URL(returnTo, window.location.href);
+  } catch {
+    return undefined;
+  }
+  if (
+    (target.protocol === 'https:' || target.protocol === 'http:') &&
+    target.origin === window.location.origin
+  ) {
+    return target;
+  }
+  return undefined;
 }
 
 /**

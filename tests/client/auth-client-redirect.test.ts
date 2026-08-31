@@ -131,9 +131,15 @@ beforeEach(() => {
   FakeUrlTransport.reset();
   // Redirect mode derives its callback URL from the current location, so give
   // location a concrete origin + pathname (plus reload for idle teardown).
+  //
+  // `href` is part of that and not decoration: resolving a relative `returnTo`
+  // needs a base, so a stub without it makes every relative target look invalid
+  // and the code under test degrade quietly.
   vi.stubGlobal('location', {
     origin: CALLBACK_ORIGIN,
     pathname: CALLBACK_PATH,
+    href: `${CALLBACK_ORIGIN}${CALLBACK_PATH}`,
+    replace: vi.fn(),
     reload: vi.fn(),
   });
 });
@@ -195,6 +201,37 @@ describe('AuthClient redirect (UrlTransport) sign-in', () => {
 
     // Cleanup of the completed flow's pending key failed, but auth succeeded.
     expect(identity.getPrincipal().isAnonymous()).toBe(false);
+  });
+
+  it('journals a validated returnTo, so the return leg has one and never the raw value', async () => {
+    const storage = createDurableStorage();
+
+    FakeUrlTransport.nextRespond = false;
+    const client = new AuthClient({ transport: 'redirect', credentialStorage: storage });
+    handleSignIn(FakeUrlTransport.last());
+    // Not awaited: this leg navigates away and never resolves.
+    void client.signIn({ returnTo: '/app' }).catch(() => undefined);
+    await flush();
+
+    // The ceremony returns to the URL it started from, which is rarely where the
+    // user was, so the target has to cross the redirect rather than being held in
+    // memory. What crosses is an already-safe href: journaling the raw value
+    // would leave the return leg trusting something this leg had not checked.
+    expect(FakeUrlTransport.journal).toContain(`${window.location.origin}/app`);
+  });
+
+  it('journals nothing for a returnTo this origin may not navigate to', async () => {
+    const storage = createDurableStorage();
+
+    FakeUrlTransport.nextRespond = false;
+    const client = new AuthClient({ transport: 'redirect', credentialStorage: storage });
+    handleSignIn(FakeUrlTransport.last());
+    void client.signIn({ returnTo: 'https://evil.example/app' }).catch(() => undefined);
+    await flush();
+
+    expect(FakeUrlTransport.journal).not.toContain('https://evil.example/app');
+    // Refused on this leg, so the return leg finds `null` and stays put.
+    expect(FakeUrlTransport.journal).toContain(null);
   });
 
   it('journals the derivation origin so it survives the redirect', async () => {

@@ -389,6 +389,89 @@ describe('AuthClient', () => {
     expect(identity.getPrincipal().isAnonymous()).toBe(true);
   });
 
+  it('navigates to a same-origin returnTo once the sign-in is stored', async () => {
+    const credentialStorage = new MemoryCredentialStorage();
+    const stateStorage = new MemoryStateStorage();
+
+    // Captured at the moment of navigation rather than after it. This leaves the
+    // page, so what matters is that the sign-in was already stored when it did —
+    // asserting on the state afterwards would pass whatever the order was.
+    // Every call, not the last one: a flow that navigated early and again at the
+    // end would leave a final `true` behind and look correct.
+    const storedAtEachNavigation: boolean[] = [];
+    const replace = vi.fn(() => {
+      storedAtEachNavigation.push(stateStorage.get() !== null);
+    });
+    vi.stubGlobal('location', {
+      replace,
+      reload: vi.fn(),
+      href: 'http://localhost/sign-in',
+      origin: 'http://localhost',
+    });
+
+    const client = new AuthClient({
+      credentialStorage,
+      stateStorage,
+      idleOptions: { disableIdle: true },
+    });
+    handleSignIn(FakeTransport.last());
+
+    await client.signIn({ returnTo: '/app' });
+
+    // Replaced, not pushed: the sign-in page and the redirect chain that led
+    // through it are not somewhere a back button should return to.
+    expect(replace).toHaveBeenCalledWith('http://localhost/app');
+    expect(storedAtEachNavigation).toEqual([true]);
+    expect(await credentialStorage.get(SESSION_SLOT)).not.toBeNull();
+  });
+
+  it('ignores a cross-origin or javascript: returnTo on sign in', async () => {
+    const replace = vi.fn();
+    vi.stubGlobal('location', {
+      replace,
+      reload: vi.fn(),
+      href: 'http://localhost/sign-in',
+      origin: 'http://localhost',
+    });
+
+    for (const returnTo of [
+      'https://evil.example/app',
+      '//evil.example/app',
+      'javascript:alert(1)',
+    ]) {
+      const client = new AuthClient({
+        credentialStorage: new MemoryCredentialStorage(),
+        idleOptions: { disableIdle: true },
+      });
+      handleSignIn(FakeTransport.last());
+
+      // Ignored rather than refused: a returnTo is a convenience, and failing the
+      // sign-in over one would be worse than landing where the caller started.
+      await expect(client.signIn({ returnTo })).resolves.toBeDefined();
+    }
+
+    expect(replace).not.toHaveBeenCalled();
+  });
+
+  it('does not navigate when no returnTo was given', async () => {
+    const replace = vi.fn();
+    vi.stubGlobal('location', {
+      replace,
+      reload: vi.fn(),
+      href: 'http://localhost/app',
+      origin: 'http://localhost',
+    });
+    const client = new AuthClient({
+      credentialStorage: new MemoryCredentialStorage(),
+      idleOptions: { disableIdle: true },
+    });
+    handleSignIn(FakeTransport.last());
+
+    await client.signIn();
+
+    expect(replace).not.toHaveBeenCalled();
+  });
+
   it('navigates to a same-origin returnTo on sign out', async () => {
     vi.stubGlobal('location', {
       reload: vi.fn(),
