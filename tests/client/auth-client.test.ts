@@ -13,6 +13,7 @@ import type { Credential, CredentialStorage } from '../../src/client/credential-
 import { IdbCredentialStorage } from '../../src/client/idb-credential-storage.ts';
 import { IdleManager } from '../../src/client/idle-manager.ts';
 import { MemoryCredentialStorage } from '../../src/client/memory-credential-storage.ts';
+import { InteractionRequiredError } from '../../src/client/session-delegation.ts';
 import type { SessionIdentity } from '../../src/client/session-identity.ts';
 import { slotsFor } from '../../src/client/slots.ts';
 import { MemoryStateStorage } from '../../src/client/state-storage.ts';
@@ -376,6 +377,45 @@ describe('AuthClient', () => {
 
     expect(await credentialStorage.get('one:session')).toBeNull();
     expect(await credentialStorage.get('one:app')).toBeNull();
+  });
+
+  it('reports a denied silent request as one needing a ceremony', async () => {
+    const client = new AuthClient({
+      credentialStorage: new MemoryCredentialStorage(),
+      prompt: 'none',
+      idleOptions: { disableIdle: true },
+    });
+    FakeTransport.last().onRequest((request) => ({
+      jsonrpc: '2.0',
+      id: request.id ?? null,
+      error: { code: 3002, message: 'interaction required', data: { reason: 'login_required' } },
+    }));
+
+    // A denial, not a failure: 3002 is in ICRC-25's user-action range, which is
+    // the whole point of the code — a caller that cannot tell this apart from a
+    // transport error has no way to decide between signing in and retrying.
+    const error = await client.signIn().catch((thrown: unknown) => thrown);
+    expect(error).toBeInstanceOf(InteractionRequiredError);
+    expect((error as InteractionRequiredError).reason).toBe('login_required');
+  });
+
+  it('leaves any other denial an ordinary error', async () => {
+    const client = new AuthClient({
+      credentialStorage: new MemoryCredentialStorage(),
+      idleOptions: { disableIdle: true },
+    });
+    FakeTransport.last().onRequest((request) => ({
+      jsonrpc: '2.0',
+      id: request.id ?? null,
+      error: { code: 4000, message: 'user cancelled' },
+    }));
+
+    // Everything else stays what it was. Reading `interaction_required` into a
+    // cancelled ceremony would have an app skip the sign-in the user asked to
+    // abandon.
+    const error = await client.signIn().catch((thrown: unknown) => thrown);
+    expect(error).not.toBeInstanceOf(InteractionRequiredError);
+    expect((error as Error).message).toBe('user cancelled');
   });
 
   it('refuses the identity provider as a bare URL, which it used to be', () => {

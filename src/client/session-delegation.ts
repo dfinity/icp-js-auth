@@ -11,6 +11,44 @@ import { fromBase64, toBase64 } from './base64.js';
  */
 const SESSION_DELEGATION_METHOD = 'ii_session_delegation';
 
+/**
+ * The code Internet Identity denies a `prompt: 'none'` request with.
+ *
+ * In ICRC-25's 3xxx user-action range, which is what lets a caller tell a request
+ * that needs a ceremony apart from a transport or protocol failure.
+ */
+const INTERACTION_REQUIRED_CODE = 3002;
+
+/**
+ * Internet Identity had nothing to answer a silent request from.
+ *
+ * The one denial that is not a failure: it says a ceremony is needed, so the
+ * caller signs in interactively rather than retrying. It is also the only
+ * dependable evidence that a shared record is stale rather than replaced, which
+ * is what lets an origin retract a record it did not write.
+ *
+ * Thrown only for a request that asked not to render anything. An interactive
+ * sign-in that the user abandons is a different outcome and is not this.
+ */
+export class InteractionRequiredError extends Error {
+  /**
+   * Why, where Internet Identity said: `login_required` where it holds no
+   * session, `account_selection_required` where it holds more than one and the
+   * request named none.
+   *
+   * A caller may word its prompt from this and does not have to branch on it, so
+   * it is deliberately a string rather than a union — a value this library does
+   * not know is not a reason to fail.
+   */
+  readonly reason: string | undefined;
+
+  constructor(message: string, reason?: string) {
+    super(message);
+    this.name = 'InteractionRequiredError';
+    this.reason = reason;
+  }
+}
+
 interface SessionDelegationResult {
   publicKey: string;
   signerDelegation: {
@@ -61,6 +99,17 @@ export async function requestSessionDelegation(
   });
 
   if ('error' in response) {
+    // The code carries the only thing a caller can act on, and dropping it left
+    // `interaction_required` indistinguishable from a transport failure except by
+    // matching a message this library does not define.
+    if (response.error.code === INTERACTION_REQUIRED_CODE) {
+      const data = response.error.data;
+      const reason =
+        typeof data === 'object' && data !== null && 'reason' in data
+          ? String((data as { reason: unknown }).reason)
+          : undefined;
+      throw new InteractionRequiredError(response.error.message, reason);
+    }
     throw new Error(response.error.message);
   }
 
