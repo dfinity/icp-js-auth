@@ -373,7 +373,6 @@ describe('AuthClient', () => {
     const client = new AuthClient({
       credentialStorage: new MemoryCredentialStorage(),
       prompt: 'none',
-      idleOptions: { disableIdle: true },
     });
     FakeTransport.last().onRequest((request) => ({
       jsonrpc: '2.0',
@@ -392,7 +391,6 @@ describe('AuthClient', () => {
   it('leaves any other denial an ordinary error', async () => {
     const client = new AuthClient({
       credentialStorage: new MemoryCredentialStorage(),
-      idleOptions: { disableIdle: true },
     });
     FakeTransport.last().onRequest((request) => ({
       jsonrpc: '2.0',
@@ -591,6 +589,37 @@ describe('AuthClient', () => {
     expect(url.searchParams.get('hint')).toBe('2vxsx-fae');
   });
 
+  it('asks for the sign-in to be kept where the store is one siblings read', () => {
+    new AuthClient({ stateStorage: new CookieStateStorage({ domain: 'localhost' }) });
+
+    const url = new URL(FakeTransport.last().options.url ?? '');
+    expect(url.searchParams.get('resumable')).toBe('true');
+  });
+
+  it('asks for nothing to be kept for a store only this origin reads', () => {
+    new AuthClient({ stateStorage: new MemoryStateStorage() });
+
+    const url = new URL(FakeTransport.last().options.url ?? '');
+    expect(url.searchParams.has('resumable')).toBe(false);
+  });
+
+  it.each([
+    ['on', true, 'true'],
+    ['off', false, null],
+  ] as const)('lets the option turn it %s over the store', (_name, resumable, expected) => {
+    // A cross-origin arrangement that is not sibling subdomains opts in by hand;
+    // siblings that should each sign in properly force it off.
+    new AuthClient({
+      resumable,
+      stateStorage: resumable
+        ? new MemoryStateStorage()
+        : new CookieStateStorage({ domain: 'localhost' }),
+    });
+
+    const url = new URL(FakeTransport.last().options.url ?? '');
+    expect(url.searchParams.get('resumable')).toBe(expected);
+  });
+
   it('should include neither prompt nor hint when they are not set', () => {
     new AuthClient();
     const url = new URL(FakeTransport.last().options.url ?? '');
@@ -602,7 +631,7 @@ describe('AuthClient', () => {
     // What a sibling subdomain's sign-in leaves for this origin: a shared state
     // naming an account, and no credentials of its own.
     const stateStorage = new MemoryStateStorage();
-    const signedIn = new AuthClient({ stateStorage, idleOptions: { disableIdle: true } });
+    const signedIn = new AuthClient({ stateStorage });
     handleSignIn(FakeTransport.last());
     await signedIn.signIn();
     const account = stateStorage.get()?.principal;
@@ -612,7 +641,6 @@ describe('AuthClient', () => {
       credentialStorage: new MemoryCredentialStorage(),
       prompt: 'none',
       hint: account,
-      idleOptions: { disableIdle: true },
     });
     handleSignIn(FakeTransport.last());
     const identity = await sibling.signIn();
@@ -905,7 +933,6 @@ describe('AuthClient signIn', () => {
     const first = new AuthClient({
       credentialStorage,
       stateStorage,
-      idleOptions: { disableIdle: true },
     });
     handleSignIn(FakeTransport.last());
     await first.signIn();
@@ -921,7 +948,6 @@ describe('AuthClient signIn', () => {
     const second = new AuthClient({
       credentialStorage,
       stateStorage,
-      idleOptions: { disableIdle: true },
     });
     const identity = await second.getIdentity();
 
@@ -1324,7 +1350,6 @@ describe('AuthClient signIn', () => {
     const client = new AuthClient({
       credentialStorage,
       stateStorage,
-      idleOptions: { disableIdle: true },
     });
     handleSignIn(FakeTransport.last());
     const identity = (await client.signIn()) as SessionIdentity;
@@ -1353,7 +1378,6 @@ describe('AuthClient signIn', () => {
     const first = new AuthClient({
       credentialStorage,
       stateStorage,
-      idleOptions: { disableIdle: true },
     });
     handleSignIn(FakeTransport.last());
     await first.signIn();
@@ -1366,7 +1390,6 @@ describe('AuthClient signIn', () => {
     const second = new AuthClient({
       credentialStorage,
       stateStorage,
-      idleOptions: { disableIdle: true },
     });
     await second.getIdentity();
 
@@ -1380,7 +1403,7 @@ describe('AuthClient signIn', () => {
     // What a sibling subdomain has on its first load: the shared record, and no
     // credential of its own.
     const stateStorage = new CookieStateStorage({ domain: 'localhost' });
-    const signedIn = new AuthClient({ stateStorage, idleOptions: { disableIdle: true } });
+    const signedIn = new AuthClient({ stateStorage });
     handleSignIn(FakeTransport.last());
     await signedIn.signIn();
     signedIn.dispose();
@@ -1389,7 +1412,6 @@ describe('AuthClient signIn', () => {
     const sibling = new AuthClient({
       stateStorage,
       credentialStorage: new MemoryCredentialStorage(),
-      idleOptions: { disableIdle: true },
     });
 
     expect(stateStorage.get()).not.toBeNull();
