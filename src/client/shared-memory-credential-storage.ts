@@ -35,10 +35,11 @@ interface Offer {
 
 type Message = Put | Drop | Ask | Offer;
 
-// A channel reaches one origin, so a malformed message is our own code — a tab
-// running a different version through a deploy, or an application posting on the
-// name. Checked anyway, because the predicate is what tells the reader a payload
-// is there.
+// Narrowing, not protection. A channel reaches one origin, so a stranger on the
+// name is our own code through a deploy or an application posting on it, and what
+// keeps those harmless is elsewhere: the switch answers nothing it does not
+// recognise, and rebuilding a record catches its own failures. This is what gives
+// `data` a type, so the switch can read the fields it needs.
 const isMessage = (value: unknown): value is Message => {
   if (typeof value !== 'object' || value === null || !('kind' in value)) return false;
   const message = value as { kind: unknown; slot?: unknown; entries?: unknown };

@@ -161,21 +161,76 @@ describe('SharedMemoryCredentialStorage', () => {
     await expect(second.get(SESSION_SLOT)).resolves.toBeNull();
   });
 
-  it('keeps its own write when a peer answers an older question', async () => {
+  it('keeps its own write when an answer describes an older moment', async () => {
+    // No peer, so nothing is asked and no answer is in flight: the offer below is
+    // posted deliberately. Racing a real peer would make the scheduler decide
+    // which write lands first, which is not what this is about.
+    const storage = track(open());
+    const mine = await storage.create();
+    await storage.set(SESSION_SLOT, { identity: mine });
+
+    const older = await storage.create();
+    const peer = new BroadcastChannel('test-credentials');
+    peer.postMessage({
+      kind: 'offer',
+      entries: [{ slot: SESSION_SLOT, keyPair: older.getKeyPair() }],
+    });
+    await settle();
+    peer.close();
+
+    // An answer fills gaps. It never replaces a write made since the question,
+    // because the answer describes a moment already past.
+    expect((await storage.get(SESSION_SLOT))?.identity).toBe(mine);
+  });
+
+  it('carries a key as a handle that cannot be exported', async () => {
     const first = track(open());
-    const theirs = await first.create();
-    await first.set(SESSION_SLOT, { identity: theirs });
+    const second = track(open());
     await settle();
 
-    const second = track(open());
-    const mine = await second.create();
-    // Written before the answer to the ask arrives, so the answer describes a
-    // moment already past and must not replace it.
-    await second.set(SESSION_SLOT, { identity: mine });
+    const identity = await first.create();
+    await first.set(SESSION_SLOT, { identity });
     await settle();
 
     const stored = await second.get(SESSION_SLOT);
-    expect(stored?.identity).toBe(mine);
+    // What crosses is a handle, not key material: the peer can sign with it and
+    // nothing can read the private half back out.
+    expect(stored?.identity.getKeyPair().privateKey.extractable).toBe(false);
+    await expect(
+      crypto.subtle.exportKey('pkcs8', stored?.identity.getKeyPair().privateKey as CryptoKey),
+    ).rejects.toThrow();
+  });
+
+  it('ignores a message that is not one of its own', async () => {
+    const storage = track(open());
+    await settle();
+
+    // The channel reaches one origin, so a stranger on the name is our own code
+    // through a deploy, or an application posting on it. Neither may throw here
+    // or leave a slot holding something unusable.
+    const intruder = new BroadcastChannel('test-credentials');
+    intruder.postMessage({ kind: 'put', slot: SESSION_SLOT });
+    intruder.postMessage('not an object');
+    intruder.postMessage({ kind: 'nonsense', slot: SESSION_SLOT });
+    await settle();
+    intruder.close();
+
+    expect(await storage.get(SESSION_SLOT)).toBeNull();
+  });
+
+  it('takes nothing in once closed', async () => {
+    const first = track(open());
+    const second = track(open());
+    await settle();
+
+    second.close();
+    const identity = await first.create();
+    await first.set(APP_SLOT, { identity });
+    await settle();
+
+    // Closing stops the replication as well as letting go of the name, so a
+    // closed instance does not go on collecting credentials it will never use.
+    expect(await second.get(APP_SLOT)).toBeNull();
   });
 
   it('keeps two names apart', async () => {
