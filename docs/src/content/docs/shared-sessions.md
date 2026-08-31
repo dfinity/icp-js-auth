@@ -32,6 +32,12 @@ const authClient = new AuthClient({
 });
 ```
 
+Choosing this store also asks the identity provider to keep the sign-in, which is
+what a silent re-issue in step 2 answers from. It is the store that carries that
+intent, because a record reaching your siblings is the only reason to want one
+kept — pass `resumable` yourself only for a cross-origin arrangement that is not
+sibling subdomains, or to force it off and have each sibling sign in properly.
+
 The derivation origin must authorize the apps. Serve this at
 `https://auth.example.com/.well-known/ii-alternative-origins`:
 
@@ -112,6 +118,33 @@ redirect exists for.
 If your app asks for an identity before the redirect runs, it will not be handed
 an anonymous one — `getIdentity()` rejects with `SessionNotHeldError` rather than
 letting unauthenticated calls go out while the record says someone is signed in.
+
+## What ends a session on its own
+
+A session also ends when nothing mints from it. Pass `maxTimeToIdle` to `signIn()`
+to say how long that may be:
+
+```typescript
+await authClient.signIn({
+  // Six hours of nobody using any of these apps ends the sign-in.
+  maxTimeToIdle: 6n * 60n * 60n * 1_000_000_000n,
+});
+```
+
+The identity provider enforces it, so it covers every tab of the browser at once
+and holds whether or not any of them is open. Omit it and the provider applies
+its own default of seven days.
+
+Using a page counts as use — a pointer moving or a key pressed mints, exactly as
+making a request does — so a user reading rather than clicking keeps the session
+alive. Both halves matter: the bound is what ends an abandoned browser's sign-in,
+and activity is what keeps it from ending anyone else's.
+
+This replaces the idle timer this library used to run. A timer in a page is
+skipped by clearing storage or by a tab that never runs it, and it saw one
+document, so a backgrounded tab could sign a user out of the tab beside it. To
+react to the session ending, subscribe to the state as in step 3: a lapsed
+session shows up as `expired` on the next read.
 
 ## What signing out does
 
