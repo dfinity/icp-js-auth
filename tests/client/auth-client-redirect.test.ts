@@ -9,7 +9,6 @@ const SLOTS = slotsFor();
 
 import { AuthClient } from '../../src/client/auth-client.ts';
 
-import { IdleManager } from '../../src/client/idle-manager.ts';
 import { LocalCredentialStorage } from '../../src/client/local-credential-storage.ts';
 import { MemoryCredentialStorage } from '../../src/client/memory-credential-storage.ts';
 import { SharedMemoryCredentialStorage } from '../../src/client/shared-memory-credential-storage.ts';
@@ -131,7 +130,7 @@ beforeEach(() => {
   localStorage.clear();
   FakeUrlTransport.reset();
   // Redirect mode derives its callback URL from the current location, so give
-  // location a concrete origin + pathname (plus reload for idle teardown).
+  // location a concrete origin and pathname.
   //
   // `href` is part of that and not decoration: resolving a relative `returnTo`
   // needs a base, so a stub without it makes every relative target look invalid
@@ -141,16 +140,10 @@ beforeEach(() => {
     pathname: CALLBACK_PATH,
     href: `${CALLBACK_ORIGIN}${CALLBACK_PATH}`,
     replace: vi.fn(),
-    reload: vi.fn(),
   });
 });
 
 afterEach(async () => {
-  try {
-    IdleManager.create().exit();
-  } catch {
-    // no-op if already torn down
-  }
   await new Promise((r) => setTimeout(r, 0));
   localStorage.clear();
 });
