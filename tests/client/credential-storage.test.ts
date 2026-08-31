@@ -10,12 +10,13 @@ const testChain = async () => {
 };
 
 describe('slotsFor', () => {
-  it('names the slots a client writes under', () => {
+  it('names everything a client writes under, the state record included', () => {
     expect(slotsFor()).toEqual({
       session: 'session',
       app: 'app',
       pending: 'session-pending',
       appPending: 'app-pending',
+      state: 'ic-session-state',
     });
   });
 
@@ -27,6 +28,7 @@ describe('slotsFor', () => {
       app: 'second:app',
       pending: 'second:session-pending',
       appPending: 'second:app-pending',
+      state: 'second:ic-session-state',
     });
     expect(Object.values(slots)).toEqual(Object.values(slotsFor()).map((slot) => `second:${slot}`));
   });

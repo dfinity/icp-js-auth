@@ -210,7 +210,7 @@ export class AuthClient {
     this.#options = options;
     this.#credentialStorage = options.credentialStorage ?? new IdbCredentialStorage();
     this.#slots = slotsFor(options.namespace);
-    this.#stateStorage = options.stateStorage ?? new LocalStateStorage();
+    this.#stateStorage = options.stateStorage ?? new LocalStateStorage(this.#slots.state);
 
     const identityProviderUrl = new URL(
       options.identityProvider?.toString() || IDENTITY_PROVIDER_DEFAULT,

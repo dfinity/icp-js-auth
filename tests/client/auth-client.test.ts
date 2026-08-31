@@ -292,6 +292,11 @@ describe('AuthClient', () => {
     expect(identity.getPrincipal().isAnonymous()).toBe(true);
     expect(await credentialStorage.get('one:session')).not.toBeNull();
     expect(await credentialStorage.get('two:session')).toBeNull();
+    // The record of who is signed in moves with the slots. Leaving it fixed gave
+    // two namespaced clients their own credentials and one shared answer to who
+    // was signed in, which is the half a namespace exists to prevent.
+    expect(localStorage.getItem('one:ic-session-state')).not.toBeNull();
+    expect(localStorage.getItem('ic-session-state')).toBeNull();
   });
 
   it('should sign users out', async () => {

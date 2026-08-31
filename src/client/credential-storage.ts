@@ -25,21 +25,30 @@ export const APP_PENDING_SLOT = 'app-pending';
  */
 export const PENDING_SLOT = 'session-pending';
 
+/** Where the state of a sign-in is kept, when nothing names it otherwise. */
+export const STATE_KEY = 'ic-session-state';
+
 /**
- * The slots one client writes under, prefixed where a namespace is set.
+ * Every name one client writes under, prefixed where a namespace is set.
  *
  * Assigned in one place rather than defaulted by each store: implementations
  * choosing their own is what produced three colliding slots in the arrangement
  * this replaces, and one assigner cannot collide with itself. A namespace moves
  * all of them at once, so an application running two clients under one origin
  * separates them with one string rather than renaming some and missing others.
- * @param namespace - Prefix for every slot, or `undefined` for the bare names.
+ *
+ * The state record is named here too, and not because it is a credential slot —
+ * it is not. It is named here because this is the only place that knows the whole
+ * set, and a namespace that moved the credentials while leaving the record fixed
+ * would give two clients separate keys and one shared answer to who is signed in.
+ * @param namespace - Prefix for every name, or `undefined` for the bare ones.
  */
 export function slotsFor(namespace?: string): {
   session: string;
   app: string;
   pending: string;
   appPending: string;
+  state: string;
 } {
   const prefix = namespace === undefined ? '' : `${namespace}:`;
   return {
@@ -47,6 +56,7 @@ export function slotsFor(namespace?: string): {
     app: `${prefix}${APP_SLOT}`,
     pending: `${prefix}${PENDING_SLOT}`,
     appPending: `${prefix}${APP_PENDING_SLOT}`,
+    state: `${prefix}${STATE_KEY}`,
   };
 }
 
