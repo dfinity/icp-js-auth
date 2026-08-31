@@ -1,9 +1,7 @@
 import { AnonymousIdentity, type Identity, type SignIdentity } from '@icp-sdk/core/agent';
 import {
-  DelegationChain,
+  type DelegationChain,
   DelegationIdentity,
-  ECDSAKeyIdentity,
-  Ed25519KeyIdentity,
   isDelegationValid,
   PartialDelegationIdentity,
   type PartialIdentity,
@@ -11,16 +9,11 @@ import {
 import { Principal } from '@icp-sdk/core/principal';
 import { Signer } from '@icp-sdk/signer';
 import { PostMessageTransport, UrlTransport } from '@icp-sdk/signer/web';
+import type { Credential, CredentialStorage } from './credential-storage.js';
+import { IdbCredentialStorage } from './idb-credential-storage.js';
 import { IdleManager, type IdleManagerOptions } from './idle-manager.js';
+import { type Slots, slotsFor } from './slots.js';
 import { LocalStateStorage, type StateStorage } from './state-storage.js';
-import {
-  type AuthClientStorage,
-  IdbStorage,
-  KEY_STORAGE_DELEGATION,
-  KEY_STORAGE_KEY,
-  KEY_VECTOR,
-  type StoredKey,
-} from './storage.js';
 
 const NANOSECONDS_PER_SECOND = BigInt(1_000_000_000);
 const SECONDS_PER_HOUR = BigInt(3_600);
@@ -28,28 +21,6 @@ const NANOSECONDS_PER_HOUR = NANOSECONDS_PER_SECOND * SECONDS_PER_HOUR;
 
 const IDENTITY_PROVIDER_DEFAULT = 'https://id.ai/authorize';
 const DEFAULT_MAX_TIME_TO_LIVE = BigInt(8) * NANOSECONDS_PER_HOUR;
-
-const ECDSA_KEY_LABEL = 'ECDSA';
-const ED25519_KEY_LABEL = 'Ed25519';
-type BaseKeyType = typeof ECDSA_KEY_LABEL | typeof ED25519_KEY_LABEL;
-
-// Storage key prefix for a redirect flow's session key, held only while the
-// flow is in progress (keyed by a per-flow id) and removed once the delegation
-// is persisted. See AuthClient.#acquireSessionKey.
-const PENDING_KEY_PREFIX = 'ic-auth-pending-key:';
-
-// The storage backend has no key enumeration, so pending-key slots are tracked
-// explicitly here: an abandoned flow never removes its key, so a later flow
-// prunes expired orphans by slot instead of leaking them forever.
-const PENDING_KEYS_REGISTRY_KEY = 'ic-auth-pending-keys';
-// Past the URL transport's ~10-min flow window the flow can't resume, so a
-// pending key older than this is treated as abandoned.
-const PENDING_KEY_TTL_MS = 10 * 60 * 1000;
-
-interface PendingKeyEntry {
-  slot: string;
-  expiresAt: number;
-}
 
 export type OpenIdProvider = 'google' | 'apple' | 'microsoft';
 
@@ -74,7 +45,19 @@ export interface AuthClientCreateOptions {
    * Persistent storage backend. Defaults to IndexedDB.
    * @default IdbStorage
    */
-  storage?: AuthClientStorage;
+  credentialStorage?: CredentialStorage;
+
+  /**
+   * Prefix for every slot this client writes under.
+   *
+   * Slots are assigned in one place rather than defaulted by each store, and this
+   * moves all of them at once — so an application running two clients under one
+   * origin separates them with a single string and cannot rename some while
+   * missing others.
+   *
+   * Leave it unset unless a second client shares this origin.
+   */
+  namespace?: string;
 
   /**
    * Where the state of the sign-in is kept: which account is signed in here,
@@ -82,18 +65,10 @@ export interface AuthClientCreateOptions {
    *
    * This is what {@link AuthClient.isAuthenticated} answers from, which is why
    * it is a store of its own rather than something read back out of
-   * {@link AuthClientCreateOptions.storage}: the state has to be readable
-   * without awaiting, and a credential store does not have to be.
+   * {@link AuthClientCreateOptions.credentialStorage}: the state has to be
+   * readable without awaiting, and a credential store does not have to be.
    */
   stateStorage?: StateStorage;
-
-  /**
-   * Type of session key to generate on each sign-in.
-   *
-   * Use `'Ed25519'` when your storage provider does not support `CryptoKey`.
-   * @default 'ECDSA'
-   */
-  keyType?: BaseKeyType;
 
   /**
    * Idle timeout configuration.
@@ -221,7 +196,8 @@ export type SessionStatus =
 export class AuthClient {
   #identity: Identity | PartialIdentity = new AnonymousIdentity();
   #chain: DelegationChain | null = null;
-  #storage: AuthClientStorage;
+  #credentialStorage: CredentialStorage;
+  readonly #slots: Slots;
   #stateStorage: StateStorage;
   #signer: Signer;
   // Set only in redirect mode, so the redirect-specific paths (nonce/key
@@ -233,8 +209,9 @@ export class AuthClient {
 
   constructor(options: AuthClientCreateOptions = {}) {
     this.#options = options;
-    this.#storage = options.storage ?? new IdbStorage();
-    this.#stateStorage = options.stateStorage ?? new LocalStateStorage();
+    this.#credentialStorage = options.credentialStorage ?? new IdbCredentialStorage();
+    this.#slots = slotsFor(options.namespace);
+    this.#stateStorage = options.stateStorage ?? new LocalStateStorage(this.#slots.state);
 
     const identityProviderUrl = new URL(
       options.identityProvider?.toString() || IDENTITY_PROVIDER_DEFAULT,
@@ -366,7 +343,6 @@ export class AuthClient {
    */
   async signIn(options?: AuthClientSignInOptions): Promise<Identity> {
     const maxTimeToLive = options?.maxTimeToLive ?? DEFAULT_MAX_TIME_TO_LIVE;
-    const keyType = this.#options.keyType ?? ECDSA_KEY_LABEL;
 
     // Start session-key acquisition BEFORE opening the channel, awaiting it only
     // after. In the redirect flow the acquisition's first `transport.memoize`
@@ -378,10 +354,10 @@ export class AuthClient {
     // request is buffered.
     const sessionKeyPromise: Promise<{
       key: SignIdentity | PartialIdentity;
-      pendingKeySlot?: string;
+      pending?: boolean;
     }> = this.#urlTransport
-      ? this.#ensureSessionKeyForRedirectFlow(this.#urlTransport, keyType)
-      : this.#ensureSessionKeyForWindowFlow(keyType).then((key) => ({ key }));
+      ? this.#ensureSessionKeyForRedirectFlow(this.#urlTransport)
+      : this.#ensureSessionKeyForWindowFlow().then((key) => ({ key }));
     // The acquisition is started eagerly, before the awaits below. If one of
     // those throws first, `sessionKeyPromise` is never awaited, so attach a
     // no-op rejection handler now to keep a later acquisition failure from
@@ -398,7 +374,7 @@ export class AuthClient {
     // writes cannot interleave with hydration's reads.
     await this.#init();
 
-    const { key, pendingKeySlot } = await sessionKeyPromise;
+    const { key, pending } = await sessionKeyPromise;
 
     const delegationChain = await this.#signer.requestDelegation({
       publicKey: key.getPublicKey(),
@@ -421,18 +397,15 @@ export class AuthClient {
       this.#registerDefaultIdleCallback();
     }
 
-    // Persist so the session survives page reloads.
-    await this.#persistChain(this.#chain);
-    await persistKey(this.#storage, key);
+    // Promote: the key and the delegation issued to it become one record under
+    // the session slot, and the ceremony's own copy goes.
+    await this.#persistSession(key, this.#chain);
 
-    // The flow is complete: the delegation is bound to this key and stored, so
-    // the per-flow pending copy is no longer needed. Best-effort — the user is
-    // already signed in, so a cleanup failure must not fail signIn(); a later
-    // flow sweeps whatever is left behind.
-    if (pendingKeySlot !== undefined) {
+    // Best-effort — the user is already signed in, so a cleanup failure must not
+    // fail signIn(), and the next ceremony overwrites what is left behind.
+    if (pending) {
       try {
-        await this.#storage.remove(pendingKeySlot);
-        await unregisterPendingKey(this.#storage, pendingKeySlot);
+        await this.#credentialStorage.remove(this.#slots.sessionPending);
       } catch {
         // ignore
       }
@@ -444,65 +417,78 @@ export class AuthClient {
   // Window flow: sign-in completes in a single load, so a fresh session key per
   // sign-in is enough (or the caller-provided identity), with nothing to
   // persist for a later load.
-  async #ensureSessionKeyForWindowFlow(
-    keyType: BaseKeyType,
-  ): Promise<SignIdentity | PartialIdentity> {
-    return this.#options.identity ?? (await generateKey(keyType));
+  async #ensureSessionKeyForWindowFlow(): Promise<SignIdentity | PartialIdentity> {
+    return this.#options.identity ?? (await this.#credentialStorage.create());
   }
 
   // Redirect flow: `signIn` runs twice — once on the load that navigates to the
   // identity provider, and again on the return load that replays the delegation
-  // minted for the FIRST load's key. Both runs must therefore use the same key.
-  // A per-flow key id is journaled via the transport (stable across the
-  // redirect) and the key is kept in storage under that id, so the return load
-  // restores the same key rather than generating a fresh one that would not
-  // match the replayed delegation. A caller-provided identity is already stable
-  // across the redirect, so it is used as-is with nothing persisted.
+  // minted for the FIRST load's key. Both runs must therefore use the same key,
+  // so the first load writes it to the pending slot and the return load reads it
+  // back. A caller-provided identity is already stable across the redirect, so it
+  // is used as-is with nothing persisted.
   async #ensureSessionKeyForRedirectFlow(
     transport: UrlTransport,
-    keyType: BaseKeyType,
-  ): Promise<{ key: SignIdentity | PartialIdentity; pendingKeySlot?: string }> {
+  ): Promise<{ key: SignIdentity | PartialIdentity; pending?: boolean }> {
+    // A redirect leaves the document, so the key this flow starts with has to be
+    // readable again on the load that comes back. Two mediums answer for it: one
+    // that survives the teardown, or one another tab can be asked. A store that
+    // is neither cannot finish this flow, and refusing before navigating beats
+    // sending the user to the identity provider and failing on their return.
+    if (!this.#credentialStorage.durable && !this.#credentialStorage.shared) {
+      throw new Error(
+        'A redirect sign-in needs a credential store that survives the navigation or that another tab can answer for, and this one is neither. Use a durable store, a shared one, or the window transport.',
+      );
+    }
+
     if (this.#options.identity !== undefined) {
       return { key: this.#options.identity };
     }
 
-    const keyId = await transport.memoize(() => globalThis.crypto.randomUUID());
-    const pendingKeySlot = `${PENDING_KEY_PREFIX}${keyId}`;
-
-    // Acquire the per-flow key inside a `memoize` producer so the transport
-    // holds its batch flush across the (async) key restore/generate + storage
-    // write. The transport coalesces concurrently issued requests into one
-    // redirect by flushing on a macrotask once no memoize producer is in
-    // flight; without this hold, a faster concurrent request (e.g. the nonce
-    // path of `requestAttributes`) buffers first and trips that flush before
-    // this flow's delegation request — issued only once the key is ready — is
-    // buffered, splitting what should be one redirect into two.
+    // Acquire the key inside a `memoize` producer so the transport holds its
+    // batch flush across the (async) key read/create + storage write. The
+    // transport coalesces concurrently issued requests into one redirect by
+    // flushing on a macrotask once no memoize producer is in flight; without
+    // this hold, a faster concurrent request (e.g. the nonce path of
+    // `requestAttributes`) buffers first and trips that flush before this flow's
+    // delegation request — issued only once the key is ready — is buffered,
+    // splitting what should be one redirect into two.
     //
-    // The key is captured in a closure, not read back after the producer: on
-    // the FIRST load the producer sets `acquired`, so the delegation request
-    // that follows is issued with no intervening storage read — a read there
-    // would re-open the very flush gap this closes. The producer is skipped on
-    // the replay load (its result is journaled), where the key is instead
-    // restored from storage. Only the id is journaled; the key lives in storage.
-    let acquired: SignIdentity | PartialIdentity | null = null;
-    await transport.memoize(async () => {
-      acquired = await restoreKeyAt(this.#storage, pendingKeySlot);
-      if (acquired === null) {
-        acquired = await generateKey(keyType);
-        // Register before writing the key: if the write then fails, a stray
-        // registry entry is harmless (swept on expiry), whereas a key with no
-        // registry entry would leak un-sweepably.
-        await sweepAndRegisterPendingKey(this.#storage, pendingKeySlot, Date.now());
-        await this.#storage.set(pendingKeySlot, serializeKey(acquired));
+    // The key is captured in a closure, not read back after the producer: on the
+    // FIRST load the producer sets `acquired`, so the delegation request that
+    // follows is issued with no intervening storage read — a read there would
+    // re-open the very flush gap this closes. The producer is skipped on the
+    // replay load (its result is journaled), where the key is instead read from
+    // the pending slot.
+    //
+    // What is journaled is the key's *public* half: not a secret, it survives the
+    // redirect as text, and on the return load it says whether the pending slot
+    // still holds the key this ceremony started with.
+    let acquired: SignIdentity | null = null;
+    const startedWith = await transport.memoize(async () => {
+      const stored = await this.#credentialStorage.get(this.#slots.sessionPending);
+      if (stored !== null) {
+        acquired = stored.identity;
+      } else {
+        acquired = await this.#credentialStorage.create();
+        await this.#credentialStorage.set(this.#slots.sessionPending, { identity: acquired });
       }
-      return keyId;
+      return publicKeyOf(acquired);
     });
 
-    const key = acquired ?? (await restoreKeyAt(this.#storage, pendingKeySlot));
+    const key: SignIdentity | PartialIdentity | null =
+      acquired ?? (await this.#credentialStorage.get(this.#slots.sessionPending))?.identity ?? null;
     if (key === null) {
       throw new Error('Session key missing after acquisition');
     }
-    return { key, pendingKeySlot };
+    if (publicKeyOf(key) !== startedWith) {
+      // Another sign-in in this browser took the pending slot while this one was
+      // away. Its delegation was minted for a different key, so this flow cannot
+      // finish; the caller retries, and by then the session that superseded it
+      // has usually been promoted.
+      throw new Error('This sign-in was superseded by another one in this browser');
+    }
+    return { key, pending: true };
   }
 
   /**
@@ -681,8 +667,9 @@ export class AuthClient {
   // storage. If found and still valid, sets #identity and #chain so the
   // client is ready to use without a new signIn().
   async #hydrate(): Promise<void> {
-    const key = this.#options.identity ?? (await restoreKey(this.#storage));
-    const chain = key ? await this.#restoreChain() : null;
+    const restored = await this.#restoreSession();
+    const key = this.#options.identity ?? restored?.identity;
+    const chain = restored?.chain;
     if (!key || !chain) {
       // Nothing to restore, so this origin cannot act — and saying otherwise is
       // what the state leading forbids. Discarded rather than removed, because a
@@ -715,11 +702,18 @@ export class AuthClient {
   }
 
   /**
-   * Saves the delegation chain and records the state it puts this origin in, so
-   * {@link isAuthenticated} can answer without reading the chain back.
+   * Stores the session as one record and records the state it puts this origin
+   * in, so {@link isAuthenticated} can answer without reading it back.
    */
-  async #persistChain(chain: DelegationChain): Promise<void> {
-    await this.#storage.set(KEY_STORAGE_DELEGATION, JSON.stringify(chain.toJSON()));
+  async #persistSession(
+    identity: SignIdentity | PartialIdentity,
+    chain: DelegationChain,
+  ): Promise<void> {
+    // A PartialIdentity is the caller's own and cannot sign, so there is nothing
+    // worth storing: the client uses it for this run and restores nothing later.
+    if (!('toDer' in identity)) {
+      await this.#credentialStorage.set(this.#slots.session, { identity, chain });
+    }
 
     let earliest: bigint | null = null;
     for (const { delegation } of chain.delegations) {
@@ -738,25 +732,20 @@ export class AuthClient {
   }
 
   /**
-   * Loads the delegation chain. Returns `null` and ends the sign-in where the
-   * chain has expired or cannot be read.
+   * Loads the stored session. Returns `null` and ends the sign-in where the
+   * delegation has expired or the record cannot be read.
    */
-  async #restoreChain(): Promise<DelegationChain | null> {
-    try {
-      const raw = await this.#storage.get(KEY_STORAGE_DELEGATION);
-      if (!raw || typeof raw !== 'string') return null;
+  async #restoreSession(): Promise<Credential | null> {
+    const credential = await this.#credentialStorage.get(this.#slots.session);
+    if (credential === null) return null;
 
-      const chain = DelegationChain.fromJSON(raw);
-      if (!isDelegationValid(chain)) {
-        await this.#endSession();
-        return null;
-      }
-      return chain;
-    } catch (e) {
-      console.error(e);
+    // A record with no chain is not a session: only a ceremony's own slot may
+    // hold a key alone.
+    if (credential.chain === undefined || !isDelegationValid(credential.chain)) {
       await this.#endSession();
       return null;
     }
+    return credential;
   }
 
   /**
@@ -789,9 +778,7 @@ export class AuthClient {
   // origin is signed in, and a teardown that failed partway must not leave it
   // saying yes.
   async #clearCredentials(): Promise<void> {
-    await this.#storage.remove(KEY_STORAGE_KEY);
-    await this.#storage.remove(KEY_STORAGE_DELEGATION);
-    await this.#storage.remove(KEY_VECTOR);
+    await this.#credentialStorage.remove(this.#slots.session);
   }
 
   #registerDefaultIdleCallback() {
@@ -840,151 +827,9 @@ function fromBase64(str: string): Uint8Array {
   return bytes;
 }
 
-/**
- * Generates a new session key.
- * @param keyType - The key algorithm to use.
- */
-async function generateKey(keyType: BaseKeyType): Promise<SignIdentity> {
-  if (keyType === ED25519_KEY_LABEL) {
-    return Ed25519KeyIdentity.generate();
-  }
-  return await ECDSAKeyIdentity.generate();
-}
-
-/**
- * Saves a session key to storage.
- * @param storage - The storage backend.
- * @param key - The key to persist.
- */
-async function persistKey(
-  storage: AuthClientStorage,
-  key: SignIdentity | PartialIdentity,
-): Promise<void> {
-  await storage.set(KEY_STORAGE_KEY, serializeKey(key));
-}
-
-/**
- * Loads a session key from storage, reading it by the shape it was stored in:
- * a `CryptoKeyPair` is ECDSA, a JSON string is Ed25519.
- * @param storage - The storage backend.
- */
-async function restoreKey(
-  storage: AuthClientStorage,
-): Promise<SignIdentity | PartialIdentity | null> {
-  const stored = await storage.get(KEY_STORAGE_KEY);
-  if (!stored) return null;
-
-  try {
-    // CryptoKeyPair (object) → ECDSA, JSON string → Ed25519
-    if (typeof stored === 'object') {
-      return await ECDSAKeyIdentity.fromKeyPair(stored);
-    }
-    return Ed25519KeyIdentity.fromJSON(stored);
-  } catch {
-    // The stored value may be corrupt or from an incompatible version.
-    // Returning null lets the caller fall through to key generation,
-    // which is safer than crashing on startup.
-    return null;
-  }
-}
-
-// Reads the pending-key registry, dropping malformed entries. The value comes
-// from storage, so guard against corruption: keep only real pending-key slots
-// with a finite expiry (a NaN expiry compares false forever and never sweeps;
-// a foreign slot would make the sweep remove an unrelated storage key).
-async function readPendingRegistry(storage: AuthClientStorage): Promise<PendingKeyEntry[]> {
-  const raw = await storage.get(PENDING_KEYS_REGISTRY_KEY);
-  if (typeof raw !== 'string') return [];
-  try {
-    const parsed: unknown = JSON.parse(raw);
-    if (!Array.isArray(parsed)) return [];
-    return parsed.filter((entry): entry is PendingKeyEntry => {
-      if (typeof entry !== 'object' || entry === null) return false;
-      const { slot, expiresAt } = entry as PendingKeyEntry;
-      return (
-        typeof slot === 'string' &&
-        slot.startsWith(PENDING_KEY_PREFIX) &&
-        typeof expiresAt === 'number' &&
-        Number.isFinite(expiresAt)
-      );
-    });
-  } catch {
-    return [];
-  }
-}
-
-async function writePendingRegistry(
-  storage: AuthClientStorage,
-  entries: PendingKeyEntry[],
-): Promise<void> {
-  if (entries.length === 0) {
-    await storage.remove(PENDING_KEYS_REGISTRY_KEY);
-    return;
-  }
-  await storage.set(PENDING_KEYS_REGISTRY_KEY, JSON.stringify(entries));
-}
-
-// Removes expired pending-key slots, then registers `slot` with a fresh expiry.
-async function sweepAndRegisterPendingKey(
-  storage: AuthClientStorage,
-  slot: string,
-  now: number,
-): Promise<void> {
-  const entries = await readPendingRegistry(storage);
-  const live: PendingKeyEntry[] = [];
-  for (const entry of entries) {
-    if (entry.slot === slot) continue; // re-registered with a fresh expiry below
-    if (entry.expiresAt <= now) {
-      await storage.remove(entry.slot);
-    } else {
-      live.push(entry);
-    }
-  }
-  live.push({ slot, expiresAt: now + PENDING_KEY_TTL_MS });
-  await writePendingRegistry(storage, live);
-}
-
-// Drops a slot from the pending-key registry once its flow completes.
-async function unregisterPendingKey(storage: AuthClientStorage, slot: string): Promise<void> {
-  const entries = await readPendingRegistry(storage);
-  const remaining = entries.filter((entry) => entry.slot !== slot);
-  if (remaining.length !== entries.length) {
-    await writePendingRegistry(storage, remaining);
-  }
-}
-
-/**
- * Loads a session key from a specific storage slot, deserializing by stored
- * shape (`CryptoKeyPair` → ECDSA, JSON string → Ed25519), as used for a
- * redirect flow's per-flow pending key.
- * @param storage - The storage backend.
- * @param storageKey - The slot to read.
- */
-async function restoreKeyAt(
-  storage: AuthClientStorage,
-  storageKey: string,
-): Promise<SignIdentity | PartialIdentity | null> {
-  const stored = await storage.get(storageKey);
-  if (!stored) return null;
-
-  try {
-    if (typeof stored === 'object') {
-      return await ECDSAKeyIdentity.fromKeyPair(stored);
-    }
-    return Ed25519KeyIdentity.fromJSON(stored);
-  } catch {
-    return null;
-  }
-}
-
-/**
- * Converts a key into a format suitable for storage.
- * @param key - The key to serialize.
- */
-function serializeKey(key: SignIdentity | PartialIdentity): StoredKey {
-  if (key instanceof ECDSAKeyIdentity) return key.getKeyPair();
-  if (key instanceof Ed25519KeyIdentity) return JSON.stringify(key.toJSON());
-  throw new Error('Unsupported key type');
+/** A key's public half as text, for comparing two keys without holding both. */
+function publicKeyOf(key: SignIdentity | PartialIdentity): string {
+  return toBase64(new Uint8Array(key.getPublicKey().toDer()));
 }
 
 /**

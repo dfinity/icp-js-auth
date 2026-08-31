@@ -1,5 +1,7 @@
 import { type IDBPDatabase, openDB } from 'idb';
-import { DB_VERSION, KEY_STORAGE_DELEGATION, KEY_STORAGE_KEY } from './storage.js';
+
+// Increment when the shape of what is stored changes.
+export const DB_VERSION = 1;
 
 type Database = IDBPDatabase<unknown>;
 type IDBValidKey = string | number | Date | BufferSource | IDBValidKey[];
@@ -12,11 +14,6 @@ const _openDbStore = async (
   version: number,
   onTerminated?: () => void,
 ) => {
-  // Clear legacy stored delegations
-  if (globalThis.localStorage?.getItem(KEY_STORAGE_DELEGATION)) {
-    globalThis.localStorage.removeItem(KEY_STORAGE_DELEGATION);
-    globalThis.localStorage.removeItem(KEY_STORAGE_KEY);
-  }
   return await openDB(dbName, version, {
     upgrade: (database) => {
       if (database.objectStoreNames.contains(storeName)) {

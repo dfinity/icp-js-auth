@@ -2,15 +2,17 @@ import type { PublicKey } from '@icp-sdk/core/agent';
 import { DelegationChain, Ed25519KeyIdentity } from '@icp-sdk/core/identity';
 import { Principal } from '@icp-sdk/core/principal';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { slotsFor } from '../../src/client/slots.ts';
+
+/** The bare names, which is what a client with no namespace writes under. */
+const SLOTS = slotsFor();
+
 import { AuthClient } from '../../src/client/auth-client.ts';
+import type { Credential, CredentialStorage } from '../../src/client/credential-storage.ts';
+import { IdbCredentialStorage } from '../../src/client/idb-credential-storage.ts';
 import { IdleManager } from '../../src/client/idle-manager.ts';
+import { MemoryCredentialStorage } from '../../src/client/memory-credential-storage.ts';
 import { MemoryStateStorage } from '../../src/client/state-storage.ts';
-import {
-  type AuthClientStorage,
-  IdbStorage,
-  KEY_STORAGE_DELEGATION,
-  KEY_STORAGE_KEY,
-} from '../../src/client/storage.ts';
 import { FakeTransport } from './fake-transport.ts';
 
 // Swap `PostMessageTransport` for `FakeTransport` so `AuthClient` uses the real
@@ -35,6 +37,29 @@ function fromBase64(value: string): Uint8Array {
   const bytes = new Uint8Array(binary.length);
   for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
   return bytes;
+}
+
+// A credential store backed by memory, with every call recorded, so a test can
+// assert what was written without reaching into an implementation's internals.
+function spyStorage(seed?: Credential): CredentialStorage & {
+  writes: { slot: string; credential: Credential }[];
+} {
+  const inner = new MemoryCredentialStorage();
+  const writes: { slot: string; credential: Credential }[] = [];
+  const storage = {
+    shared: inner.shared,
+    durable: inner.durable,
+    writes,
+    create: () => inner.create(),
+    get: (slot: string) => inner.get(slot),
+    set: vi.fn(async (slot: string, credential: Credential) => {
+      writes.push({ slot, credential });
+      await inner.set(slot, credential as never);
+    }),
+    remove: vi.fn((slot: string) => inner.remove(slot)),
+  };
+  if (seed) void inner.set(SLOTS.session, seed as never);
+  return storage;
 }
 
 // The state a stored chain puts an origin in, so a test that seeds storage
@@ -162,15 +187,11 @@ describe('AuthClient', () => {
   it('should use a provided identity as the key for hydration', async () => {
     const identity = Ed25519KeyIdentity.generate();
     const chain = await createTestDelegation(identity);
-    const storage: AuthClientStorage = {
-      remove: vi.fn(),
-      get: vi.fn(async (x) => {
-        if (x === KEY_STORAGE_DELEGATION) return JSON.stringify(chain.toJSON());
-        return null;
-      }),
-      set: vi.fn(),
-    };
-    const client = new AuthClient({ identity, storage, stateStorage: stateFor(chain) });
+    const client = new AuthClient({
+      identity,
+      credentialStorage: spyStorage({ identity, chain }),
+      stateStorage: stateFor(chain),
+    });
     const resolved = await client.getIdentity();
     expect(resolved.getPrincipal().isAnonymous()).toBe(false);
   });
@@ -184,13 +205,7 @@ describe('AuthClient', () => {
       principal: Principal.selfAuthenticating(new Uint8Array([1, 2, 3])),
       expiration: (BigInt(Date.now()) + 3_600_000n) * 1_000_000n,
     });
-    const storage: AuthClientStorage = {
-      get: vi.fn().mockResolvedValue(null),
-      set: vi.fn(),
-      remove: vi.fn(),
-    };
-
-    const client = new AuthClient({ storage, stateStorage });
+    const client = new AuthClient({ credentialStorage: spyStorage(), stateStorage });
     await client.getIdentity();
 
     // Saying "signed in" with nothing to act with is what the state leading forbids.
@@ -246,29 +261,6 @@ describe('AuthClient', () => {
     expect(status.status === 'signed-out' ? null : status.principal).toEqual(principal);
   });
 
-  it('clears the credentials it could not restore, not just the claim on them', async () => {
-    // A record naming a sign-in whose delegation is gone: the state is dropped,
-    // and so is whatever is left in the credential store — teardown covers every
-    // slot rather than whichever one a caller happened to name.
-    const stateStorage = new MemoryStateStorage();
-    stateStorage.set({
-      principal: Principal.selfAuthenticating(new Uint8Array([1, 2, 3])),
-      expiration: (BigInt(Date.now()) + 3_600_000n) * 1_000_000n,
-    });
-    const storage: AuthClientStorage = {
-      get: vi.fn().mockResolvedValue(null),
-      set: vi.fn(),
-      remove: vi.fn(),
-    };
-
-    const client = new AuthClient({ storage, stateStorage });
-    await client.getIdentity();
-
-    expect(stateStorage.get()).toBeNull();
-    expect(storage.remove).toHaveBeenCalledWith(KEY_STORAGE_KEY);
-    expect(storage.remove).toHaveBeenCalledWith(KEY_STORAGE_DELEGATION);
-  });
-
   it('is not authenticated by a record this origin does not hold', async () => {
     // What a store whose record reaches further than one origin reports on an
     // origin that has not acquired a credential of its own.
@@ -288,6 +280,27 @@ describe('AuthClient', () => {
     // Someone is signed in within that store's reach; this origin cannot act.
     expect(stateStorage.get()).not.toBeNull();
     expect(client.isAuthenticated()).toBe(false);
+  });
+
+  it('keeps two clients under one origin apart when they are namespaced', async () => {
+    const credentialStorage = new MemoryCredentialStorage();
+    const first = new AuthClient({ credentialStorage, namespace: 'one' });
+    handleSignIn(FakeTransport.last());
+    await first.signIn();
+
+    // Same store, different namespace: the second client writes elsewhere and
+    // finds nothing of the first's.
+    const second = new AuthClient({ credentialStorage, namespace: 'two' });
+    const identity = await second.getIdentity();
+
+    expect(identity.getPrincipal().isAnonymous()).toBe(true);
+    expect(await credentialStorage.get('one:session')).not.toBeNull();
+    expect(await credentialStorage.get('two:session')).toBeNull();
+    // The record of who is signed in moves with the slots. Leaving it fixed gave
+    // two namespaced clients their own credentials and one shared answer to who
+    // was signed in, which is the half a namespace exists to prevent.
+    expect(localStorage.getItem('one:ic-session-state')).not.toBeNull();
+    expect(localStorage.getItem('ic-session-state')).toBeNull();
   });
 
   it('should sign users out', async () => {
@@ -452,36 +465,30 @@ describe('AuthClient signIn', () => {
     expect(transport.requests[0].params?.icrc95DerivationOrigin).toBe('https://example.com');
   });
 
-  it('should persist delegation and key after sign-in', async () => {
-    const storage: AuthClientStorage = {
-      remove: vi.fn(),
-      get: vi.fn().mockResolvedValue(null),
-      set: vi.fn(),
-    };
-    const client = new AuthClient({ storage });
+  it('should persist the key and its delegation as one record after sign-in', async () => {
+    const storage = spyStorage();
+    const client = new AuthClient({ credentialStorage: storage });
     handleSignIn(FakeTransport.last());
     await client.signIn();
 
-    expect(storage.set).toHaveBeenCalledWith(KEY_STORAGE_DELEGATION, expect.any(String));
-    expect(storage.set).toHaveBeenCalledWith(KEY_STORAGE_KEY, expect.anything());
+    const session = storage.writes.filter((write) => write.slot === SLOTS.session);
+    expect(session).toHaveLength(1);
+    expect(session[0]?.credential.identity).toBeDefined();
+    expect(session[0]?.credential.chain).toBeDefined();
   });
 
   it('should generate a fresh key for each sign-in', async () => {
-    const storedKeys: unknown[] = [];
-    const storage: AuthClientStorage = {
-      remove: vi.fn(),
-      get: vi.fn().mockResolvedValue(null),
-      set: vi.fn(async (k, v) => {
-        if (k === KEY_STORAGE_KEY) storedKeys.push(v);
-      }),
-    };
-    const client = new AuthClient({ storage, keyType: 'Ed25519' });
+    const storage = spyStorage();
+    const client = new AuthClient({ credentialStorage: storage });
     handleSignIn(FakeTransport.last());
     await client.signIn();
     await client.signIn();
 
-    expect(storedKeys).toHaveLength(2);
-    expect(storedKeys[0]).not.toEqual(storedKeys[1]);
+    const keys = storage.writes
+      .filter((write) => write.slot === SLOTS.session)
+      .map((write) => write.credential.identity.getPublicKey().toDer().toString());
+    expect(keys).toHaveLength(2);
+    expect(keys[0]).not.toEqual(keys[1]);
   });
 
   it('should report the user as authenticated after sign-in', async () => {
@@ -583,20 +590,28 @@ describe('AuthClient signIn', () => {
   });
 
   it('does not restore a session the state does not back, and drops it', async () => {
-    const storage = new IdbStorage();
+    const credentialStorage = new IdbCredentialStorage();
     const stateStorage = new MemoryStateStorage();
-    const first = new AuthClient({ storage, stateStorage, idleOptions: { disableIdle: true } });
+    const first = new AuthClient({
+      credentialStorage,
+      stateStorage,
+      idleOptions: { disableIdle: true },
+    });
     handleSignIn(FakeTransport.last());
     await first.signIn();
-    expect(await storage.get(KEY_STORAGE_DELEGATION)).not.toBeNull();
+    expect(await credentialStorage.get(SLOTS.session)).not.toBeNull();
 
-    // Only the state goes; the delegation is left exactly where it was.
+    // Only the state goes; the credential is left exactly where it was.
     stateStorage.remove();
 
-    const second = new AuthClient({ storage, stateStorage, idleOptions: { disableIdle: true } });
+    const second = new AuthClient({
+      credentialStorage,
+      stateStorage,
+      idleOptions: { disableIdle: true },
+    });
     const identity = await second.getIdentity();
     expect(identity.getPrincipal().isAnonymous()).toBe(true);
-    expect(await storage.get(KEY_STORAGE_DELEGATION)).toBeNull();
+    expect(await credentialStorage.get(SLOTS.session)).toBeNull();
   });
 
   it('clears the state storage on sign-out', async () => {
@@ -614,13 +629,9 @@ describe('AuthClient signIn', () => {
 
 describe('AuthClient idle behavior', () => {
   it('should sign out after idle and reload the window by default', async () => {
-    const storage: AuthClientStorage = {
-      remove: vi.fn(),
-      get: vi.fn().mockResolvedValue(null),
-      set: vi.fn(),
-    };
+    const storage = spyStorage();
     const client = new AuthClient({
-      storage,
+      credentialStorage: storage,
       idleOptions: { idleTimeout: 1000 },
     });
     handleSignIn(FakeTransport.last());
@@ -636,12 +647,12 @@ describe('AuthClient idle behavior', () => {
   });
 
   it('does not reload when idle sign-out fails (would otherwise restore the session)', async () => {
-    const storage: AuthClientStorage = {
-      remove: vi.fn().mockRejectedValue(new Error('storage unavailable')),
-      get: vi.fn().mockResolvedValue(null),
-      set: vi.fn(),
-    };
-    const client = new AuthClient({ storage, idleOptions: { idleTimeout: 1000 } });
+    const storage = spyStorage();
+    storage.remove = vi.fn().mockRejectedValue(new Error('storage unavailable'));
+    const client = new AuthClient({
+      credentialStorage: storage,
+      idleOptions: { idleTimeout: 1000 },
+    });
     handleSignIn(FakeTransport.last());
     await client.signIn();
 
@@ -654,13 +665,9 @@ describe('AuthClient idle behavior', () => {
   });
 
   it('should not reload the page if the default callback is disabled', async () => {
-    const storage: AuthClientStorage = {
-      remove: vi.fn(),
-      get: vi.fn().mockResolvedValue(null),
-      set: vi.fn(),
-    };
+    const storage = spyStorage();
     const client = new AuthClient({
-      storage,
+      credentialStorage: storage,
       idleOptions: { idleTimeout: 1000, disableDefaultIdleCallback: true },
     });
     handleSignIn(FakeTransport.last());
@@ -688,11 +695,16 @@ describe('AuthClient idle behavior', () => {
   });
 });
 
-describe('IdbStorage', () => {
+describe('IdbCredentialStorage', () => {
   it('should handle get and set', async () => {
-    const storage = new IdbStorage();
-    await storage.set('testKey', 'testValue');
-    expect(await storage.get('testKey')).toBe('testValue');
+    const storage = new IdbCredentialStorage();
+    const identity = await storage.create();
+    const chain = await createTestDelegation(Ed25519KeyIdentity.generate());
+    await storage.set(SLOTS.session, { identity, chain });
+
+    const stored = await storage.get(SLOTS.session);
+    expect(stored?.identity.getPublicKey().toDer()).toEqual(identity.getPublicKey().toDer());
+    expect(stored?.chain?.toJSON()).toEqual(chain.toJSON());
   });
 });
 
@@ -709,17 +721,10 @@ describe('Session restoration', () => {
     const key = Ed25519KeyIdentity.fromJSON(JSON.stringify(testSecrets));
     const chain = await createTestDelegation(key, expiration);
 
-    const storage: AuthClientStorage = {
-      remove: vi.fn(),
-      get: vi.fn(async (x) => {
-        if (x === KEY_STORAGE_DELEGATION) return JSON.stringify(chain.toJSON());
-        if (x === KEY_STORAGE_KEY) return JSON.stringify(testSecrets);
-        return null;
-      }),
-      set: vi.fn(),
-    };
-
-    const client = new AuthClient({ storage, stateStorage: stateFor(chain) });
+    const client = new AuthClient({
+      credentialStorage: spyStorage({ identity: key, chain }),
+      stateStorage: stateFor(chain),
+    });
     const identity = await client.getIdentity();
     expect(identity.getPrincipal().isAnonymous()).toBe(false);
   });
@@ -727,18 +732,17 @@ describe('Session restoration', () => {
   it('should remain anonymous with a key but no delegation', async () => {
     vi.setSystemTime(new Date('2020-01-01T00:00:00.000Z'));
 
-    const storage: AuthClientStorage = {
-      remove: vi.fn(),
-      get: vi.fn(async (x) => {
-        if (x === KEY_STORAGE_KEY) return JSON.stringify(testSecrets);
-        return null;
-      }),
-      set: vi.fn(),
-    };
+    const key = Ed25519KeyIdentity.fromJSON(JSON.stringify(testSecrets));
+    // A record with no chain is only legal in a ceremony's own slot, so one
+    // found under the session slot is not a session, and is cleared.
+    const storage = spyStorage({ identity: key });
+    const client = new AuthClient({ credentialStorage: storage });
 
-    const client = new AuthClient({ storage });
     const identity = await client.getIdentity();
+
     expect(identity.getPrincipal().isAnonymous()).toBe(true);
+    expect(storage.remove).toHaveBeenCalledWith(SLOTS.session);
+    expect(await storage.get(SLOTS.session)).toBeNull();
   });
 
   it('should clear storage when the delegation has expired', async () => {
@@ -748,38 +752,12 @@ describe('Session restoration', () => {
     const key = Ed25519KeyIdentity.fromJSON(JSON.stringify(testSecrets));
     const chain = await createTestDelegation(key, expiration);
 
-    const fakeStore: Record<string, string> = {};
-    fakeStore[KEY_STORAGE_DELEGATION] = JSON.stringify(chain.toJSON());
-    fakeStore[KEY_STORAGE_KEY] = JSON.stringify(testSecrets);
+    const storage = spyStorage({ identity: key, chain });
 
-    const storage: AuthClientStorage = {
-      remove: vi.fn(async (x) => {
-        delete fakeStore[x];
-      }),
-      get: vi.fn(async (x) => fakeStore[x] ?? null),
-      set: vi.fn(),
-    };
-
-    const client = new AuthClient({ storage });
+    const client = new AuthClient({ credentialStorage: storage });
     const identity = await client.getIdentity();
     expect(identity.getPrincipal().isAnonymous()).toBe(true);
     expect(storage.remove).toHaveBeenCalled();
-  });
-});
-
-describe('Migration from localStorage', () => {
-  it('should proceed normally if no values are stored in localStorage', async () => {
-    const storage: AuthClientStorage = {
-      remove: vi.fn(),
-      get: vi.fn().mockResolvedValue(null),
-      set: vi.fn(),
-    };
-
-    new AuthClient({ storage });
-    await new Promise((r) => setTimeout(r, 0)); // wait for hydration
-
-    // No migration should have occurred (no set calls for delegation/key)
-    expect(storage.set).not.toHaveBeenCalled();
   });
 });
 
