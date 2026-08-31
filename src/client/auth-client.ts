@@ -293,6 +293,32 @@ export class AuthClient {
   }
 
   /**
+   * Who this origin can act as, or `undefined` where it cannot act.
+   *
+   * The same question {@link isAuthenticated} answers, returning who rather than
+   * whether — so the two never disagree. Synchronous, and read from the state
+   * rather than from whatever material happens to be held, so a page renders on
+   * it without opening a store and without waiting for a mint. That is the
+   * difference from `(await getIdentity()).getPrincipal()`, which is asynchronous
+   * and, on a load with no delegation worth adopting, waits for one to be minted.
+   *
+   * A principal here means calls made as it will be accepted, so an expired
+   * record answers `undefined` even though it still names an account, and so does
+   * a record naming an account this origin holds nothing for. Returning one
+   * anyway would have an application acting on a session that has ended: the
+   * check most reach for is `if (getPrincipal())`, and it has to mean what it
+   * looks like it means.
+   *
+   * {@link getStatus} is where those cases are readable, and it carries the
+   * account principal in each of them — so nothing is lost by this being narrow,
+   * and an application wanting to say whose session ended asks there.
+   */
+  getPrincipal(): Principal | undefined {
+    const status = this.getStatus();
+    return status.status === 'signed-in' ? status.principal : undefined;
+  }
+
+  /**
    * What this origin's sign-in amounts to right now.
    *
    * Four cases, tested in one place so an application does not have to know the

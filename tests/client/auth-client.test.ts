@@ -510,6 +510,62 @@ describe('AuthClient signIn', () => {
     expect(state?.expiration).toBeGreaterThan(BigInt(Date.now()) * BigInt(1_000_000));
   });
 
+  it('names who is signed in synchronously, from the state', () => {
+    const stateStorage = new MemoryStateStorage();
+    const principal = Principal.selfAuthenticating(new Uint8Array([1, 2, 3]));
+    stateStorage.set({ principal, expiration: BigInt(Date.now() + 60_000) * 1_000_000n });
+    const client = new AuthClient({ stateStorage, idleOptions: { disableIdle: true } });
+
+    // No await, no store opened, no mint: this is the answer a page renders on.
+    expect(client.getPrincipal()?.toText()).toBe(principal.toText());
+  });
+
+  it('names nobody when no record exists', () => {
+    const client = new AuthClient({
+      stateStorage: new MemoryStateStorage(),
+      idleOptions: { disableIdle: true },
+    });
+    expect(client.getPrincipal()).toBeUndefined();
+  });
+
+  it('names nobody for a session that has expired, and agrees with isAuthenticated', () => {
+    const stateStorage = new MemoryStateStorage();
+    const principal = Principal.selfAuthenticating(new Uint8Array([4, 5, 6]));
+    stateStorage.set({ principal, expiration: BigInt(Date.now() - 60_000) * 1_000_000n });
+    const client = new AuthClient({ stateStorage, idleOptions: { disableIdle: true } });
+
+    // A principal here means calls made as it will be accepted. `if
+    // (getPrincipal())` is the check an application reaches for, so answering for
+    // a session that has ended would have it act on one.
+    expect(client.getPrincipal()).toBeUndefined();
+    expect(client.isAuthenticated()).toBe(false);
+
+    // Nothing is lost: getStatus() carries the account, with the status attached
+    // so it cannot be mistaken for permission to act.
+    const status = client.getStatus();
+    expect(status.status).toBe('expired');
+    expect(status.status !== 'signed-out' && status.principal.toText()).toBe(principal.toText());
+  });
+
+  it('never disagrees with isAuthenticated', () => {
+    const stateStorage = new MemoryStateStorage();
+    const client = new AuthClient({ stateStorage, idleOptions: { disableIdle: true } });
+    const principal = Principal.selfAuthenticating(new Uint8Array([7, 8, 9]));
+
+    for (const expiration of [
+      BigInt(Date.now() + 60_000) * 1_000_000n,
+      BigInt(Date.now() - 60_000) * 1_000_000n,
+    ]) {
+      stateStorage.set({ principal, expiration });
+      // One predicate, two return types. They are the same question, so an
+      // application cannot get a principal it is not allowed to act as.
+      expect(client.getPrincipal() !== undefined).toBe(client.isAuthenticated());
+    }
+
+    stateStorage.remove();
+    expect(client.getPrincipal() !== undefined).toBe(client.isAuthenticated());
+  });
+
   it('answers isAuthenticated from the state storage and not from the delegation', async () => {
     const stateStorage = new MemoryStateStorage();
     const client = new AuthClient({ stateStorage, idleOptions: { disableIdle: true } });
