@@ -12,6 +12,7 @@ import { CookieStateStorage } from '../../src/client/cookie-state-storage.ts';
 import type { Credential, CredentialStorage } from '../../src/client/credential-storage.ts';
 import { IdbCredentialStorage } from '../../src/client/idb-credential-storage.ts';
 import { MemoryCredentialStorage } from '../../src/client/memory-credential-storage.ts';
+import { InteractionRequiredError } from '../../src/client/session-delegation.ts';
 import type { SessionIdentity } from '../../src/client/session-identity.ts';
 import { slotsFor } from '../../src/client/slots.ts';
 import { MemoryStateStorage } from '../../src/client/state-storage.ts';
@@ -368,6 +369,43 @@ describe('AuthClient', () => {
     expect(await credentialStorage.get('one:app')).toBeNull();
   });
 
+  it('reports a denied silent request as one needing a ceremony', async () => {
+    const client = new AuthClient({
+      credentialStorage: new MemoryCredentialStorage(),
+      prompt: 'none',
+    });
+    FakeTransport.last().onRequest((request) => ({
+      jsonrpc: '2.0',
+      id: request.id ?? null,
+      error: { code: 3002, message: 'interaction required', data: { reason: 'login_required' } },
+    }));
+
+    // A denial, not a failure: 3002 is in ICRC-25's user-action range, which is
+    // the whole point of the code — a caller that cannot tell this apart from a
+    // transport error has no way to decide between signing in and retrying.
+    const error = await client.signIn().catch((thrown: unknown) => thrown);
+    expect(error).toBeInstanceOf(InteractionRequiredError);
+    expect((error as InteractionRequiredError).reason).toBe('login_required');
+  });
+
+  it('leaves any other denial an ordinary error', async () => {
+    const client = new AuthClient({
+      credentialStorage: new MemoryCredentialStorage(),
+    });
+    FakeTransport.last().onRequest((request) => ({
+      jsonrpc: '2.0',
+      id: request.id ?? null,
+      error: { code: 4000, message: 'user cancelled' },
+    }));
+
+    // Everything else stays what it was. Reading `interaction_required` into a
+    // cancelled ceremony would have an app skip the sign-in the user asked to
+    // abandon.
+    const error = await client.signIn().catch((thrown: unknown) => thrown);
+    expect(error).not.toBeInstanceOf(InteractionRequiredError);
+    expect((error as Error).message).toBe('user cancelled');
+  });
+
   it('refuses the identity provider as a bare URL, which it used to be', () => {
     // Silently ignored would mean both halves falling back to mainnet.
     expect(() => new AuthClient({ identityProvider: 'https://id.ai/authorize' as never })).toThrow(
@@ -534,6 +572,83 @@ describe('AuthClient', () => {
     new AuthClient();
     const url = new URL(FakeTransport.last().options.url ?? '');
     expect(url.searchParams.has('openid')).toBe(false);
+  });
+
+  it.each(['none', 'login'] as const)(
+    'should pass prompt=%s search param to the transport',
+    (prompt) => {
+      new AuthClient({ prompt });
+      const url = new URL(FakeTransport.last().options.url ?? '');
+      expect(url.searchParams.get('prompt')).toBe(prompt);
+    },
+  );
+
+  it('should pass the hint principal as text in the search param', () => {
+    new AuthClient({ hint: Principal.fromText('2vxsx-fae') });
+    const url = new URL(FakeTransport.last().options.url ?? '');
+    expect(url.searchParams.get('hint')).toBe('2vxsx-fae');
+  });
+
+  it('asks for the sign-in to be kept where the store is one siblings read', () => {
+    new AuthClient({ stateStorage: new CookieStateStorage({ domain: 'localhost' }) });
+
+    const url = new URL(FakeTransport.last().options.url ?? '');
+    expect(url.searchParams.get('resumable')).toBe('true');
+  });
+
+  it('asks for nothing to be kept for a store only this origin reads', () => {
+    new AuthClient({ stateStorage: new MemoryStateStorage() });
+
+    const url = new URL(FakeTransport.last().options.url ?? '');
+    expect(url.searchParams.has('resumable')).toBe(false);
+  });
+
+  it.each([
+    ['on', true, 'true'],
+    ['off', false, null],
+  ] as const)('lets the option turn it %s over the store', (_name, resumable, expected) => {
+    // A cross-origin arrangement that is not sibling subdomains opts in by hand;
+    // siblings that should each sign in properly force it off.
+    new AuthClient({
+      resumable,
+      stateStorage: resumable
+        ? new MemoryStateStorage()
+        : new CookieStateStorage({ domain: 'localhost' }),
+    });
+
+    const url = new URL(FakeTransport.last().options.url ?? '');
+    expect(url.searchParams.get('resumable')).toBe(expected);
+  });
+
+  it('should include neither prompt nor hint when they are not set', () => {
+    new AuthClient();
+    const url = new URL(FakeTransport.last().options.url ?? '');
+    expect(url.searchParams.has('prompt')).toBe(false);
+    expect(url.searchParams.has('hint')).toBe(false);
+  });
+
+  it('acquires silently for the account the state names, without a ceremony', async () => {
+    // What a sibling subdomain's sign-in leaves for this origin: a shared state
+    // naming an account, and no credentials of its own.
+    const stateStorage = new MemoryStateStorage();
+    const signedIn = new AuthClient({ stateStorage });
+    handleSignIn(FakeTransport.last());
+    await signedIn.signIn();
+    const account = stateStorage.get()?.principal;
+
+    const sibling = new AuthClient({
+      stateStorage,
+      credentialStorage: new MemoryCredentialStorage(),
+      prompt: 'none',
+      hint: account,
+    });
+    handleSignIn(FakeTransport.last());
+    const identity = await sibling.signIn();
+
+    const url = new URL(FakeTransport.last().options.url ?? '');
+    expect(url.searchParams.get('prompt')).toBe('none');
+    expect(url.searchParams.get('hint')).toBe(account?.toText());
+    expect(identity.getPrincipal().isAnonymous()).toBe(false);
   });
 
   it('should forward windowOpenerFeatures to the transport', () => {

@@ -159,6 +159,54 @@ export interface AuthClientCreateOptions {
    * the chosen provider (e.g. Google) instead of seeing Internet Identity directly.
    */
   openIdProvider?: OpenIdProvider;
+
+  /**
+   * Whether Internet Identity may answer without user interaction.
+   *
+   * - `'login'` (the effect of omitting it): run a normal sign-in ceremony.
+   * - `'none'`: Internet Identity answers from a session it already holds for
+   *   this app and returns without rendering anything, or fails with an
+   *   `interaction_required` error if it cannot. Pair with {@link hint} to name
+   *   which account to re-issue for. Use it on a page load where the state names
+   *   an account this origin has no credentials for — a sibling subdomain signed
+   *   in — so this origin acquires its own without a ceremony.
+   *
+   * Sent as a `prompt` query param on the authorize URL. An Internet Identity
+   * extension inspired by OpenID Connect's `prompt`, and not part of any ICRC
+   * standard — which is why it travels on the URL rather than in the request.
+   */
+  prompt?: 'none' | 'login';
+
+  /**
+   * The account to re-issue for, which is the principal the state names.
+   *
+   * Sent as text in a `hint` query param on the authorize URL; Internet Identity
+   * uses it to pick which session a {@link prompt} `'none'` request resolves to
+   * when the user has more than one for this app. Inspired by OpenID Connect's
+   * `login_hint`.
+   */
+  hint?: Principal;
+
+  /**
+   * Whether Internet Identity may keep this sign-in so that a later
+   * {@link prompt} `'none'` request can be answered from it.
+   *
+   * Defaults to what {@link AuthClientCreateOptions.stateStorage} says, which is
+   * `true` only for {@link CookieStateStorage}: an application declares this
+   * intent by choosing a store whose record reaches its siblings, and making it
+   * say so a second time would be noise. Set it here for a cross-origin
+   * arrangement that is not sibling subdomains, or to force it off for siblings
+   * that should each sign in properly.
+   *
+   * Off means the provider keeps no session for this app on this device, so
+   * there is nothing for a silent request to find. It says nothing about how
+   * long a session lasts: {@link AuthClientSignInOptions.maxTimeToIdle} applies
+   * either way.
+   *
+   * Sent as a `resumable` query param on the authorize URL, for the same reason
+   * {@link prompt} is: the URL is assembled once, here.
+   */
+  resumable?: boolean;
 }
 
 /**
@@ -329,6 +377,24 @@ export class AuthClient {
     }
     if (options.openIdProvider) {
       identityProviderUrl.searchParams.set('openid', OPENID_PROVIDER_URLS[options.openIdProvider]);
+    }
+    // `prompt` and `hint` are Internet Identity extensions, so they ride on the
+    // authorize URL rather than in the ICRC request. Baking them in here, as
+    // `openid` is, means a client is configured for one authorize intent —
+    // construct a separate client for a silent re-issue and for an interactive
+    // sign-in. Both share this client's storage, so whichever resolves populates
+    // the same session.
+    if (options.prompt) {
+      identityProviderUrl.searchParams.set('prompt', options.prompt);
+    }
+    if (options.hint) {
+      identityProviderUrl.searchParams.set('hint', options.hint.toText());
+    }
+    // The store already carries the intent, so the option only has to override
+    // it. Written only when true: absent is what the provider reads as "keep
+    // nothing", and an explicit `false` would say the same thing louder.
+    if (options.resumable ?? this.#stateStorage.resumable ?? false) {
+      identityProviderUrl.searchParams.set('resumable', 'true');
     }
 
     const transport =
