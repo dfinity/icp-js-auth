@@ -11,6 +11,7 @@ import { AuthClient } from '../../src/client/auth-client.ts';
 
 import { LocalCredentialStorage } from '../../src/client/local-credential-storage.ts';
 import { MemoryCredentialStorage } from '../../src/client/memory-credential-storage.ts';
+import { SharedMemoryCredentialStorage } from '../../src/client/shared-memory-credential-storage.ts';
 import { FakeUrlTransport } from './fake-url-transport.ts';
 
 const II_CANISTER = Principal.fromText('rdmx6-jaaaa-aaaaa-aaadq-cai');
@@ -159,6 +160,22 @@ describe('AuthClient redirect (UrlTransport) sign-in', () => {
     // takes with it can do neither.
     await expect(client.signIn()).rejects.toThrow(/survives the navigation/);
     expect(FakeUrlTransport.last()?.requests ?? []).toHaveLength(0);
+  });
+
+  it('allows a redirect where a peer tab can answer for the key', async () => {
+    const storage = new SharedMemoryCredentialStorage();
+    const client = new AuthClient({ transport: 'redirect', credentialStorage: storage });
+    handleSignIn(FakeUrlTransport.last());
+
+    // Shared but not durable: the key does not survive the navigation, but another
+    // tab of this origin holds it and answers, so the flow proceeds rather than
+    // being refused for its medium. This is the half of the rule that needs a
+    // store like this one to be testable at all — the refusal it pairs with lives
+    // with the rule itself, one stack down.
+    const identity = await client.signIn();
+
+    expect(identity.getPrincipal().isAnonymous()).toBe(false);
+    storage.close();
   });
 
   it('routes sign-in through the URL transport and cleans up the pending key', async () => {
