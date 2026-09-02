@@ -14,13 +14,16 @@ const OTHER = Principal.fromText('rrkah-fqaaa-aaaaa-aaaaq-cai');
 
 const accountKey = Ed25519KeyIdentity.generate();
 
-function chainTargeting(...perHop: Principal[][]): DelegationChain {
+/// `undefined` is a hop that restricts nothing; `[]` is one that names nothing.
+/// The two are different chains, so this passes them through as given rather
+/// than folding one into the other.
+function chainTargeting(...perHop: (Principal[] | undefined)[]): DelegationChain {
   return DelegationChain.fromDelegations(
     perHop.map((targets) => ({
       delegation: new Delegation(
         Ed25519KeyIdentity.generate().getPublicKey().toDer(),
         1_700_000_000_000_000_000n,
-        targets.length > 0 ? targets : undefined,
+        targets,
       ),
       signature: new Uint8Array([1]) as DelegationChain['delegations'][number]['signature'],
     })),
@@ -101,18 +104,31 @@ describe('assertChainReaches', () => {
   });
 
   it('refuses an unrestricted chain, which could sign any call', () => {
+    expect(() => assertChainReaches(chainTargeting(undefined), II)).toThrow(
+      /no hop of this one names any canister/,
+    );
+  });
+
+  it('refuses a hop naming nothing, which can call nothing', () => {
     expect(() => assertChainReaches(chainTargeting([]), II)).toThrow(/names nothing/);
+  });
+
+  it('accepts the shape the identity provider issues', () => {
+    // The canister signs an unrestricted hop to the provider's own key, and the
+    // provider's extension to the application's key is what names the canister.
+    // The effective restriction is the intersection, so this reaches II alone.
+    expect(() => assertChainReaches(chainTargeting(undefined, [II]), II)).not.toThrow();
   });
 
   it('refuses a chain naming another canister alongside this one', () => {
     expect(() => assertChainReaches(chainTargeting([II, OTHER]), II)).toThrow(
-      /must be restricted to/,
+      new RegExp(`also names ${OTHER.toText()}`),
     );
   });
 
   it('refuses a chain restricted elsewhere, which is a misconfigured canister id', () => {
     expect(() => assertChainReaches(chainTargeting([OTHER]), II)).toThrow(
-      new RegExp(`restricted to ${II.toText()}, but this one names ${OTHER.toText()}`),
+      new RegExp(`restricted to ${II.toText()}, but this one also names ${OTHER.toText()}`),
     );
   });
 
