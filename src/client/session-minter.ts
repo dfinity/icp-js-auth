@@ -200,27 +200,41 @@ export function appDelegationChain(
 /**
  * Refuses a chain that is not a session for `canisterId`.
  *
- * A session chain names that canister in its `targets` and nothing else. An
- * unrestricted chain is the case worth refusing hardest: the session key signs
- * with it, so accepting one would leave the library holding a credential that can
- * sign any call, rather than only the two this file makes. A chain restricted
- * elsewhere is what a misconfigured canister id looks like, and the error names
- * both sides so it can be told apart from a dead session.
+ * Targets restrict what the chain's final key may call, and the effective
+ * restriction is the intersection of the hops that name any: a hop with no
+ * targets imposes nothing, so one restricting hop is what confines the key. The
+ * chain Internet Identity issues is exactly that shape — the canister signs an
+ * unrestricted hop to the provider's own key, and the provider's extension to
+ * the application's key is the hop that names the canister.
+ *
+ * So what is refused is a chain no hop restricts, which the session key would
+ * otherwise be able to sign any call with, and one whose restrictions do not
+ * come out as this canister alone.
  */
 export function assertChainReaches(chain: DelegationChain, canisterId: Principal): void {
-  // Every hop has to name it. A hop with no `targets` is unrestricted, and one
-  // with an empty list names nothing — neither is a session chain, and folding
-  // the hops together would let a good hop cover for a bad one.
   const hops = chain.delegations.map(({ delegation }) => delegation.targets);
-  const targets = hops.flatMap((hopTargets) => hopTargets ?? []);
-  const restrictedToThisCanister =
-    hops.length > 0 &&
-    hops.every((hopTargets) => hopTargets !== undefined && hopTargets.length > 0) &&
-    targets.every((target) => target.compareTo(canisterId) === 'eq');
-  if (!restrictedToThisCanister) {
-    const named = targets.length === 0 ? 'nothing' : targets.map((t) => t.toText()).join(', ');
+  const restricting = hops.filter((hopTargets): hopTargets is Principal[] => hopTargets !== undefined);
+
+  if (restricting.length === 0) {
     throw new Error(
-      `A session chain must be restricted to ${canisterId.toText()}, but this one names ${named}`,
+      `A session chain must be restricted to ${canisterId.toText()}, but no hop of this one names any canister`,
+    );
+  }
+  // An empty list names nothing rather than naming this canister, and a chain
+  // that can call nothing is not a session either.
+  const namingNothing = restricting.some((hopTargets) => hopTargets.length === 0);
+  if (namingNothing) {
+    throw new Error(
+      `A session chain must be restricted to ${canisterId.toText()}, but a hop of this one names nothing`,
+    );
+  }
+  const elsewhere = restricting
+    .flat()
+    .filter((target) => target.compareTo(canisterId) !== 'eq')
+    .map((target) => target.toText());
+  if (elsewhere.length > 0) {
+    throw new Error(
+      `A session chain must be restricted to ${canisterId.toText()}, but this one also names ${[...new Set(elsewhere)].join(', ')}`,
     );
   }
 }
