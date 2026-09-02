@@ -22,7 +22,28 @@ export type IdleManagerOptions = {
   scrollDebounce?: number;
 };
 
-const events = ['mousedown', 'mousemove', 'keydown', 'touchstart', 'wheel'];
+// `pointerdown` covers a mouse, a finger and a pen in one, which is the only
+// press event a phone reliably produces.
+const events = ['pointerdown', 'mousedown', 'mousemove', 'keydown', 'touchstart', 'wheel'];
+
+/**
+ * Where the tabs of an origin record that somebody is here.
+ *
+ * One fixed name, and deliberately not per client: being at the keyboard is a
+ * fact about the person at this origin, so two managers on a page sharing it is
+ * the right answer rather than a collision.
+ */
+const ACTIVITY_KEY = 'ic-last-active';
+
+/**
+ * How coarse the shared activity stamp is.
+ *
+ * Two consequences, both of them the point: a tab writes at most once every five
+ * seconds however hard the user is working, and an idle deadline can therefore
+ * fire up to five seconds early. Both are the right size for a timeout measured
+ * in minutes.
+ */
+const ACTIVITY_RESOLUTION_MS = 5_000;
 
 /**
  * Detects if the user has been idle for a duration of `idleTimeout` ms, and calls `onIdle` and registered callbacks.
@@ -39,6 +60,8 @@ export class IdleManager {
   #idleTimeout: number;
   #timeoutID?: number = undefined;
   #resetTimer: () => void;
+  #onForeground: () => void;
+  #stampedAt = 0;
 
   /**
    * Creates or returns the singleton {@link IdleManager}.
@@ -99,7 +122,16 @@ export class IdleManager {
     // for both addEventListener and removeEventListener.
     this.#resetTimer = this._resetTimer.bind(this);
 
+    // Coming back to the app is activity, and on a phone it is often the only
+    // signal there is: switching apps or locking the screen produces no press
+    // events, and a page that is frozen produces nothing at all.
+    this.#onForeground = () => {
+      if (document.visibilityState !== 'hidden') this.#resetTimer();
+    };
+
     window.addEventListener('load', this.#resetTimer, true);
+    window.addEventListener('focus', this.#onForeground, true);
+    document.addEventListener('visibilitychange', this.#onForeground, true);
 
     events.forEach((name) => {
       document.addEventListener(name, this.#resetTimer, true);
@@ -140,6 +172,8 @@ export class IdleManager {
   public exit(): void {
     clearTimeout(this.#timeoutID);
     window.removeEventListener('load', this.#resetTimer, true);
+    window.removeEventListener('focus', this.#onForeground, true);
+    document.removeEventListener('visibilitychange', this.#onForeground, true);
 
     events.forEach((name) => {
       document.removeEventListener(name, this.#resetTimer, true);
@@ -155,8 +189,53 @@ export class IdleManager {
    * Resets the timeouts during cleanup
    */
   private _resetTimer(): void {
-    const exit = this.exit.bind(this);
+    this.#stamp();
     window.clearTimeout(this.#timeoutID);
-    this.#timeoutID = window.setTimeout(exit, this.#idleTimeout);
+    this.#timeoutID = window.setTimeout(() => this.#check(), this.#idleTimeout);
+  }
+
+  /** Tells the other tabs of this origin that somebody is here. */
+  #stamp(): void {
+    const now = Date.now();
+    if (now - this.#stampedAt < ACTIVITY_RESOLUTION_MS) return;
+    this.#stampedAt = now;
+    try {
+      window.localStorage.setItem(ACTIVITY_KEY, String(now));
+    } catch {
+      // No store to share through, so this tab is on its own — which costs the
+      // cross-tab part and nothing else. Idle detection is a convenience.
+    }
+  }
+
+  /**
+   * Decides whether the window has really passed, and re-arms where it has not.
+   *
+   * The timer firing is not evidence of anything: it saw only this document's
+   * events, and a browser throttles a background timer to a minute or more and
+   * runs none at all while a tab is frozen — so a suspended tab's timeout can
+   * fire the moment it resumes, or an hour late. Elapsed time is read from the
+   * clock instead, and from a stamp every tab of the origin writes, so working in
+   * one tab postpones the deadline in all of them.
+   */
+  #check(): void {
+    const quiet = Date.now() - this.#lastActive();
+    if (quiet < this.#idleTimeout) {
+      // The remainder rather than a fixed interval, so this converges on the real
+      // deadline instead of polling until it arrives.
+      this.#timeoutID = window.setTimeout(() => this.#check(), this.#idleTimeout - quiet);
+      return;
+    }
+    this.exit();
+  }
+
+  #lastActive(): number {
+    try {
+      const raw = window.localStorage.getItem(ACTIVITY_KEY);
+      // A missing or unreadable stamp reads as "nobody, ever", which is what this
+      // tab's own timer already believed.
+      return raw === null ? 0 : Number(raw) || 0;
+    } catch {
+      return 0;
+    }
   }
 }

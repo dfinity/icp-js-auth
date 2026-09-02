@@ -16,6 +16,7 @@ import { PostMessageTransport, UrlTransport } from '@icp-sdk/signer/web';
 import { stealMintLock } from './app-lock.js';
 import { fromBase64, toBase64 } from './base64.js';
 import type { Credential, CredentialStorage } from './credential-storage.js';
+import { watchActivity, watchForeground } from './foreground-refresh.js';
 import { IdbCredentialStorage } from './idb-credential-storage.js';
 import { IdleManager, type IdleManagerOptions } from './idle-manager.js';
 import { requestSessionDelegation } from './session-delegation.js';
@@ -87,9 +88,23 @@ export interface AuthClientCreateOptions {
    * the session at the canister — so an idle timeout is a full sign-out and not
    * merely a local one. Replace it with `onIdle`, or turn it off with
    * `disableDefaultIdleCallback`, where that is more than an application wants.
-   * @default after 10 minutes, signs out and reloads
+   *
+   * Idleness is measured across the tabs of this origin, so the timeout is
+   * reached only where none of them has been used.
+   * @default after 10 minutes with no tab of this origin used, signs out and reloads
    */
   idleOptions?: IdleOptions;
+
+  /**
+   * Disables refreshing when the page is shown or the window regains focus.
+   *
+   * A backgrounded tab has its timers throttled, so its delegation can lapse
+   * while nobody is looking and the first click after coming back waits for a
+   * mint. Returning to the tab is early enough to hide that. Turn it off to make
+   * requests the only thing that ever triggers one.
+   * @default false
+   */
+  disableForegroundRefresh?: boolean;
 
   /**
    * Where the identity provider is, as two values rather than one.
@@ -251,6 +266,15 @@ export class AuthClient {
   #credentialStorage: CredentialStorage;
   readonly #slots: Slots;
   readonly #canisterId: Principal;
+  #unwatchForeground: (() => void) | undefined;
+  #unwatchActivity: (() => void) | undefined;
+  // `mousemove` fires by the dozen per second, and each call awaits a restore
+  // before it can decide there is nothing to do. One at a time is enough: the
+  // next event finds a fresher answer than the one already in flight anyway.
+  #refreshingInForeground = false;
+  #disposed = false;
+  /** Ceremonies in flight, which suppress the foreground refresh. */
+  #ceremonies = 0;
   #stateStorage: StateStorage;
   #signer: Signer;
   // Set only in redirect mode, so the redirect-specific paths (nonce/key
@@ -283,6 +307,18 @@ export class AuthClient {
     const identityProviderUrl = new URL(
       options.identityProvider?.authorizeUrl?.toString() || IDENTITY_PROVIDER_DEFAULT,
     );
+    if (!options.disableForegroundRefresh) {
+      // The identity decides whether a mint is due; these only say the moment is
+      // a good one. Nothing is hooked where there is no DOM.
+      //
+      // The page arriving and the user using it are the same claim — somebody is
+      // here — so both trigger the same refresh and one option governs both.
+      const refresh = (): void => {
+        void this.#refreshInForeground();
+      };
+      this.#unwatchForeground = watchForeground(refresh);
+      this.#unwatchActivity = watchActivity(refresh);
+    }
     if (options.openIdProvider) {
       identityProviderUrl.searchParams.set('openid', OPENID_PROVIDER_URLS[options.openIdProvider]);
     }
@@ -393,6 +429,23 @@ export class AuthClient {
   }
 
   /**
+   * Releases what this client hooked: the foreground listeners, and the refresh
+   * the identity has scheduled. Call it when discarding a client, so nothing it
+   * registered outlives it.
+   */
+  dispose(): void {
+    // Recorded, because the constructor starts the restore without awaiting it:
+    // a client disposed while one is in flight would otherwise have an identity
+    // installed afterwards, scheduling refreshes nobody can stop.
+    this.#disposed = true;
+    if (this.#identity instanceof SessionIdentity) this.#identity.dispose();
+    this.#unwatchForeground?.();
+    this.#unwatchForeground = undefined;
+    this.#unwatchActivity?.();
+    this.#unwatchActivity = undefined;
+  }
+
+  /**
    * Opens the identity provider, requests a delegation, and returns the authenticated identity.
    *
    * @param options - Sign-in options.
@@ -409,6 +462,19 @@ export class AuthClient {
    * }
    */
   async signIn(options?: AuthClientSignInOptions): Promise<Identity> {
+    // A ceremony backgrounds this tab and foregrounds it again on its way back,
+    // so without this the return fires a foreground refresh against the identity
+    // this call is in the middle of replacing: a mint spent on a session being
+    // discarded, and written to the store as though it were current.
+    this.#ceremonies += 1;
+    try {
+      return await this.#runSignIn(options);
+    } finally {
+      this.#ceremonies -= 1;
+    }
+  }
+
+  async #runSignIn(options?: AuthClientSignInOptions): Promise<Identity> {
     const maxTimeToLive = options?.maxTimeToLive ?? DEFAULT_MAX_TIME_TO_LIVE;
 
     // Journaled first, so a redirect flow finds it on the load that comes back:
@@ -783,6 +849,41 @@ export class AuthClient {
     }
   }
 
+  /**
+   * Mints ahead of the next request when the page comes back, if one is due.
+   *
+   * Silent by design: this is not a request anyone is waiting on, so a failure
+   * leaves what is held in place for the next one to retry.
+   */
+  async #refreshInForeground(): Promise<void> {
+    if (this.#ceremonies > 0 || this.#refreshingInForeground) return;
+    this.#refreshingInForeground = true;
+    try {
+      await this.#refreshIfDue();
+    } finally {
+      this.#refreshingInForeground = false;
+    }
+  }
+
+  async #refreshIfDue(): Promise<void> {
+    // `pageshow` fires on the load itself, and this is what makes a page load
+    // mint: without waiting for the restore, the load's own event finds an
+    // anonymous identity and the first request pays for the mint instead.
+    //
+    // Nothing is waiting on this, so a restore that fails is not this path's to
+    // report — and an unhandled rejection from an event handler is worse than
+    // the mint it was going to attempt.
+    const restored = await this.#init().then(
+      () => true,
+      () => false,
+    );
+    if (!restored) return;
+    // Re-checked: a ceremony can start while the restore is resolving.
+    if (this.#ceremonies > 0) return;
+    const identity = this.#identity;
+    if (identity instanceof SessionIdentity) await identity.refresh().catch(() => undefined);
+  }
+
   /** Ends the session at the canister, so nothing more can be minted from it. */
   async #revoke(key: SignIdentity, sessionChain: DelegationChain): Promise<void> {
     const minter = await SessionMinter.create({
@@ -896,7 +997,14 @@ export class AuthClient {
 
     if (!('sign' in key)) return;
 
-    this.#identity = await this.#openSession(key, chain);
+    const identity = await this.#openSession(key, chain);
+    if (this.#disposed) {
+      // Disposed while this was in flight: install nothing, and stop the refresh
+      // this identity has already scheduled for itself.
+      identity.dispose();
+      return;
+    }
+    this.#identity = identity;
 
     if (!this.#options.idleOptions?.disableIdle && !this.idleManager) {
       this.idleManager = IdleManager.create(this.#options.idleOptions);
