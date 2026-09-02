@@ -7,7 +7,8 @@ import {
 import { Principal } from '@icp-sdk/core/principal';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { SessionGoneError } from '../../src/client/app-delegation-source.ts';
-import { AuthClient } from '../../src/client/auth-client.ts';
+import { AuthClient, SessionNotHeldError } from '../../src/client/auth-client.ts';
+import { CookieStateStorage } from '../../src/client/cookie-state-storage.ts';
 import type { Credential, CredentialStorage } from '../../src/client/credential-storage.ts';
 import { IdbCredentialStorage } from '../../src/client/idb-credential-storage.ts';
 import { MemoryCredentialStorage } from '../../src/client/memory-credential-storage.ts';
@@ -118,7 +119,11 @@ function spyStorage(seed?: Credential): CredentialStorage & {
 function stateFor(chain: DelegationChain): MemoryStateStorage {
   const storage = new MemoryStateStorage();
   storage.set({
-    principal: Principal.selfAuthenticating(new Uint8Array(chain.publicKey)),
+    // The account the mint reports, not the session chain's own root: the state
+    // names who an application's canisters see.
+    principal: Principal.selfAuthenticating(
+      new Uint8Array(minted.accountKey?.getPublicKey().toDer() ?? []),
+    ),
     expiration: chain.delegations[0]!.delegation.expiration,
   });
   return storage;
@@ -807,6 +812,34 @@ describe('AuthClient signIn', () => {
     expect(identity.getPrincipal().isAnonymous()).toBe(false);
   });
 
+  it('drops a session the state no longer names, as a sibling signing in elsewhere leaves it', async () => {
+    const credentialStorage = new MemoryCredentialStorage();
+    const stateStorage = new MemoryStateStorage();
+    const first = new AuthClient({
+      credentialStorage,
+      stateStorage,
+    });
+    handleSignIn(FakeTransport.last());
+    await first.signIn();
+
+    // What a sibling subdomain signing in as someone else leaves behind: the
+    // shared record names another account, while this origin's credentials do not.
+    const other = stateStorage.get();
+    stateStorage.set({
+      principal: Principal.selfAuthenticating(new Uint8Array([9, 9, 9])),
+      expiration: other?.expiration ?? 0n,
+    });
+
+    const second = new AuthClient({
+      credentialStorage,
+      stateStorage,
+    });
+    const identity = await second.getIdentity();
+
+    expect(identity.getPrincipal().isAnonymous()).toBe(true);
+    expect(await credentialStorage.get(SLOTS.session)).toBeNull();
+  });
+
   it('does not restore a session the state does not back, and drops it', async () => {
     const credentialStorage = new IdbCredentialStorage();
     const stateStorage = new MemoryStateStorage();
@@ -1193,6 +1226,85 @@ describe('AuthClient signIn', () => {
 
     expect(identity.getDelegation()).toBe(held);
     client.dispose();
+  });
+
+  it('keeps the shared record when a mint finds the session gone, and stops claiming it', async () => {
+    const credentialStorage = new MemoryCredentialStorage();
+    // The distinction only exists for a record that reaches past this origin.
+    const stateStorage = new CookieStateStorage({ domain: 'localhost' });
+    const client = new AuthClient({
+      credentialStorage,
+      stateStorage,
+    });
+    handleSignIn(FakeTransport.last());
+    const identity = (await client.signIn()) as SessionIdentity;
+
+    // As a sibling replacing the browser's session leaves it: this origin's
+    // chain is dead, but the record that sibling just wrote is not.
+    minted.refuse = true;
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(new Date(Date.now() + 4 * 60 * 1000 + 50_000));
+    await identity.refresh();
+    vi.useRealTimers();
+    minted.refuse = false;
+
+    expect(await credentialStorage.get(SLOTS.session)).toBeNull();
+    // Retracting this would tell the sibling that did sign in that its session
+    // is gone. It stands, and this origin simply stops claiming it.
+    expect(stateStorage.get()).not.toBeNull();
+    expect(stateStorage.get()?.held).toBe(false);
+    expect(client.isAuthenticated()).toBe(false);
+    client.dispose();
+  });
+
+  it('drops the app credential too when the state names another account', async () => {
+    const credentialStorage = new MemoryCredentialStorage();
+    const stateStorage = new MemoryStateStorage();
+    const first = new AuthClient({
+      credentialStorage,
+      stateStorage,
+    });
+    handleSignIn(FakeTransport.last());
+    await first.signIn();
+
+    stateStorage.set({
+      principal: Principal.selfAuthenticating(new Uint8Array([9, 9, 9])),
+      expiration: (BigInt(Date.now()) + 3_600_000n) * 1_000_000n,
+    });
+
+    const second = new AuthClient({
+      credentialStorage,
+      stateStorage,
+    });
+    await second.getIdentity();
+
+    // Restoring reads the app slot and may mint into it, so a credential rooted
+    // at the account the state no longer names must not be left behind.
+    expect(await credentialStorage.get(SLOTS.session)).toBeNull();
+    expect(await credentialStorage.get(SLOTS.app)).toBeNull();
+  });
+
+  it('refuses to hand out an identity this origin cannot act with', async () => {
+    // What a sibling subdomain has on its first load: the shared record, and no
+    // credential of its own.
+    const stateStorage = new CookieStateStorage({ domain: 'localhost' });
+    const signedIn = new AuthClient({ stateStorage });
+    handleSignIn(FakeTransport.last());
+    await signedIn.signIn();
+    signedIn.dispose();
+
+    localStorage.clear(); // the sibling has no local record; the cookie stands
+    const sibling = new AuthClient({
+      stateStorage,
+      credentialStorage: new MemoryCredentialStorage(),
+    });
+
+    expect(stateStorage.get()).not.toBeNull();
+    expect(sibling.isAuthenticated()).toBe(false);
+    // Anonymous here would send unauthenticated calls while the record says
+    // someone is signed in.
+    await expect(sibling.getIdentity()).rejects.toThrow(SessionNotHeldError);
+    sibling.dispose();
   });
 
   it('clears the state storage on sign-out', async () => {

@@ -4,6 +4,10 @@
 
 export { type AppDelegationSource, SessionGoneError } from './app-delegation-source.js';
 export * from './auth-client.js';
+export {
+  CookieStateStorage,
+  type CookieStateStorageOptions,
+} from './cookie-state-storage.js';
 export type { Credential, CredentialStorage } from './credential-storage.js';
 export { DB_VERSION, type DBCreateOptions, IdbKeyVal } from './db.js';
 export { watchActivity, watchForeground } from './foreground-refresh.js';
