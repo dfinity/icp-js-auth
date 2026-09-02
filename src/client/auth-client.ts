@@ -18,7 +18,6 @@ import { fromBase64, toBase64 } from './base64.js';
 import type { Credential, CredentialStorage } from './credential-storage.js';
 import { watchActivity, watchForeground } from './foreground-refresh.js';
 import { IdbCredentialStorage } from './idb-credential-storage.js';
-import { IdleManager, type IdleManagerOptions } from './idle-manager.js';
 import { requestSessionDelegation } from './session-delegation.js';
 import { SessionIdentity } from './session-identity.js';
 import { SessionMinter } from './session-minter.js';
@@ -80,20 +79,6 @@ export interface AuthClientCreateOptions {
    * readable without awaiting, and a credential store does not have to be.
    */
   stateStorage?: StateStorage;
-
-  /**
-   * Idle timeout configuration.
-   *
-   * The default callback signs out and reloads, which since sessions also ends
-   * the session at the canister — so an idle timeout is a full sign-out and not
-   * merely a local one. Replace it with `onIdle`, or turn it off with
-   * `disableDefaultIdleCallback`, where that is more than an application wants.
-   *
-   * Idleness is measured across the tabs of this origin, so the timeout is
-   * reached only where none of them has been used.
-   * @default after 10 minutes with no tab of this origin used, signs out and reloads
-   */
-  idleOptions?: IdleOptions;
 
   /**
    * Disables refreshing when the page is shown or the window regains focus.
@@ -176,20 +161,6 @@ export interface AuthClientCreateOptions {
   openIdProvider?: OpenIdProvider;
 }
 
-export interface IdleOptions extends IdleManagerOptions {
-  /**
-   * Disables idle functionality entirely.
-   * @default false
-   */
-  disableIdle?: boolean;
-
-  /**
-   * Disables the default idle callback (sign-out & reload).
-   * @default false
-   */
-  disableDefaultIdleCallback?: boolean;
-}
-
 /**
  * Options for {@link AuthClient.signIn}.
  */
@@ -207,6 +178,27 @@ export interface AuthClientSignInOptions {
    * @default 8 hours
    */
   maxTimeToLive?: bigint;
+
+  /**
+   * The longest the session may outlive its use, in nanoseconds.
+   *
+   * The identity provider ends a session nothing has minted from for this long,
+   * whatever {@link maxTimeToLive} still allows. It is what makes an abandoned
+   * browser stop holding a usable sign-in, and it replaces the timer this
+   * library used to run in the page: a timer is skipped by clearing storage or
+   * by a tab that never runs it, and it saw one document, so a backgrounded tab
+   * could sign a user out of the tab beside it.
+   *
+   * A ceiling in the same way {@link maxTimeToLive} is: the canister clamps it
+   * to between 10 minutes and the session's own granted length, and applies its
+   * own default of seven days where a request names none. The floor keeps clear
+   * of the interval an active application mints at.
+   *
+   * Activity in the page counts as use, so a user reading rather than clicking
+   * still keeps the session alive.
+   * @default the identity provider's, currently 7 days
+   */
+  maxTimeToIdle?: bigint;
 
   /**
    * Where to go once the sign-in completes, ignored unless it is a same-origin
@@ -282,7 +274,6 @@ export class AuthClient {
   #urlTransport: UrlTransport | undefined;
   #options: AuthClientCreateOptions;
   #initPromise: Promise<void> | null = null;
-  idleManager: IdleManager | undefined;
 
   constructor(options: AuthClientCreateOptions = {}) {
     this.#options = options;
@@ -349,8 +340,6 @@ export class AuthClient {
       // the producer without persisting anything.
       derivationOrigin: this.memoize(() => options.derivationOrigin?.toString()),
     });
-
-    this.#registerDefaultIdleCallback();
 
     // Eagerly start restoring a previous session from storage.
     // The result is awaited in getIdentity() before returning.
@@ -450,6 +439,8 @@ export class AuthClient {
    *
    * @param options - Sign-in options.
    * @param options.maxTimeToLive - Maximum lifetime of the delegation in nanoseconds.
+   * @param options.maxTimeToIdle - How long the session may go unminted before the
+   *   identity provider ends it, in nanoseconds.
    * @param options.targets - Restrict the delegation to specific canisters.
    * @returns The authenticated identity.
    * @throws When authentication fails.
@@ -532,6 +523,9 @@ export class AuthClient {
     const sessionChain = await requestSessionDelegation(this.#signer, {
       sessionPublicKey: key.getPublicKey().toDer(),
       maxTimeToLive,
+      // Passed only where the caller asked, so the provider's own default is what
+      // applies otherwise rather than a number this library invented.
+      maxTimeToIdle: options?.maxTimeToIdle,
       derivationOrigin: this.#options.derivationOrigin?.toString(),
     });
 
@@ -541,12 +535,6 @@ export class AuthClient {
     // leaving it to the first request.
     if (!keyMatchesChain(key, sessionChain)) {
       throw new Error('The session chain does not delegate to the key it was requested for');
-    }
-
-    const idleOptions = this.#options?.idleOptions;
-    if (!this.idleManager && !idleOptions?.disableIdle) {
-      this.idleManager = IdleManager.create(idleOptions);
-      this.#registerDefaultIdleCallback();
     }
 
     // Mint inside the ceremony the user is already waiting through, so the first
@@ -1005,11 +993,6 @@ export class AuthClient {
       return;
     }
     this.#identity = identity;
-
-    if (!this.#options.idleOptions?.disableIdle && !this.idleManager) {
-      this.idleManager = IdleManager.create(this.#options.idleOptions);
-      this.#registerDefaultIdleCallback();
-    }
   }
 
   /**
@@ -1099,20 +1082,6 @@ export class AuthClient {
     ]);
     const failed = outcomes.find((outcome) => outcome.status === 'rejected');
     if (failed !== undefined) throw failed.reason;
-  }
-
-  #registerDefaultIdleCallback() {
-    const idleOptions = this.#options?.idleOptions;
-    if (!idleOptions?.onIdle && !idleOptions?.disableDefaultIdleCallback) {
-      // Invoked without being awaited, so handle the promise here. Reload only
-      // after teardown resolves, and only if it succeeded — a reload before or
-      // without teardown lets #hydrate restore the still-valid session.
-      this.idleManager?.registerCallback(() => {
-        void this.signOut()
-          .then(() => location.reload())
-          .catch(() => {});
-      });
-    }
   }
 }
 
