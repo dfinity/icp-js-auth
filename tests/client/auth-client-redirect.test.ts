@@ -11,6 +11,7 @@ import { AuthClient } from '../../src/client/auth-client.ts';
 import type { CredentialStorage } from '../../src/client/credential-storage.ts';
 import { LocalCredentialStorage } from '../../src/client/local-credential-storage.ts';
 import { MemoryCredentialStorage } from '../../src/client/memory-credential-storage.ts';
+import { SharedMemoryCredentialStorage } from '../../src/client/shared-memory-credential-storage.ts';
 import { FakeUrlTransport } from './fake-url-transport.ts';
 
 const II_CANISTER = Principal.fromText('rdmx6-jaaaa-aaaaa-aaadq-cai');
@@ -182,6 +183,18 @@ describe('AuthClient redirect (UrlTransport) sign-in', () => {
 
     await expect(client.signIn()).rejects.toThrow(/survives the navigation/);
     expect(FakeUrlTransport.last()?.requests ?? []).toHaveLength(0);
+  });
+
+  it('refuses a redirect with a shared store that keeps nothing', async () => {
+    const storage = new SharedMemoryCredentialStorage();
+    const client = new AuthClient({ transport: 'redirect', credentialStorage: storage });
+
+    // The store other tabs can read, and the concrete case the rule turns away:
+    // a peer answering only works while a peer is open, and the tab running this
+    // flow is as often as not the only one.
+    await expect(client.signIn()).rejects.toThrow(/survives the navigation/);
+    expect(FakeUrlTransport.last()?.requests ?? []).toHaveLength(0);
+    storage.close();
   });
 
   it('routes sign-in through the URL transport and cleans up the pending key', async () => {
