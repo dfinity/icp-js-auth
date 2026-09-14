@@ -166,10 +166,6 @@ export class MemoryStateStorage implements StateStorage {
   }
 }
 
-// Distinct from the slot the delegation itself is stored under: what is written
-// here is two public fields about a sign-in, not the credential behind it.
-export const STATE_KEY = 'ic-session-state';
-
 /**
  * State in `localStorage`, so every tab of an origin agrees on it and it
  * survives a reload.
