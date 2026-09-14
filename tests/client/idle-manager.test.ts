@@ -1,4 +1,4 @@
-import { afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { IdleManager } from '../../src/client/idle-manager.ts';
 
 const MILLISECONDS_PER_SECOND = 1000;
@@ -11,6 +11,12 @@ beforeAll(() => {
     writable: true,
     value: { assign: vi.fn(), reload: vi.fn() },
   });
+});
+
+beforeEach(() => {
+  // The activity stamp is shared by every tab of the origin, so it is also shared
+  // by every test in this file.
+  localStorage.clear();
 });
 
 afterEach(() => {
@@ -164,5 +170,128 @@ describe('IdleManager', () => {
     vi.advanceTimersByTime(10 * MILLISECONDS_PER_MINUTE);
     expect(cb1).toHaveBeenCalled();
     expect(cb2).toHaveBeenCalled();
+  });
+
+  it('does not sign out while another tab of the origin is being used', () => {
+    const onIdle = vi.fn();
+    const manager = IdleManager.create({ onIdle });
+
+    // What a backgrounded tab looks like: no events reach it, so its own timer
+    // says idle — while a sibling tab keeps stamping because the user is there.
+    for (let minute = 0; minute < 20; minute++) {
+      localStorage.setItem('ic-last-active', String(Date.now()));
+      vi.advanceTimersByTime(MILLISECONDS_PER_MINUTE);
+    }
+
+    // Signing out here would end the session at the canister and take the tab the
+    // user is actually working in down with it.
+    expect(onIdle).not.toHaveBeenCalled();
+    manager.exit();
+  });
+
+  it('signs out once no tab of the origin has been used for the window', () => {
+    const onIdle = vi.fn();
+    IdleManager.create({ onIdle });
+
+    localStorage.setItem('ic-last-active', String(Date.now()));
+    vi.advanceTimersByTime(5 * MILLISECONDS_PER_MINUTE);
+    expect(onIdle).not.toHaveBeenCalled();
+
+    // Nothing stamps from here on, so the window really does pass.
+    vi.advanceTimersByTime(10 * MILLISECONDS_PER_MINUTE);
+    expect(onIdle).toHaveBeenCalledTimes(1);
+  });
+
+  it('measures the window from the clock, not from when the timer happened to fire', () => {
+    const onIdle = vi.fn();
+    IdleManager.create({ onIdle });
+
+    // A frozen tab: the browser runs no timers, then fires one on resume. Here
+    // the stamp is recent, so the fire is early however late it arrived.
+    localStorage.setItem('ic-last-active', String(Date.now() + 9 * MILLISECONDS_PER_MINUTE));
+    vi.advanceTimersByTime(10 * MILLISECONDS_PER_MINUTE);
+
+    expect(onIdle).not.toHaveBeenCalled();
+
+    // And it re-arms for the remainder rather than polling: one more minute of
+    // quiet is what is left of the window.
+    vi.advanceTimersByTime(10 * MILLISECONDS_PER_MINUTE);
+    expect(onIdle).toHaveBeenCalledTimes(1);
+  });
+
+  it('counts coming back to the app as activity', () => {
+    const onIdle = vi.fn();
+    const manager = IdleManager.create({ onIdle });
+
+    vi.advanceTimersByTime(9 * MILLISECONDS_PER_MINUTE);
+    // On a phone this is often the only signal there is: switching apps and
+    // locking the screen produce no press events at all.
+    document.dispatchEvent(new Event('visibilitychange'));
+    vi.advanceTimersByTime(9 * MILLISECONDS_PER_MINUTE);
+
+    expect(onIdle).not.toHaveBeenCalled();
+    manager.exit();
+  });
+
+  it('delays its callback on a pointer press, which is what a phone sends', () => {
+    const onIdle = vi.fn();
+    const manager = IdleManager.create({ onIdle });
+
+    vi.advanceTimersByTime(9 * MILLISECONDS_PER_MINUTE);
+    document.dispatchEvent(new Event('pointerdown'));
+    vi.advanceTimersByTime(9 * MILLISECONDS_PER_MINUTE);
+
+    expect(onIdle).not.toHaveBeenCalled();
+    manager.exit();
+  });
+
+  it('works alone where there is no store to share through', () => {
+    const onIdle = vi.fn();
+    const getItem = vi.spyOn(Storage.prototype, 'getItem').mockImplementation(() => {
+      throw new Error('storage unavailable');
+    });
+    const setItem = vi.spyOn(Storage.prototype, 'setItem').mockImplementation(() => {
+      throw new Error('storage unavailable');
+    });
+
+    IdleManager.create({ onIdle });
+    vi.advanceTimersByTime(10 * MILLISECONDS_PER_MINUTE);
+
+    // The cross-tab part is what is lost, not the watchdog: idle detection is a
+    // convenience and never a security boundary.
+    expect(onIdle).toHaveBeenCalledTimes(1);
+    getItem.mockRestore();
+    setItem.mockRestore();
+  });
+
+  it('announces its own activity, so the other tabs postpone their deadline', () => {
+    const manager = IdleManager.create();
+    const atStart = Number(localStorage.getItem('ic-last-active'));
+    expect(atStart).toBeGreaterThan(0);
+
+    vi.advanceTimersByTime(6 * MILLISECONDS_PER_SECOND);
+    document.dispatchEvent(new Event('keydown'));
+
+    // Without this write, a tab being used tells the others nothing and each one
+    // still signs out on its own timer.
+    expect(Number(localStorage.getItem('ic-last-active'))).toBeGreaterThan(atStart);
+    manager.exit();
+  });
+
+  it('writes at most once per resolution however hard the user works', () => {
+    const manager = IdleManager.create();
+    const setItem = vi.spyOn(Storage.prototype, 'setItem');
+
+    // A hundred events inside one resolution window: mousemove alone can produce
+    // that in a second, and a write per event would be absurd.
+    for (let i = 0; i < 100; i++) document.dispatchEvent(new Event('mousemove'));
+    expect(setItem).not.toHaveBeenCalled();
+
+    vi.advanceTimersByTime(6 * MILLISECONDS_PER_SECOND);
+    document.dispatchEvent(new Event('mousemove'));
+    expect(setItem).toHaveBeenCalledTimes(1);
+
+    setItem.mockRestore();
+    manager.exit();
   });
 });
