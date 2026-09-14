@@ -176,6 +176,42 @@ describe('CookieStateStorage', () => {
     expect(listener).toHaveBeenCalledTimes(2);
   });
 
+  it('tells a subscriber when this origin drops its claim, cookie untouched', () => {
+    const storage = new CookieStateStorage({ domain: DOMAIN });
+    const listener = vi.fn();
+    storage.subscribe(KEY, listener);
+
+    storage.set(KEY, state());
+    expect(listener).toHaveBeenCalledTimes(1);
+    expect(storage.get(KEY)?.held).toBe(true);
+
+    // `discard` leaves the cookie standing on purpose — a sibling may have
+    // written it a moment ago — so the only thing that changed is `held`. That
+    // is still a change to the answer this origin gives, and the case the store
+    // exists for: it is how a sibling subdomain learns it has to acquire its own
+    // credential.
+    storage.discard(KEY);
+
+    expect(storage.get(KEY)?.held).toBe(false);
+    expect(listener).toHaveBeenCalledTimes(2);
+  });
+
+  it('hears another tab of this origin drop its claim', () => {
+    const storage = new CookieStateStorage({ domain: DOMAIN });
+    storage.set(KEY, state());
+    const listener = vi.fn();
+    storage.subscribe(KEY, listener);
+
+    // What the other tab's `discard` does to the medium this one can see: the
+    // cookie is shared and unchanged, and the per-origin half is a
+    // `localStorage` key, which reaches here as a `storage` event.
+    localStorage.removeItem(KEY);
+    globalThis.dispatchEvent(new StorageEvent('storage', { key: KEY }));
+
+    expect(storage.get(KEY)?.held).toBe(false);
+    expect(listener).toHaveBeenCalledTimes(1);
+  });
+
   it('notices a change made by a sibling, which raises no event of its own', () => {
     const storage = new CookieStateStorage({ domain: DOMAIN });
     const listener = vi.fn();

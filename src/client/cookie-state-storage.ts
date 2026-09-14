@@ -166,9 +166,14 @@ export class CookieStateStorage implements StateStorage {
     // One logical change can arrive from several sources at once, so each is
     // routed through a check that fires only when what is stored actually
     // changed since the last one.
-    let last = readCookie(key);
+    //
+    // Compared on what `get` answers and not on the cookie alone. `held` is the
+    // per-origin half, and `discard` changes only that — leaving the cookie for
+    // the siblings is the whole point of it — so watching the cookie would make
+    // this origin losing its claim the one change nothing reported.
+    let last = stateOf(this.get(key));
     const check = (): void => {
-      const now = readCookie(key);
+      const now = stateOf(this.get(key));
       if (now !== last) {
         last = now;
         listener();
@@ -181,6 +186,14 @@ export class CookieStateStorage implements StateStorage {
     const onVisible = (): void => {
       if (document.visibilityState === 'visible') check();
     };
+    // The local half is in `localStorage`, which raises `storage` in every tab
+    // of this origin but the one that wrote. That is how a sibling tab hears
+    // that this origin dropped its claim, which no cookie event can carry.
+    const onStorage = (event: StorageEvent): void => {
+      // `key` is null when a tab cleared the whole store, which changes this too.
+      if (event.key === key || event.key === null) check();
+    };
+    globalThis.addEventListener('storage', onStorage);
     document.addEventListener('visibilitychange', onVisible);
     globalThis.addEventListener('pageshow', check);
     globalThis.addEventListener('focus', check);
@@ -190,6 +203,7 @@ export class CookieStateStorage implements StateStorage {
 
     return () => {
       listeners.delete(check);
+      globalThis.removeEventListener('storage', onStorage);
       document.removeEventListener('visibilitychange', onVisible);
       globalThis.removeEventListener('pageshow', check);
       globalThis.removeEventListener('focus', check);
@@ -201,6 +215,15 @@ export class CookieStateStorage implements StateStorage {
     for (const check of [...(this.#subscribers.get(key) ?? [])]) check();
   }
 }
+
+/**
+ * What {@link CookieStateStorage.get} answers, as one comparable string.
+ *
+ * Both halves in it: the cookie every sibling reads, and the `held` this origin
+ * derives, because a change in either is a change to the answer.
+ */
+const stateOf = (state: SessionState | null): string =>
+  state === null ? '' : `${state.principal.toText()}|${state.expiration}|${state.held}`;
 
 /** Reads a cookie value by name, or `null` if absent. */
 function readCookie(name: string): string | null {
