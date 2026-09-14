@@ -223,7 +223,7 @@ export class SessionIdentity extends DelegationIdentity {
   readonly #held: { current?: Held };
 
   #inFlight: Promise<Held> | undefined;
-  #currentSignedARequest = false;
+  #currentWasUsed = false;
   #scheduled: ReturnType<typeof setTimeout> | undefined;
   #reportedGone = false;
 
@@ -304,7 +304,7 @@ export class SessionIdentity extends DelegationIdentity {
 
   override async transformRequest(request: HttpAgentRequest): Promise<unknown> {
     const credential = await this.#usable();
-    this.#currentSignedARequest = true;
+    this.#currentWasUsed = true;
     return DelegationIdentity.fromDelegation(
       credential.identity,
       credential.chain,
@@ -312,17 +312,29 @@ export class SessionIdentity extends DelegationIdentity {
   }
 
   /**
-   * Mint now if one is due, and stay silent if it fails.
+   * Says somebody is here, and mints now if one is due.
    *
-   * For a caller that knows the moment is a good one, such as a page load or a
-   * tab coming back to the foreground. The caller says when; this still decides
-   * whether, so a credential with plenty of life left costs nothing.
+   * For a caller that knows the moment is a good one, such as a page load, a tab
+   * coming back to the foreground, or a pointer moving. The caller says when;
+   * this still decides whether, so a credential with plenty of life left costs
+   * no call.
+   *
+   * It is never a no-op, though: being here counts as use, exactly as signing a
+   * request does, so the credential held afterwards has earned the next
+   * rotation. Without that a session bounded by how long it goes unminted would
+   * end under a user who is reading rather than clicking — the delegation would
+   * only ever be replaced in the last {@link PRE_MINT_THRESHOLD_MS} of its life,
+   * and only if a pointer happened to move inside that window.
    */
   async refresh(): Promise<void> {
+    await this.#refreshIfDue();
+    // After, not before: both branches below can replace what is held, and
+    // adopting resets this.
+    this.#currentWasUsed = true;
+  }
+
+  async #refreshIfDue(): Promise<void> {
     const current = this.#held.current;
-    // Held and healthy: nothing to do, and re-adopting it would reset the flag
-    // that says it signed a request — which is what the scheduled refresh checks
-    // before firing, so glancing at a tab would cancel its own rotation.
     if (current && this.#msLeft(current.chain) > PRE_MINT_THRESHOLD_MS) return;
 
     if (current === undefined) {
@@ -430,7 +442,7 @@ export class SessionIdentity extends DelegationIdentity {
 
   #adopt(credential: Held): void {
     this.#held.current = credential;
-    this.#currentSignedARequest = false;
+    this.#currentWasUsed = false;
     this.#schedule(credential.chain);
   }
 
@@ -440,10 +452,11 @@ export class SessionIdentity extends DelegationIdentity {
     if (delay <= 0) return;
 
     this.#scheduled = setTimeout(() => {
-      // Only refresh a credential something used. Each one earns the next refresh
-      // and no more, so an application that goes quiet lets its delegation lapse
-      // rather than refreshing for as long as a tab is open.
-      if (this.#currentSignedARequest) void this.#mint().catch(() => undefined);
+      // Only refresh a credential something used — signing a request, or a
+      // caller saying somebody is here. Each one earns the next refresh and no
+      // more, so an application nobody is using lets its delegation lapse rather
+      // than refreshing for as long as a tab is open.
+      if (this.#currentWasUsed) void this.#mint().catch(() => undefined);
     }, delay);
 
     // Never hold a Node process open for a refresh nobody is waiting on.

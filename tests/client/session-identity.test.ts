@@ -201,6 +201,24 @@ describe('SessionIdentity', () => {
     expect(mint).toHaveBeenCalledTimes(2);
   });
 
+  it('rotates a delegation activity kept alive, though nothing signed with it', async () => {
+    const { mint, identity, request } = harness();
+    await request();
+    expect(mint).toHaveBeenCalledTimes(1);
+
+    // The rotation replaces it with one nothing has signed with. A user reading
+    // the page rather than clicking is exactly that: the only sign anybody is
+    // here is `refresh()`, and it has to be enough, or the session ends under a
+    // user who is still there.
+    await vi.advanceTimersByTimeAsync(TTL - 15_000);
+    expect(mint).toHaveBeenCalledTimes(2);
+
+    await identity.refresh();
+    await vi.advanceTimersByTimeAsync(TTL - 15_000);
+
+    expect(mint).toHaveBeenCalledTimes(3);
+  });
+
   it('refresh() does nothing when the delegation is healthy', async () => {
     const { mint, identity, request } = harness();
     await request();
@@ -208,7 +226,7 @@ describe('SessionIdentity', () => {
     expect(mint).toHaveBeenCalledTimes(1);
   });
 
-  it('reports a gone session once, and only for NoMatchingSession', async () => {
+  it('reports a gone session once, and only for NoSuchSession', async () => {
     const onSessionGone = vi.fn();
     const { mint, request } = harness({ onSessionGone });
     mint.mockRejectedValue(new SessionGoneError());
