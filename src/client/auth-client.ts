@@ -86,23 +86,27 @@ export interface AuthClientCreateOptions {
    * the session at the canister — so an idle timeout is a full sign-out and not
    * merely a local one. Replace it with `onIdle`, or turn it off with
    * `disableDefaultIdleCallback`, where that is more than an application wants.
-   *
-   * Idleness is measured across the tabs of this origin, so the timeout is
-   * reached only where none of them has been used.
-   * @default after 10 minutes with no tab of this origin used, signs out and reloads
+   * @default after 10 minutes, signs out and reloads
    */
   idleOptions?: IdleOptions;
 
   /**
-   * Disables refreshing when the page is shown or the window regains focus.
+   * Stops this client from watching the browser for signs that somebody is here.
    *
-   * A backgrounded tab has its timers throttled, so its delegation can lapse
-   * while nobody is looking and the first click after coming back waits for a
-   * mint. Returning to the tab is early enough to hide that. Turn it off to make
-   * requests the only thing that ever triggers one.
+   * All of them together, because they make one claim: the page being shown, the
+   * window regaining focus, a pointer or a key. A backgrounded tab has its timers
+   * throttled, so its delegation can lapse while nobody is looking and the first
+   * click after coming back waits for a mint; returning to the tab is early
+   * enough to hide that.
+   *
+   * Nothing is hooked where there is no DOM, so a client outside a browser needs
+   * no option. Setting it makes requests the only thing that says this session is
+   * in use — including to the identity provider, which ends a session nothing
+   * has minted from for long enough. An application whose users read more than
+   * they click should leave it alone.
    * @default false
    */
-  disableForegroundRefresh?: boolean;
+  disableBrowserActivity?: boolean;
 
   /**
    * Where the identity provider is, as two values rather than one.
@@ -322,7 +326,7 @@ export class AuthClient {
     const identityProviderUrl = new URL(
       options.identityProvider?.authorizeUrl?.toString() || IDENTITY_PROVIDER_DEFAULT,
     );
-    if (!options.disableForegroundRefresh) {
+    if (!options.disableBrowserActivity) {
       // The identity decides whether a mint is due; these only say the moment is
       // a good one. Nothing is hooked where there is no DOM.
       //
@@ -339,7 +343,7 @@ export class AuthClient {
     // good one: the record can be replaced under this client — by a peer client
     // on this page sharing its stores, or by another tab — and nothing about a
     // restore already done reflects that. Hooked whatever
-    // `disableForegroundRefresh` says, because it is not a refresh: a client
+    // `disableBrowserActivity` says, because it is not a refresh: a client
     // answering for a sign-in the record no longer names is wrong rather than
     // stale.
     this.#unwatchState = this.#stateStorage.subscribe(this.#slots.state, () => {
@@ -444,11 +448,6 @@ export class AuthClient {
   }
 
   /**
-   * Releases what this client hooked: the foreground listeners, and the refresh
-   * the identity has scheduled. Call it when discarding a client, so nothing it
-   * registered outlives it.
-   */
-  /**
    * Watches who is signed in here, and returns a function that stops watching.
    *
    * `getStatus()` and the predicates beside it are snapshots, so an application
@@ -471,6 +470,11 @@ export class AuthClient {
     return this.#stateStorage.subscribe(this.#slots.state, listener);
   }
 
+  /**
+   * Releases what this client hooked: the browser listeners, the state
+   * subscription, and the refresh the identity has scheduled. Call it when
+   * discarding a client, so nothing it registered outlives it.
+   */
   dispose(): void {
     // Recorded, because the constructor starts the restore without awaiting it:
     // a client disposed while one is in flight would otherwise have an identity
@@ -1068,9 +1072,11 @@ export class AuthClient {
   }
 
   async #refreshIfDue(): Promise<void> {
-    // `pageshow` fires on the load itself, and this is what makes a page load
-    // mint: without waiting for the restore, the load's own event finds an
-    // anonymous identity and the first request pays for the mint instead.
+    // Waited for rather than raced: a `pageshow` or a pointer arriving before the
+    // restore has installed an identity would find an anonymous one and do
+    // nothing, and the moment would be spent. The restore mints on its own where
+    // a load needs one, so what this adds is the page coming back from the
+    // back-forward cache, and every later sign that somebody is here.
     //
     // Nothing is waiting on this, so a restore that fails is not this path's to
     // report — and an unhandled rejection from an event handler is worse than

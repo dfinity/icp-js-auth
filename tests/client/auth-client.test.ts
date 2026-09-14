@@ -1714,7 +1714,7 @@ describe('AuthClient signIn', () => {
   it('hooks nothing when foreground refresh is turned off', async () => {
     const client = track(
       new AuthClient({
-        disableForegroundRefresh: true,
+        disableBrowserActivity: true,
         credentialStorage: new MemoryCredentialStorage(),
       }),
     );
