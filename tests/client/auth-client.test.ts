@@ -8,7 +8,8 @@ import { Principal } from '@icp-sdk/core/principal';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { SessionGoneError } from '../../src/client/app-delegation-source.ts';
 import { stealLock } from '../../src/client/app-lock.ts';
-import { AuthClient, SupersededError } from '../../src/client/auth-client.ts';
+import { AuthClient, SessionNotHeldError, SupersededError } from '../../src/client/auth-client.ts';
+import { CookieStateStorage } from '../../src/client/cookie-state-storage.ts';
 import type { Credential, CredentialStorage } from '../../src/client/credential-storage.ts';
 import { IdbCredentialStorage } from '../../src/client/idb-credential-storage.ts';
 import { MemoryCredentialStorage } from '../../src/client/memory-credential-storage.ts';
@@ -1000,6 +1001,34 @@ describe('AuthClient signIn', () => {
     expect(identity.getPrincipal().isAnonymous()).toBe(false);
   });
 
+  it('drops a session the state no longer names, as a sibling signing in elsewhere leaves it', async () => {
+    const credentialStorage = new MemoryCredentialStorage();
+    const stateStorage = new MemoryStateStorage();
+    const first = new AuthClient({
+      credentialStorage,
+      stateStorage,
+    });
+    handleSignIn(FakeTransport.last());
+    await first.signIn();
+
+    // What a sibling subdomain signing in as someone else leaves behind: the
+    // shared record names another account, while this origin's credentials do not.
+    const other = stateStorage.get(SLOTS.state);
+    stateStorage.set(SLOTS.state, {
+      principal: Principal.selfAuthenticating(new Uint8Array([9, 9, 9])),
+      expiration: other?.expiration ?? 0n,
+    });
+
+    const second = new AuthClient({
+      credentialStorage,
+      stateStorage,
+    });
+    const identity = await second.getIdentity();
+
+    expect(identity.getPrincipal().isAnonymous()).toBe(true);
+    expect(await credentialStorage.get(SLOTS.session)).toBeNull();
+  });
+
   it('does not restore a session the state does not back, and drops it', async () => {
     const credentialStorage = new IdbCredentialStorage();
     const stateStorage = new MemoryStateStorage();
@@ -1728,6 +1757,38 @@ describe('AuthClient signIn', () => {
     expect(identity.getPrincipal().isAnonymous()).toBe(true);
   });
 
+  // The subscription is what normally keeps this client level with its record,
+  // and a store that cannot report a change leaves it behind. Handing back an
+  // anonymous identity then is the answer that sends unauthenticated calls out
+  // under a signed-in banner, so the backstop names the problem instead.
+  it('refuses an identity rather than an anonymous one when a record it cannot act on stands', async () => {
+    const principal = Principal.selfAuthenticating(new Uint8Array([7, 7, 7]));
+    const stateStorage = {
+      // `held` is true, as it is for every record a same-origin store keeps.
+      get: () => ({
+        principal,
+        expiration: (BigInt(Date.now()) + 3_600_000n) * 1_000_000n,
+        held: true,
+      }),
+      set: vi.fn(),
+      remove: vi.fn(),
+      discard: vi.fn(),
+      // A store that never reports a change, which is what leaves this client
+      // holding nothing while the record says someone is signed in.
+      subscribe: () => () => {},
+    };
+    const client = new AuthClient({
+      stateStorage,
+      credentialStorage: new MemoryCredentialStorage(),
+    });
+
+    await expect(client.getIdentity()).rejects.toBeInstanceOf(SessionNotHeldError);
+    // The two answers still agree about there being a sign-in; what the client
+    // refuses to do is act on one it has nothing for.
+    expect(client.isAuthenticated()).toBe(true);
+    client.dispose();
+  });
+
   it('stays silent when the restore itself fails', async () => {
     const credentialStorage = spyStorage();
     credentialStorage.get = vi.fn().mockRejectedValue(new Error('storage unavailable'));
@@ -1774,6 +1835,85 @@ describe('AuthClient signIn', () => {
 
     expect(identity.getDelegation()).toBe(held);
     client.dispose();
+  });
+
+  it('keeps the shared record when a mint finds the session gone, and stops claiming it', async () => {
+    const credentialStorage = new MemoryCredentialStorage();
+    // The distinction only exists for a record that reaches past this origin.
+    const stateStorage = new CookieStateStorage({ domain: 'localhost' });
+    const client = new AuthClient({
+      credentialStorage,
+      stateStorage,
+    });
+    handleSignIn(FakeTransport.last());
+    const identity = (await client.signIn()) as SessionIdentity;
+
+    // As a sibling replacing the browser's session leaves it: this origin's
+    // chain is dead, but the record that sibling just wrote is not.
+    minted.refuse = true;
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(new Date(Date.now() + 4 * 60 * 1000 + 50_000));
+    await identity.refresh();
+    vi.useRealTimers();
+    minted.refuse = false;
+
+    expect(await credentialStorage.get(SLOTS.session)).toBeNull();
+    // Retracting this would tell the sibling that did sign in that its session
+    // is gone. It stands, and this origin simply stops claiming it.
+    expect(stateStorage.get(SLOTS.state)).not.toBeNull();
+    expect(stateStorage.get(SLOTS.state)?.held).toBe(false);
+    expect(client.isAuthenticated()).toBe(false);
+    client.dispose();
+  });
+
+  it('drops the app credential too when the state names another account', async () => {
+    const credentialStorage = new MemoryCredentialStorage();
+    const stateStorage = new MemoryStateStorage();
+    const first = new AuthClient({
+      credentialStorage,
+      stateStorage,
+    });
+    handleSignIn(FakeTransport.last());
+    await first.signIn();
+
+    stateStorage.set(SLOTS.state, {
+      principal: Principal.selfAuthenticating(new Uint8Array([9, 9, 9])),
+      expiration: (BigInt(Date.now()) + 3_600_000n) * 1_000_000n,
+    });
+
+    const second = new AuthClient({
+      credentialStorage,
+      stateStorage,
+    });
+    await second.getIdentity();
+
+    // Restoring reads the app slot and may mint into it, so a credential rooted
+    // at the account the state no longer names must not be left behind.
+    expect(await credentialStorage.get(SLOTS.session)).toBeNull();
+    expect(await credentialStorage.get(SLOTS.app)).toBeNull();
+  });
+
+  it('refuses to hand out an identity this origin cannot act with', async () => {
+    // What a sibling subdomain has on its first load: the shared record, and no
+    // credential of its own.
+    const stateStorage = new CookieStateStorage({ domain: 'localhost' });
+    const signedIn = new AuthClient({ stateStorage });
+    handleSignIn(FakeTransport.last());
+    await signedIn.signIn();
+    signedIn.dispose();
+
+    localStorage.clear(); // the sibling has no local record; the cookie stands
+    const sibling = new AuthClient({
+      stateStorage,
+      credentialStorage: new MemoryCredentialStorage(),
+    });
+
+    expect(stateStorage.get(SLOTS.state)).not.toBeNull();
+    expect(sibling.isAuthenticated()).toBe(false);
+    // Anonymous here would send unauthenticated calls while the record says
+    // someone is signed in.
+    await expect(sibling.getIdentity()).rejects.toThrow(SessionNotHeldError);
+    sibling.dispose();
   });
 
   it('clears the state storage on sign-out', async () => {

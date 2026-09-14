@@ -228,6 +228,23 @@ export type SessionStatus =
   | { state: 'signed-out' };
 
 /**
+ * Thrown when a sign-in exists within the state store's reach but this origin
+ * holds no credential for it.
+ *
+ * A sibling subdomain reads the shared record on its first load and is in exactly
+ * this position: someone is signed in, and it has nothing to act with until it
+ * acquires its own. Catching this is where a silent re-issue belongs.
+ */
+export class SessionNotHeldError extends Error {
+  constructor(
+    message = 'A sign-in exists for this domain, but this origin holds no credential for it',
+  ) {
+    super(message);
+    this.name = 'SessionNotHeldError';
+  }
+}
+
+/**
  * Manages authentication and identity for Internet Computer web apps.
  *
  * `getStatus()`, `isAuthenticated()` and `getPrincipal()` are synchronous, so a
@@ -273,6 +290,8 @@ export class AuthClient {
   // What `getStatus` answers with, replaced only when the record changes.
   #status: SessionStatus;
   readonly #listeners = new Set<() => void>();
+  // Set while a restore is running, so its own writes are not news.
+  #restoring = false;
   #stateStorage: StateStorage;
   #signer: Signer;
   // Set only in redirect mode, so the redirect-specific paths (nonce/key
@@ -339,10 +358,15 @@ export class AuthClient {
       for (const listener of [...this.#listeners]) listener();
 
       // Only a change this client did not cause. A ceremony writes this record
-      // itself and installs the identity that goes with it, and a same-tab write
-      // announces itself — so reacting to our own would re-hydrate mid-ceremony,
-      // when the app slot still holds the previous account's credential.
-      if (this.#interactions > 0 || this.#disposed) return;
+      // itself and installs the identity that goes with it, and a restore writes
+      // it too when what it found turns out not to be usable — reacting to
+      // either would re-hydrate mid-ceremony, when the app slot still holds the
+      // previous account's credential. The same reason the foreground refresh
+      // stands down for a ceremony.
+      //
+      // What this gives up is a peer's change arriving during our own restore,
+      // which the next change reports.
+      if (this.#interactions > 0 || this.#restoring || this.#disposed) return;
       this.#restoreAgain();
     });
     if (options.openIdProvider) {
@@ -386,6 +410,25 @@ export class AuthClient {
    */
   async getIdentity(): Promise<Identity> {
     await this.#init();
+
+    // A record exists and this client holds nothing to act with. Handing back an
+    // anonymous identity here is the dangerous answer: calls would go out
+    // unauthenticated while `isAuthenticated()` and the record both say someone
+    // is signed in. Failing by name is what lets a caller acquire one.
+    //
+    // Any record, not only one this origin does not hold. A sibling subdomain
+    // arriving without a credential is the case this was written for, and it is
+    // not the only way to get here: a store that cannot report a change — or
+    // reports it wrongly — leaves this client on an answer the record has moved
+    // past, and `held` is `true` for every record a same-origin store keeps, so
+    // asking about it would have let exactly that through.
+    //
+    // A disposed client is exempt: it holds nothing because it was told to stop,
+    // which is not the same as being unable to act on a sign-in that exists.
+    const state = this.#stateStorage.get(this.#slots.state);
+    if (state !== null && !this.#disposed && this.#identity instanceof AnonymousIdentity) {
+      throw new SessionNotHeldError();
+    }
     return this.#identity;
   }
 
@@ -1226,7 +1269,7 @@ export class AuthClient {
       .catch(() => undefined)
       .then(() => {
         this.#restoreQueued = false;
-        return this.#hydrate();
+        return this.#restore();
       })
       .catch((error: unknown) => {
         this.#restoreQueued = false;
@@ -1249,7 +1292,7 @@ export class AuthClient {
   // life of the page rejecting with an error nothing can retry past.
   #init(): Promise<void> {
     if (!this.#initPromise) {
-      const promise = this.#hydrate().catch((error: unknown) => {
+      const promise = this.#restore().catch((error: unknown) => {
         if (this.#initPromise === promise) {
           this.#initPromise = null;
         }
@@ -1258,6 +1301,17 @@ export class AuthClient {
       this.#initPromise = promise;
     }
     return this.#initPromise;
+  }
+
+  // Marks a restore as running, so what it writes does not come back as a
+  // record that changed under this client.
+  async #restore(): Promise<void> {
+    this.#restoring = true;
+    try {
+      await this.#hydrate();
+    } finally {
+      this.#restoring = false;
+    }
   }
 
   // Attempts to restore a previous session (key + delegation chain) from
@@ -1309,6 +1363,21 @@ export class AuthClient {
       // Disposed while this was in flight: install nothing, and stop the refresh
       // this identity has already scheduled for itself.
       identity.dispose();
+      return;
+    }
+
+    // The state decides who is signed in here, and a sibling subdomain can have
+    // changed it while this origin was away. Credentials rooted at an account the
+    // state no longer names belong to a sign-in that has ended, so they go rather
+    // than being restored — the app credential with them, since `#openSession`
+    // may have minted one for an account the state no longer names.
+    const state = this.#stateStorage.get(this.#slots.state);
+    if (state === null || state.principal.toText() !== identity.getPrincipal().toText()) {
+      // Both of them: the one just opened, which was never installed, and
+      // whatever this client was still answering with.
+      identity.dispose();
+      this.#installIdentity(new AnonymousIdentity());
+      await this.#dropSession();
       return;
     }
     this.#installIdentity(identity);
