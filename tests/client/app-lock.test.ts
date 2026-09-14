@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { stealMintLock, withMintLock } from '../../src/client/app-lock.ts';
+import { stealLock, stealMintLock, withMintLock } from '../../src/client/app-lock.ts';
 
 /**
  * jsdom has no Web Locks, so stand one in: a queue keyed by name, plus stealing.
@@ -26,7 +26,22 @@ function stubLocks(): void {
       }
       holders.set(name, []);
       queue.delete(name);
-      return run();
+      // A steal becomes the holder in its turn, so a later steal has something
+      // to take — which is how the platform behaves, and what a lock held across
+      // a span rather than a call depends on.
+      return new Promise((resolve, reject) => {
+        const entry = { reject };
+        holders.set(name, [entry]);
+        void Promise.resolve()
+          .then(run)
+          .then(resolve, reject)
+          .finally(() => {
+            holders.set(
+              name,
+              (holders.get(name) ?? []).filter((held) => held !== entry),
+            );
+          });
+      });
     }
 
     const previous = queue.get(name) ?? Promise.resolve();
@@ -192,5 +207,69 @@ describe('withMintLock', () => {
     vi.stubGlobal('navigator', {});
     await expect(stealMintLock('mint')).resolves.toBeUndefined();
     await expect(stealMintLock(null)).resolves.toBeUndefined();
+  });
+});
+
+describe('stealLock', () => {
+  it('holds the lock until released, and says nothing happened', async () => {
+    stubLocks();
+    const held = stealLock('ceremony');
+
+    await Promise.resolve();
+    expect(held.stolen.aborted).toBe(false);
+
+    held.release();
+    await Promise.resolve();
+    expect(held.stolen.aborted).toBe(false);
+  });
+
+  it('tells the incumbent it lost the lock', async () => {
+    stubLocks();
+    const first = stealLock('ceremony');
+    await Promise.resolve();
+
+    const second = stealLock('ceremony');
+    // The steal is what the incumbent learns from; nothing waits for it.
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(first.stolen.aborted).toBe(true);
+    expect(second.stolen.aborted).toBe(false);
+    second.release();
+  });
+
+  it('leaves a different lock alone', async () => {
+    stubLocks();
+    const channel = stealLock('channel');
+    await Promise.resolve();
+
+    stealLock('sign-in');
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(channel.stolen.aborted).toBe(false);
+  });
+
+  it('releasing twice, or after a steal, does nothing', async () => {
+    stubLocks();
+    const held = stealLock('ceremony');
+    await Promise.resolve();
+    stealLock('ceremony');
+    await Promise.resolve();
+
+    expect(() => {
+      held.release();
+      held.release();
+    }).not.toThrow();
+  });
+
+  // Coordination may only ever suppress work, never be required for it.
+  it('runs without a lock where the platform has none', async () => {
+    vi.stubGlobal('navigator', {});
+    const held = stealLock('ceremony');
+
+    await Promise.resolve();
+    expect(held.stolen.aborted).toBe(false);
+    expect(() => held.release()).not.toThrow();
   });
 });
