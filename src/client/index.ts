@@ -6,6 +6,12 @@ export * from './auth-client.js';
 export { type DBCreateOptions, IdbKeyVal } from './db.js';
 export * from './idle-manager.js';
 export {
+  LocalStateStorage,
+  MemoryStateStorage,
+  type SessionState,
+  type StateStorage,
+} from './state-storage.js';
+export {
   type AuthClientStorage,
   IdbStorage,
   KEY_STORAGE_DELEGATION,
