@@ -11,7 +11,6 @@ import { stealLock } from '../../src/client/app-lock.ts';
 import { AuthClient, SupersededError } from '../../src/client/auth-client.ts';
 import type { Credential, CredentialStorage } from '../../src/client/credential-storage.ts';
 import { IdbCredentialStorage } from '../../src/client/idb-credential-storage.ts';
-import { IdleManager } from '../../src/client/idle-manager.ts';
 import { MemoryCredentialStorage } from '../../src/client/memory-credential-storage.ts';
 import type { SessionIdentity } from '../../src/client/session-identity.ts';
 import { slotsFor } from '../../src/client/slots.ts';
@@ -167,6 +166,7 @@ const DEFAULT_REQUEST_ATTRIBUTES_BODY: JsonRpcBody = {
 async function conformantSignInBody(params: {
   sessionPublicKey: string;
   maxTimeToLive?: string;
+  maxTimeToIdle?: string;
 }): Promise<JsonRpcBody> {
   const to = { toDer: () => fromBase64(params.sessionPublicKey) } as unknown as PublicKey;
   const ttlMs =
@@ -215,11 +215,6 @@ beforeEach(() => {
   vi.useRealTimers();
   localStorage.clear();
   FakeTransport.reset();
-  // `IdleManager.exit()` runs all registered callbacks on teardown (see
-  // idle-manager.ts#exit), including the default `location.reload()` callback
-  // from signed-in tests. Stub globally so afterEach teardown doesn't trigger
-  // jsdom's "Not implemented: navigation to another Document" warning.
-  vi.stubGlobal('location', { reload: vi.fn() });
 });
 
 // A client hooks DOM listeners and a subscription to its state store, so one
@@ -239,14 +234,6 @@ afterEach(async () => {
     } catch {
       // A client that never finished constructing has nothing to release.
     }
-  }
-
-  // IdleManager is a singleton — without tearing it down, idle timers and DOM
-  // listeners from one test bleed into the next, causing spurious failures.
-  try {
-    IdleManager.create().exit();
-  } catch {
-    // no-op if already torn down
   }
   await new Promise((r) => setTimeout(r, 0));
   localStorage.clear();
@@ -344,7 +331,7 @@ describe('AuthClient', () => {
       subscribe: () => () => {},
     };
 
-    const client = track(new AuthClient({ stateStorage, idleOptions: { disableIdle: true } }));
+    const client = track(new AuthClient({ stateStorage }));
 
     expect(client.getStatus().state).toBe(expected);
     // The predicate is the same rule, so the two can never disagree.
@@ -410,9 +397,7 @@ describe('AuthClient', () => {
       subscribe: () => () => {},
     };
 
-    const status = track(
-      new AuthClient({ stateStorage, idleOptions: { disableIdle: true } }),
-    ).getStatus();
+    const status = track(new AuthClient({ stateStorage })).getStatus();
 
     // A silent re-issue needs it to name the account, so the type carries it
     // wherever there is one to carry.
@@ -434,7 +419,7 @@ describe('AuthClient', () => {
       subscribe: () => () => {},
     };
 
-    const client = track(new AuthClient({ stateStorage, idleOptions: { disableIdle: true } }));
+    const client = track(new AuthClient({ stateStorage }));
 
     // Someone is signed in within that store's reach; this origin cannot act.
     expect(stateStorage.get(SLOTS.state)).not.toBeNull();
@@ -468,7 +453,6 @@ describe('AuthClient', () => {
       new AuthClient({
         credentialStorage,
         namespace: 'one',
-        idleOptions: { disableIdle: true },
       }),
     );
     handleSignIn(FakeTransport.last());
@@ -519,7 +503,7 @@ describe('AuthClient', () => {
         inner.set(slot, credential),
       remove: (slot: string) => inner.remove(slot),
     };
-    const client = track(new AuthClient({ credentialStorage, idleOptions: { disableIdle: true } }));
+    const client = track(new AuthClient({ credentialStorage }));
 
     await expect(client.getIdentity()).rejects.toThrow('the store was unreachable');
 
@@ -593,7 +577,6 @@ describe('AuthClient', () => {
       new AuthClient({
         credentialStorage,
         stateStorage,
-        idleOptions: { disableIdle: true },
       }),
     );
     handleSignIn(FakeTransport.last());
@@ -624,7 +607,6 @@ describe('AuthClient', () => {
       const client = track(
         new AuthClient({
           credentialStorage: new MemoryCredentialStorage(),
-          idleOptions: { disableIdle: true },
         }),
       );
       handleSignIn(FakeTransport.last());
@@ -648,7 +630,6 @@ describe('AuthClient', () => {
     const client = track(
       new AuthClient({
         credentialStorage: new MemoryCredentialStorage(),
-        idleOptions: { disableIdle: true },
       }),
     );
     handleSignIn(FakeTransport.last());
@@ -711,12 +692,6 @@ describe('AuthClient', () => {
     expect(window.location.href).toBe('http://localhost/app');
   });
 
-  it('should not initialize an idleManager if the user is not signed in', async () => {
-    const client = track(new AuthClient());
-    await client.getIdentity(); // wait for hydration
-    expect(client.idleManager).toBeUndefined();
-  });
-
   it.each([
     ['google', 'https://accounts.google.com'],
     ['apple', 'https://appleid.apple.com'],
@@ -738,18 +713,6 @@ describe('AuthClient', () => {
     expect(FakeTransport.last().options.windowOpenerFeatures).toBe('width=500,height=600');
   });
 
-  it('should not set up an idle timer if the disable option is set', () => {
-    const client = track(
-      new AuthClient({
-        idleOptions: {
-          idleTimeout: 1000,
-          disableIdle: true,
-        },
-      }),
-    );
-    expect(client.idleManager).toBeUndefined();
-  });
-
   it('memoize runs the producer and returns its value in window mode', async () => {
     const client = track(new AuthClient()); // default 'window' transport
     const produce = vi.fn(async () => 'value');
@@ -767,20 +730,6 @@ describe('AuthClient signIn', () => {
     expect(identity.getPrincipal().toString()).toBeTruthy();
   });
 
-  it('should set up an idle manager after sign-in', async () => {
-    const client = track(new AuthClient());
-    handleSignIn(FakeTransport.last());
-    await client.signIn();
-    expect(client.idleManager).toBeDefined();
-  });
-
-  it('should not set up an idle manager if disableIdle is set', async () => {
-    const client = track(new AuthClient({ idleOptions: { disableIdle: true } }));
-    handleSignIn(FakeTransport.last());
-    await client.signIn();
-    expect(client.idleManager).toBeUndefined();
-  });
-
   it('should propagate signer errors from the delegation request', async () => {
     const client = track(new AuthClient());
     handleSignIn(FakeTransport.last(), {
@@ -796,7 +745,6 @@ describe('AuthClient signIn', () => {
       new AuthClient({
         credentialStorage,
         stateStorage,
-        idleOptions: { disableIdle: true },
       }),
     );
     handleSignIn(FakeTransport.last());
@@ -832,6 +780,30 @@ describe('AuthClient signIn', () => {
     // no targets to ask for: what it may call is decided by the delegations
     // minted from the session, not by the session itself.
     expect(req.params?.targets).toBeUndefined();
+  });
+
+  it('carries maxTimeToIdle where the application asked for one', async () => {
+    const client = track(new AuthClient());
+    const transport = FakeTransport.last();
+    handleSignIn(transport);
+
+    await client.signIn({ maxTimeToLive: 3_600_000_000_000n, maxTimeToIdle: 600_000_000_000n });
+
+    expect(transport.requests[0].params?.maxTimeToIdle).toBe('600000000000');
+    client.dispose();
+  });
+
+  it('omits maxTimeToIdle where it did not, leaving the provider its own default', async () => {
+    const client = track(new AuthClient());
+    const transport = FakeTransport.last();
+    handleSignIn(transport);
+
+    await client.signIn({ maxTimeToLive: 3_600_000_000_000n });
+
+    // Absent rather than a number this library picked: the bound belongs to the
+    // canister, and sending one here would quietly override its default.
+    expect(transport.requests[0].params).not.toHaveProperty('maxTimeToIdle');
+    client.dispose();
   });
 
   it('should forward derivationOrigin on every request as icrc95DerivationOrigin', async () => {
@@ -871,7 +843,7 @@ describe('AuthClient signIn', () => {
   });
 
   it('should report the user as authenticated after sign-in', async () => {
-    const client = track(new AuthClient({ idleOptions: { disableIdle: true } }));
+    const client = track(new AuthClient({}));
     handleSignIn(FakeTransport.last());
     expect(client.isAuthenticated()).toBe(false);
     await client.signIn();
@@ -879,7 +851,7 @@ describe('AuthClient signIn', () => {
   });
 
   it('should report the user as not authenticated after sign-out', async () => {
-    const client = track(new AuthClient({ idleOptions: { disableIdle: true } }));
+    const client = track(new AuthClient({}));
     handleSignIn(FakeTransport.last());
     await client.signIn();
     expect(client.isAuthenticated()).toBe(true);
@@ -889,7 +861,7 @@ describe('AuthClient signIn', () => {
 
   it('records the account and the expiry in the supplied state storage', async () => {
     const stateStorage = new MemoryStateStorage();
-    const client = track(new AuthClient({ stateStorage, idleOptions: { disableIdle: true } }));
+    const client = track(new AuthClient({ stateStorage }));
     handleSignIn(FakeTransport.last());
     await client.signIn();
 
@@ -906,7 +878,7 @@ describe('AuthClient signIn', () => {
       principal,
       expiration: BigInt(Date.now() + 60_000) * 1_000_000n,
     });
-    const client = track(new AuthClient({ stateStorage, idleOptions: { disableIdle: true } }));
+    const client = track(new AuthClient({ stateStorage }));
 
     // No await, no store opened, no mint: this is the answer a page renders on.
     expect(client.getPrincipal()?.toText()).toBe(principal.toText());
@@ -916,7 +888,6 @@ describe('AuthClient signIn', () => {
     const client = track(
       new AuthClient({
         stateStorage: new MemoryStateStorage(),
-        idleOptions: { disableIdle: true },
       }),
     );
     expect(client.getPrincipal()).toBeUndefined();
@@ -929,7 +900,7 @@ describe('AuthClient signIn', () => {
       principal,
       expiration: BigInt(Date.now() - 60_000) * 1_000_000n,
     });
-    const client = track(new AuthClient({ stateStorage, idleOptions: { disableIdle: true } }));
+    const client = track(new AuthClient({ stateStorage }));
 
     // A principal here means calls made as it will be accepted. `if
     // (getPrincipal())` is the check an application reaches for, so answering for
@@ -946,7 +917,7 @@ describe('AuthClient signIn', () => {
 
   it('never disagrees with isAuthenticated', () => {
     const stateStorage = new MemoryStateStorage();
-    const client = track(new AuthClient({ stateStorage, idleOptions: { disableIdle: true } }));
+    const client = track(new AuthClient({ stateStorage }));
     const principal = Principal.selfAuthenticating(new Uint8Array([7, 8, 9]));
 
     for (const expiration of [
@@ -965,7 +936,7 @@ describe('AuthClient signIn', () => {
 
   it('answers isAuthenticated from the state storage and not from the delegation', async () => {
     const stateStorage = new MemoryStateStorage();
-    const client = track(new AuthClient({ stateStorage, idleOptions: { disableIdle: true } }));
+    const client = track(new AuthClient({ stateStorage }));
     handleSignIn(FakeTransport.last());
     await client.signIn();
     expect(client.isAuthenticated()).toBe(true);
@@ -983,7 +954,6 @@ describe('AuthClient signIn', () => {
       new AuthClient({
         credentialStorage,
         stateStorage,
-        idleOptions: { disableIdle: true },
       }),
     );
     handleSignIn(FakeTransport.last());
@@ -994,7 +964,6 @@ describe('AuthClient signIn', () => {
       new AuthClient({
         credentialStorage,
         stateStorage,
-        idleOptions: { disableIdle: true },
       }),
     );
     const identity = await second.getIdentity();
@@ -1010,7 +979,6 @@ describe('AuthClient signIn', () => {
       new AuthClient({
         credentialStorage,
         stateStorage,
-        idleOptions: { disableIdle: true },
       }),
     );
     handleSignIn(FakeTransport.last());
@@ -1026,7 +994,6 @@ describe('AuthClient signIn', () => {
       new AuthClient({
         credentialStorage,
         stateStorage,
-        idleOptions: { disableIdle: true },
       }),
     );
     const identity = await second.getIdentity();
@@ -1042,7 +1009,6 @@ describe('AuthClient signIn', () => {
       new AuthClient({
         credentialStorage,
         stateStorage,
-        idleOptions: { disableIdle: true },
       }),
     );
     handleSignIn(FakeTransport.last());
@@ -1056,7 +1022,6 @@ describe('AuthClient signIn', () => {
       new AuthClient({
         credentialStorage,
         stateStorage,
-        idleOptions: { disableIdle: true },
       }),
     );
     const identity = await second.getIdentity();
@@ -1069,7 +1034,6 @@ describe('AuthClient signIn', () => {
     const client = track(
       new AuthClient({
         credentialStorage: storage,
-        idleOptions: { disableIdle: true },
       }),
     );
     handleSignIn(FakeTransport.last());
@@ -1086,7 +1050,7 @@ describe('AuthClient signIn', () => {
 
   it('records the account the mint reported, not the session chain it was signed with', async () => {
     const stateStorage = new MemoryStateStorage();
-    const client = track(new AuthClient({ stateStorage, idleOptions: { disableIdle: true } }));
+    const client = track(new AuthClient({ stateStorage }));
     handleSignIn(FakeTransport.last());
 
     const identity = await client.signIn();
@@ -1100,7 +1064,7 @@ describe('AuthClient signIn', () => {
   });
 
   it('refuses a session chain issued to a different key', async () => {
-    const client = track(new AuthClient({ idleOptions: { disableIdle: true } }));
+    const client = track(new AuthClient({}));
     const other = Ed25519KeyIdentity.generate();
     handleSignIn(FakeTransport.last(), {
       result: encodeDelegationChainResponse(
@@ -1121,7 +1085,6 @@ describe('AuthClient signIn', () => {
     const client = track(
       new AuthClient({
         credentialStorage: storage,
-        idleOptions: { disableIdle: true },
       }),
     );
     handleSignIn(FakeTransport.last());
@@ -1145,7 +1108,6 @@ describe('AuthClient signIn', () => {
     const client = track(
       new AuthClient({
         credentialStorage: storage,
-        idleOptions: { disableIdle: true },
       }),
     );
     handleSignIn(FakeTransport.last());
@@ -1161,7 +1123,7 @@ describe('AuthClient signIn', () => {
   });
 
   it('ends the session at the canister when signing out', async () => {
-    const client = track(new AuthClient({ idleOptions: { disableIdle: true } }));
+    const client = track(new AuthClient({}));
     handleSignIn(FakeTransport.last());
     await client.signIn();
     const before = minted.revoked;
@@ -1209,7 +1171,6 @@ describe('AuthClient signIn', () => {
       new AuthClient({
         credentialStorage,
         stateStorage,
-        idleOptions: { disableIdle: true },
       }),
     );
     handleSignIn(FakeTransport.last());
@@ -1239,7 +1200,6 @@ describe('AuthClient signIn', () => {
       new AuthClient({
         identityProvider: { canisterId },
         agentOptions,
-        idleOptions: { disableIdle: true },
       }),
     );
     handleSignIn(FakeTransport.last());
@@ -1265,7 +1225,6 @@ describe('AuthClient signIn', () => {
       new AuthClient({
         credentialStorage,
         namespace: 'one',
-        idleOptions: { disableIdle: true },
       }),
     );
     handleSignIn(FakeTransport.last());
@@ -1284,8 +1243,7 @@ describe('AuthClient signIn', () => {
 
     const client = track(
       new AuthClient({
-        credentialStorage: new MemoryCredentialStorage(), // shared === false
-        idleOptions: { disableIdle: true },
+        credentialStorage: new MemoryCredentialStorage(), // shared === false,
       }),
     );
     handleSignIn(FakeTransport.last());
@@ -1475,7 +1433,7 @@ describe('AuthClient signIn', () => {
 
   it('clears both credentials on sign-out, not just the session', async () => {
     const credentialStorage = new MemoryCredentialStorage();
-    const client = track(new AuthClient({ credentialStorage, idleOptions: { disableIdle: true } }));
+    const client = track(new AuthClient({ credentialStorage }));
     handleSignIn(FakeTransport.last());
     await client.signIn();
     expect(await credentialStorage.get(SLOTS.app)).not.toBeNull();
@@ -1698,7 +1656,6 @@ describe('AuthClient signIn', () => {
     handleSignIn(FakeTransport.last());
     const identity = (await client.signIn()) as SessionIdentity;
     const held = identity.getDelegation();
-    minted.count = 0;
 
     vi.useFakeTimers({ toFake: ['Date'] });
     vi.setSystemTime(new Date(Date.now() + 4 * 60 * 1000 + 50_000));
@@ -1709,10 +1666,21 @@ describe('AuthClient signIn', () => {
     for (let turn = 0; turn < 100 && identity.getDelegation() === held; turn++) {
       await new Promise((resolve) => setTimeout(resolve, 1));
     }
+    const afterBurst = identity.getDelegation();
+
+    // The hand is still resting, and the delegation it just earned has its full
+    // life left. The pre-mint threshold is the throttle: nothing further is due,
+    // so the events cost nothing.
+    for (let event = 0; event < 50; event++) {
+      document.dispatchEvent(new Event('mousemove'));
+    }
+    for (let turn = 0; turn < 20; turn++) {
+      await new Promise((resolve) => setTimeout(resolve, 1));
+    }
     vi.useRealTimers();
 
-    expect(identity.getDelegation()).not.toBe(held);
-    expect(minted.count).toBe(1);
+    expect(afterBurst).not.toBe(held);
+    expect(identity.getDelegation()).toBe(afterBurst);
     client.dispose();
   });
 
@@ -1814,7 +1782,7 @@ describe('AuthClient signIn', () => {
 
   it('clears the state storage on sign-out', async () => {
     const stateStorage = new MemoryStateStorage();
-    const client = track(new AuthClient({ stateStorage, idleOptions: { disableIdle: true } }));
+    const client = track(new AuthClient({ stateStorage }));
     handleSignIn(FakeTransport.last());
     await client.signIn();
     expect(stateStorage.get(SLOTS.state)).not.toBeNull();
@@ -1822,88 +1790,6 @@ describe('AuthClient signIn', () => {
     await client.signOut();
 
     expect(stateStorage.get(SLOTS.state)).toBeNull();
-  });
-});
-
-describe('AuthClient idle behavior', () => {
-  it('should sign out after idle and reload the window by default', async () => {
-    const storage = spyStorage();
-    const client = track(
-      new AuthClient({
-        credentialStorage: storage,
-        idleOptions: { idleTimeout: 1000 },
-      }),
-    );
-    handleSignIn(FakeTransport.last());
-    await client.signIn();
-
-    expect(storage.remove).not.toHaveBeenCalledWith(SLOTS.session);
-
-    await new Promise((r) => setTimeout(r, 1100));
-
-    expect(storage.remove).toHaveBeenCalledWith(SLOTS.session);
-    expect(window.location.reload).toHaveBeenCalled();
-    expect(client.isAuthenticated()).toBe(false);
-  });
-
-  it('does not reload when idle sign-out fails (would otherwise restore the session)', async () => {
-    const storage = spyStorage();
-    const remove = storage.remove;
-    // Only the session's removal fails: sign-in clears the app slot first, and a
-    // sign-in that could not start would not reach the idle timer at all.
-    storage.remove = vi.fn(async (slot: string) => {
-      if (slot === SLOTS.session) throw new Error('storage unavailable');
-      return remove(slot);
-    });
-    const client = track(
-      new AuthClient({
-        credentialStorage: storage,
-        idleOptions: { idleTimeout: 1000 },
-      }),
-    );
-    handleSignIn(FakeTransport.last());
-    await client.signIn();
-
-    await new Promise((r) => setTimeout(r, 1100));
-
-    // Teardown was attempted but failed; reloading now would `#hydrate` the
-    // still-valid session, so the callback must swallow the error and not reload.
-    expect(storage.remove).toHaveBeenCalled();
-    expect(window.location.reload).not.toHaveBeenCalled();
-  });
-
-  it('should not reload the page if the default callback is disabled', async () => {
-    const storage = spyStorage();
-    const client = track(
-      new AuthClient({
-        credentialStorage: storage,
-        idleOptions: { idleTimeout: 1000, disableDefaultIdleCallback: true },
-      }),
-    );
-    handleSignIn(FakeTransport.last());
-    await client.signIn();
-
-    await new Promise((r) => setTimeout(r, 1100));
-
-    expect(storage.remove).not.toHaveBeenCalledWith(SLOTS.session);
-    expect(window.location.reload).not.toHaveBeenCalled();
-  });
-
-  it('should call onIdle instead of the default behavior when provided', async () => {
-    const idleCb = vi.fn();
-    const client = track(
-      new AuthClient({
-        idleOptions: { idleTimeout: 1000, onIdle: idleCb },
-      }),
-    );
-    handleSignIn(FakeTransport.last());
-    await client.signIn();
-
-    // Wait for the idle timeout to fire (real timers).
-    await new Promise((r) => setTimeout(r, 1100));
-
-    expect(window.location.reload).not.toHaveBeenCalled();
-    expect(idleCb).toHaveBeenCalled();
   });
 });
 
