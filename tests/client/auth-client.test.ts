@@ -360,7 +360,6 @@ describe('AuthClient', () => {
       const expiration = (BigInt(Date.now()) + ms) * 1_000_000n;
       const status = new AuthClient({
         stateStorage: store(held === 'signed-in', expiration),
-        idleOptions: { disableIdle: true },
       }).getStatus();
 
       expect(status.state).toBe(held);
@@ -378,7 +377,6 @@ describe('AuthClient', () => {
         discard: vi.fn(),
         subscribe: () => () => {},
       },
-      idleOptions: { disableIdle: true },
     }).getStatus();
     expect(signedOut).toEqual({ state: 'signed-out' });
   });
@@ -1142,7 +1140,6 @@ describe('AuthClient signIn', () => {
     vi.stubGlobal('navigator', { locks: { request } });
     const client = new AuthClient({
       credentialStorage: new MemoryCredentialStorage(),
-      idleOptions: { disableIdle: true },
     });
 
     // Not awaited: this is what runs in the click's own task, and nothing in it
@@ -1273,7 +1270,6 @@ describe('AuthClient signIn', () => {
     const client = new AuthClient({
       credentialStorage,
       stateStorage,
-      idleOptions: { disableIdle: true },
     });
 
     // Hold the ceremony open at its last call, so the sign-out lands while the
@@ -1398,7 +1394,7 @@ describe('AuthClient signIn', () => {
     stubLocks();
     const credentialStorage = new MemoryCredentialStorage();
     const stateStorage = new MemoryStateStorage();
-    const shared = { credentialStorage, stateStorage, idleOptions: { disableIdle: true } };
+    const shared = { credentialStorage, stateStorage };
 
     let releaseMint: () => void = () => {};
     const mintReached = new Promise<void>((reached) => {

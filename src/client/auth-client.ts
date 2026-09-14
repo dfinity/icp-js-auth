@@ -177,22 +177,7 @@ export interface AuthClientSignInOptions {
   maxTimeToLive?: bigint;
 
   /**
-   * The longest the session may outlive its use, in nanoseconds.
-   *
-   * The identity provider ends a session nothing has minted from for this long,
-   * whatever {@link maxTimeToLive} still allows. It is what makes an abandoned
-   * browser stop holding a usable sign-in, and it replaces the timer this
-   * library used to run in the page: a timer is skipped by clearing storage or
-   * by a tab that never runs it, and it saw one document, so a backgrounded tab
-   * could sign a user out of the tab beside it.
-   *
-   * A ceiling in the same way {@link maxTimeToLive} is: the canister clamps it
-   * to between 10 minutes and the session's own granted length, and applies its
-   * own default of seven days where a request names none. The floor keeps clear
-   * of the interval an active application mints at.
-   *
-   * Activity in the page counts as use, so a user reading rather than clicking
-   * still keeps the session alive.
+   * How long a signed-in user may be idle before the sign-in ends, in nanoseconds.
    * @default the identity provider's, currently 7 days
    */
   maxTimeToIdle?: bigint;
@@ -541,8 +526,6 @@ export class AuthClient {
    *
    * @param options - Sign-in options.
    * @param options.maxTimeToLive - Maximum lifetime of the delegation in nanoseconds.
-   * @param options.maxTimeToIdle - How long the session may go unminted before the
-   *   identity provider ends it, in nanoseconds.
    * @param options.targets - Restrict the delegation to specific canisters.
    * @returns The authenticated identity.
    * @throws When authentication fails.
@@ -742,6 +725,7 @@ export class AuthClient {
         // invented. How long a sign-in lasts is the provider's policy, narrowed
         // by what the user chooses at consent and by an organization's cap.
         maxTimeToLive: options?.maxTimeToLive,
+        maxTimeToIdle: options?.maxTimeToIdle,
         derivationOrigin: this.#options.derivationOrigin?.toString(),
       });
 
