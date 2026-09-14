@@ -439,6 +439,22 @@ export class AuthClient {
    * to be up before the first await, and a lock may only be asked for once the
    * signer window is open.
    */
+  /**
+   * Installs the identity this client acts with, releasing the one it replaces.
+   *
+   * A {@link SessionIdentity} holds a scheduled refresh, so dropping the
+   * reference without disposing leaves a timer that can still mint — into a slot
+   * this client may no longer be the writer of, for a session it may no longer
+   * hold. Every assignment goes through here so that no path can forget, which
+   * matters most for the paths that give up rather than the ones that succeed:
+   * those are the paths written to stop acting.
+   */
+  #installIdentity(next: Identity | PartialIdentity): void {
+    const previous = this.#identity;
+    if (previous !== next && previous instanceof SessionIdentity) previous.dispose();
+    this.#identity = next;
+  }
+
   #beginInteraction(): void {
     this.#interactions += 1;
   }
@@ -623,8 +639,7 @@ export class AuthClient {
     await this.#persistSession(key, sessionChain, appChain.publicKey);
     await this.#promoteAppCredential();
 
-    const identity = await this.#openSession(key, sessionChain, minter);
-    this.#identity = identity;
+    this.#installIdentity(await this.#openSession(key, sessionChain, minter));
 
     // Best-effort — the user is already signed in, so a cleanup failure must not
     // fail signIn(), and the next ceremony overwrites what is left behind.
@@ -888,8 +903,7 @@ export class AuthClient {
           );
     const cleared = this.#endSession();
 
-    if (this.#identity instanceof SessionIdentity) this.#identity.dispose();
-    this.#identity = new AnonymousIdentity();
+    this.#installIdentity(new AnonymousIdentity());
 
     const [revokeFailure] = await Promise.all([revoked, cleared]);
 
@@ -1009,7 +1023,7 @@ export class AuthClient {
         // rather than that it ended — and a store that shares nothing answers
         // `discard` with a removal.
         void this.#dropSession().catch(() => undefined);
-        this.#identity = new AnonymousIdentity();
+        this.#installIdentity(new AnonymousIdentity());
       },
     });
   }
@@ -1045,6 +1059,7 @@ export class AuthClient {
       // what the state leading forbids. Discarded rather than removed, because a
       // record that reaches past this origin belongs to whoever published it.
       if (this.#stateStorage.get(this.#slots.state)?.held) await this.#dropSession();
+      this.#installIdentity(new AnonymousIdentity());
       return;
     }
 
@@ -1058,9 +1073,12 @@ export class AuthClient {
       return;
     }
 
-    if (!('sign' in key)) return;
+    if (!('sign' in key)) {
+      this.#installIdentity(new AnonymousIdentity());
+      return;
+    }
 
-    this.#identity = await this.#openSession(key, chain);
+    this.#installIdentity(await this.#openSession(key, chain));
 
     if (!this.#options.idleOptions?.disableIdle && !this.idleManager) {
       this.idleManager = IdleManager.create(this.#options.idleOptions);

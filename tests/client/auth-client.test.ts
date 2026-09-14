@@ -12,6 +12,7 @@ import type { Credential, CredentialStorage } from '../../src/client/credential-
 import { IdbCredentialStorage } from '../../src/client/idb-credential-storage.ts';
 import { IdleManager } from '../../src/client/idle-manager.ts';
 import { MemoryCredentialStorage } from '../../src/client/memory-credential-storage.ts';
+import type { SessionIdentity } from '../../src/client/session-identity.ts';
 import { slotsFor } from '../../src/client/slots.ts';
 import { MemoryStateStorage } from '../../src/client/state-storage.ts';
 import { FakeTransport } from './fake-transport.ts';
@@ -510,6 +511,22 @@ describe('AuthClient', () => {
     const identity = await client.getIdentity();
     expect(identity.getPrincipal().isAnonymous()).toBe(true);
     expect(credentialStorage.get.mock.calls.length).toBeGreaterThan(1);
+  });
+
+  it('releases the identity it replaces, so a discarded one stops minting', async () => {
+    const client = new AuthClient({ credentialStorage: new MemoryCredentialStorage() });
+    handleSignIn(FakeTransport.last());
+    const first = (await client.signIn()) as SessionIdentity;
+    const released = vi.spyOn(first, 'dispose');
+
+    handleSignIn(FakeTransport.last());
+    const second = await client.signIn();
+
+    // The replaced identity has a rotation scheduled against a slot this client
+    // no longer writes for the same account, so letting it go unreleased leaves
+    // a timer minting for a sign-in that has been superseded.
+    expect(second).not.toBe(first);
+    expect(released).toHaveBeenCalled();
   });
 
   it('should sign users out', async () => {
