@@ -217,6 +217,7 @@ describe('AuthClient', () => {
       set: vi.fn(),
       remove: vi.fn(),
       discard: vi.fn(),
+      subscribe: () => () => {},
     };
 
     const client = new AuthClient({ stateStorage, idleOptions: { disableIdle: true } });
@@ -280,6 +281,7 @@ describe('AuthClient', () => {
       set: vi.fn(),
       remove: vi.fn(),
       discard: vi.fn(),
+      subscribe: () => () => {},
     };
 
     const status = new AuthClient({ stateStorage, idleOptions: { disableIdle: true } }).getStatus();
@@ -316,7 +318,7 @@ describe('AuthClient', () => {
     // What a store whose record reaches further than one origin reports on an
     // origin that has not acquired a credential of its own.
     const stateStorage = {
-      get: () => ({
+      get: (_key: string) => ({
         principal: Principal.selfAuthenticating(new Uint8Array([1, 2, 3])),
         expiration: (BigInt(Date.now()) + 3_600_000n) * 1_000_000n,
         held: false,
@@ -324,6 +326,7 @@ describe('AuthClient', () => {
       set: vi.fn(),
       remove: vi.fn(),
       discard: vi.fn(),
+      subscribe: () => () => {},
     };
 
     const client = new AuthClient({ stateStorage, idleOptions: { disableIdle: true } });

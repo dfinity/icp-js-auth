@@ -18,5 +18,8 @@ jobs:
       - name: JS Build
         run: pnpm build
 
+      - name: JS Typecheck
+        run: pnpm typecheck
+
       - name: JS Test
         run: pnpm test
