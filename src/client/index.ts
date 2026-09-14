@@ -11,6 +11,7 @@ export * from './idle-manager.js';
 export { LocalCredentialStorage } from './local-credential-storage.js';
 export { MemoryCredentialStorage } from './memory-credential-storage.js';
 export { SessionIdentity, type SessionIdentityOptions } from './session-identity.js';
+export { SessionMinter, type SessionMinterOptions } from './session-minter.js';
 export {
   LocalStateStorage,
   MemoryStateStorage,
