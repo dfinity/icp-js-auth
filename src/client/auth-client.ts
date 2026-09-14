@@ -410,13 +410,18 @@ export class AuthClient {
     transport: UrlTransport,
   ): Promise<{ key: SignIdentity | PartialIdentity; pending?: boolean }> {
     // A redirect leaves the document, so the key this flow starts with has to be
-    // readable again on the load that comes back. Two mediums answer for it: one
-    // that survives the teardown, or one another tab can be asked. A store that
-    // is neither cannot finish this flow, and refusing before navigating beats
-    // sending the user to the identity provider and failing on their return.
-    if (!this.#credentialStorage.durable && !this.#credentialStorage.shared) {
+    // readable again on the load that comes back, which takes a medium that
+    // survives the teardown. Refusing before navigating beats sending the user to
+    // the identity provider and failing on their return.
+    //
+    // A store other tabs can read is not enough. It answers only while one of
+    // them is open, so the same flow in the only tab of an origin loses the key
+    // the moment it navigates — a rule that holds sometimes is worse than one
+    // that holds never, because it fails on the user rather than on the
+    // developer.
+    if (!this.#credentialStorage.durable) {
       throw new Error(
-        'A redirect sign-in needs a credential store that survives the navigation or that another tab can answer for, and this one is neither. Use a durable store, a shared one, or the window transport.',
+        'A redirect sign-in needs a credential store that survives the navigation, and this one does not. Use a durable store or the window transport.',
       );
     }
 

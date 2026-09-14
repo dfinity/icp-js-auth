@@ -1,11 +1,13 @@
 import { Principal } from '@icp-sdk/core/principal';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { slotsFor } from '../../src/client/slots.ts';
 import {
   LocalStateStorage,
   MemoryStateStorage,
   type SessionState,
-  STATE_KEY,
 } from '../../src/client/state-storage.ts';
+
+const STATE_KEY = slotsFor().state;
 
 const state = {
   principal: Principal.selfAuthenticating(new Uint8Array([1, 2, 3])),

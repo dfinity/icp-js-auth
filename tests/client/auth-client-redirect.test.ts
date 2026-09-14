@@ -7,7 +7,7 @@ import { slotsFor } from '../../src/client/slots.ts';
 const SLOTS = slotsFor();
 
 import { AuthClient } from '../../src/client/auth-client.ts';
-
+import type { CredentialStorage } from '../../src/client/credential-storage.ts';
 import { IdleManager } from '../../src/client/idle-manager.ts';
 import { LocalCredentialStorage } from '../../src/client/local-credential-storage.ts';
 import { MemoryCredentialStorage } from '../../src/client/memory-credential-storage.ts';
@@ -133,6 +133,29 @@ describe('AuthClient redirect (UrlTransport) sign-in', () => {
     // Refused before navigating rather than on the load that comes back: the key
     // is written before the redirect and read after it, and a store the document
     // takes with it can do neither.
+    await expect(client.signIn()).rejects.toThrow(/survives the navigation/);
+    expect(FakeUrlTransport.last()?.requests ?? []).toHaveLength(0);
+  });
+
+  it('refuses a redirect where the only other reader is another tab', async () => {
+    const inner = new MemoryCredentialStorage();
+    const client = new AuthClient({
+      transport: 'redirect',
+      // Reachable from the other tabs of this origin, and gone with the document
+      // all the same. A peer answering is not something a redirect may rest on:
+      // the flow runs in the only open tab as often as not, and then there is no
+      // peer to ask.
+      credentialStorage: {
+        shared: true,
+        durable: false,
+        create: () => inner.create(),
+        get: (slot: string) => inner.get(slot),
+        set: (slot: string, credential: Parameters<typeof inner.set>[1]) =>
+          inner.set(slot, credential),
+        remove: (slot: string) => inner.remove(slot),
+      } as CredentialStorage,
+    });
+
     await expect(client.signIn()).rejects.toThrow(/survives the navigation/);
     expect(FakeUrlTransport.last()?.requests ?? []).toHaveLength(0);
   });
