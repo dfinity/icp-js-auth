@@ -125,6 +125,27 @@ describe('CookieStateStorage', () => {
     );
   });
 
+  it('refuses a domain the browser will not accept, which a string check cannot see', () => {
+    // A public suffix passes the host check — 'app.co.uk' does end with '.co.uk'
+    // — and the browser then drops the cookie. Writing one and reading it back
+    // is the only test that agrees with the browser.
+    vi.stubGlobal('location', { hostname: 'app.co.uk', protocol: 'https:' });
+    const accepted: string[] = [];
+    const setter = vi.spyOn(document, 'cookie', 'set').mockImplementation((value: string) => {
+      accepted.push(value);
+    });
+    const getter = vi.spyOn(document, 'cookie', 'get').mockReturnValue('');
+
+    try {
+      expect(() => new CookieStateStorage({ domain: 'co.uk' })).toThrow(/browser refused it/);
+      // The probe is cleaned up even though the constructor threw.
+      expect(accepted.some((value) => value.startsWith('ic-cookie-probe=;'))).toBe(true);
+    } finally {
+      setter.mockRestore();
+      getter.mockRestore();
+    }
+  });
+
   it('refuses a domain below this host, which a browser would ignore silently', () => {
     vi.stubGlobal('location', { hostname: 'app.example.com', protocol: 'https:' });
 

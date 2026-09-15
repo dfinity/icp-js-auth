@@ -1837,19 +1837,44 @@ describe('AuthClient signIn', () => {
     client.dispose();
   });
 
-  it('keeps the shared record when a mint finds the session gone, and stops claiming it', async () => {
+  it('ends the sign-in when a refused mint finds the record still naming it', async () => {
     const credentialStorage = new MemoryCredentialStorage();
-    // The distinction only exists for a record that reaches past this origin.
     const stateStorage = new CookieStateStorage({ domain: 'localhost' });
-    const client = new AuthClient({
-      credentialStorage,
-      stateStorage,
-    });
+    const client = new AuthClient({ credentialStorage, stateStorage });
     handleSignIn(FakeTransport.last());
     const identity = (await client.signIn()) as SessionIdentity;
 
-    // As a sibling replacing the browser's session leaves it: this origin's
-    // chain is dead, but the record that sibling just wrote is not.
+    // Nothing replaced the record, so it names the session that just died — and
+    // a domain has one, so it cannot be revived. Nobody can use what it names.
+    minted.refuse = true;
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(new Date(Date.now() + 4 * 60 * 1000 + 50_000));
+    await identity.refresh();
+    vi.useRealTimers();
+    minted.refuse = false;
+
+    expect(await credentialStorage.get(SLOTS.session)).toBeNull();
+    expect(stateStorage.get(SLOTS.state)).toBeNull();
+    expect(client.getStatus().state).toBe('signed-out');
+    client.dispose();
+  });
+
+  it('keeps a record a sibling has moved on, and stops claiming it', async () => {
+    const credentialStorage = new MemoryCredentialStorage();
+    // The distinction only exists for a record that reaches past this origin.
+    const stateStorage = new CookieStateStorage({ domain: 'localhost' });
+    const client = new AuthClient({ credentialStorage, stateStorage });
+    handleSignIn(FakeTransport.last());
+    const identity = (await client.signIn()) as SessionIdentity;
+
+    // A sibling signed in again: what it wrote outlives the session this origin
+    // held, so the record is not the one this origin was operating under.
+    const held = stateStorage.get(SLOTS.state);
+    stateStorage.set(SLOTS.state, {
+      principal: held!.principal,
+      expiration: held!.expiration + 1_000_000_000n,
+    });
+
     minted.refuse = true;
     vi.useFakeTimers({ toFake: ['Date'] });
     vi.setSystemTime(new Date(Date.now() + 4 * 60 * 1000 + 50_000));

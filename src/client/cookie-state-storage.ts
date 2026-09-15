@@ -91,6 +91,30 @@ export class CookieStateStorage implements StateStorage {
       // reliably accepted.
       ...(secure ? ['Secure'] : []),
     ].join('; ');
+
+    // The check above cannot see a public suffix: 'app.co.uk' ends with '.co.uk',
+    // so `domain: 'co.uk'` passes it and the browser then refuses the cookie. No
+    // API exposes the list, so the only test that agrees with the browser is to
+    // write one and read it back — which catches cookies being switched off at
+    // the same time.
+    if (typeof document !== 'undefined') {
+      const probe = 'ic-cookie-probe';
+      let accepted = false;
+      try {
+        // No Max-Age, so even a cleanup that fails dies with the browser.
+        // biome-ignore lint/suspicious/noDocumentCookie: as elsewhere in this class.
+        document.cookie = `${probe}=1; ${this.#attributes}`;
+        accepted = readCookie(probe) !== null;
+      } finally {
+        // biome-ignore lint/suspicious/noDocumentCookie: as above.
+        document.cookie = `${probe}=; ${this.#attributes}; Max-Age=0`;
+      }
+      if (!accepted) {
+        throw new Error(
+          `A cookie scoped to '${options.domain}' cannot be written from '${hostname}': the browser refused it. The domain may be a public suffix, or cookies may be disabled.`,
+        );
+      }
+    }
   }
 
   public get(key: string): SessionState | null {
@@ -106,6 +130,9 @@ export class CookieStateStorage implements StateStorage {
       // say the session ended — and a sibling signing in as someone else then
       // publishes a cookie this origin has no credential for. Asking only whether
       // some local record exists would read that as held.
+      // The record's own fields are the shared truth, read as written. `held` is
+      // the only thing derived here, because it is the one fact a record every
+      // sibling reads cannot carry.
       const local = this.#local.get(key);
       return {
         principal,
