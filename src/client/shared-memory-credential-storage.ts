@@ -122,7 +122,12 @@ export class SharedMemoryCredentialStorage implements CredentialStorage<ECDSAKey
     this.#synced = this.#openReplica();
   }
 
-  /** Stops replicating and lets go of the name a peer waits on. */
+  /**
+   * Stops replicating and lets go of the name a peer waits on.
+   *
+   * Only needed when you replace a store while the page lives; the document
+   * going away does the same thing.
+   */
   public close(): void {
     this.#channel?.close();
     this.#releasePresence?.();
