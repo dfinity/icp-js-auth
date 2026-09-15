@@ -32,3 +32,23 @@ export interface AppDelegationSource {
    */
   mint(appPublicKey: DerEncodedPublicKey): Promise<DelegationChain>;
 }
+
+/** Whether two DER-encoded keys are the same bytes. */
+export const sameKey = (a: Uint8Array, b: Uint8Array): boolean =>
+  a.length === b.length && a.every((byte, i) => byte === b[i]);
+
+/** The leaf of a chain: the key it authorises. */
+export const delegatesTo = (chain: DelegationChain): Uint8Array | undefined =>
+  chain.delegations[chain.delegations.length - 1]?.delegation.pubkey;
+
+/**
+ * Whether a chain's leaf authorises `keyDer` — the key that would sign with it.
+ *
+ * A chain paired with a key it does not authorise signs nothing the replica will
+ * accept, and fails with a signature error that points at neither half. Every
+ * place that holds both halves checks this.
+ */
+export const chainAuthorisesKey = (chain: DelegationChain, keyDer: Uint8Array): boolean => {
+  const leaf = delegatesTo(chain);
+  return leaf !== undefined && sameKey(new Uint8Array(leaf), new Uint8Array(keyDer));
+};

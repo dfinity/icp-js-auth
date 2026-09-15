@@ -1,5 +1,6 @@
 import type { SignIdentity } from '@icp-sdk/core/agent';
 import { DelegationChain, Ed25519KeyIdentity } from '@icp-sdk/core/identity';
+import { Principal } from '@icp-sdk/core/principal';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { SessionGoneError } from '../../src/client/app-delegation-source.ts';
@@ -16,6 +17,8 @@ const TTL = 5 * MINUTE;
 
 const accountKey = Ed25519KeyIdentity.generate();
 const accountDer = accountKey.getPublicKey().toDer();
+/** What a caller names when it knows which account it expects. */
+const ACCOUNT = Principal.selfAuthenticating(new Uint8Array(accountDer));
 
 /**
  * A chain rooted at the account key and delegating to `to`, as the canister mints
@@ -411,6 +414,7 @@ describe('SessionIdentity', () => {
       source: { mint },
       storage,
       slot: SLOTS.app,
+      expectedAccount: ACCOUNT,
       onSessionGone: vi.fn(),
     });
 
@@ -438,6 +442,7 @@ describe('SessionIdentity', () => {
     const storage = new MemoryCredentialStorage();
     Object.defineProperty(storage, 'shared', { value: true });
     const appKey = await storage.create();
+    vi.spyOn(storage, 'create').mockResolvedValue(appKey);
     const chain = await appDelegation(appKey);
     const mint = vi.fn(async () => {
       events.push('mint');
@@ -486,11 +491,71 @@ describe('SessionIdentity', () => {
       source: { mint },
       storage,
       slot: SLOTS.app,
+      expectedAccount: ACCOUNT,
       onSessionGone: vi.fn(),
     });
 
     expect(mint).not.toHaveBeenCalled();
     expect(identity.getDelegation()).toBe(peerChain);
+    identity.dispose();
+  });
+
+  it('will not adopt a credential left by another account', async () => {
+    const storage = new MemoryCredentialStorage();
+    Object.defineProperty(storage, 'shared', { value: true });
+
+    // A live credential in the slot, rooted at an account this caller is not
+    // expecting — what a previous sign-in leaves behind.
+    const strangersAccount = Ed25519KeyIdentity.generate();
+    const strangersKey = await storage.create();
+    const theirs = await DelegationChain.create(
+      strangersAccount,
+      strangersKey.getPublicKey(),
+      new Date(Date.now() + TTL),
+    );
+    await storage.set(SLOTS.app, { identity: strangersKey, chain: theirs });
+
+    const ours = await storage.create();
+    vi.spyOn(storage, 'create').mockResolvedValue(ours);
+    const mint = vi.fn(async () => await appDelegation(ours));
+
+    const identity = await SessionIdentity.create({
+      sessionExpiresAtMs: Date.now() + 30 * MINUTE,
+      source: { mint },
+      storage,
+      slot: SLOTS.app,
+      expectedAccount: ACCOUNT,
+      onSessionGone: vi.fn(),
+    });
+
+    // Minted rather than adopted, and the identity answers for the account it
+    // was told to expect rather than the one the slot held.
+    expect(mint).toHaveBeenCalledTimes(1);
+    expect(identity.getPrincipal().toText()).toBe(ACCOUNT.toText());
+    identity.dispose();
+  });
+
+  it('mints rather than adopting when no account is named', async () => {
+    const storage = new MemoryCredentialStorage();
+    Object.defineProperty(storage, 'shared', { value: true });
+    const held = await storage.create();
+    await storage.set(SLOTS.app, { identity: held, chain: await appDelegation(held) });
+
+    const ours = await storage.create();
+    vi.spyOn(storage, 'create').mockResolvedValue(ours);
+    const mint = vi.fn(async () => await appDelegation(ours));
+
+    const identity = await SessionIdentity.create({
+      sessionExpiresAtMs: Date.now() + 30 * MINUTE,
+      source: { mint },
+      storage,
+      slot: SLOTS.app,
+      onSessionGone: vi.fn(),
+    });
+
+    // Nothing to check the slot against, so the slot is not trusted: a mint is
+    // the only thing that can say which account this is.
+    expect(mint).toHaveBeenCalledTimes(1);
     identity.dispose();
   });
 

@@ -1,6 +1,11 @@
 import type { DerEncodedPublicKey, HttpAgentRequest } from '@icp-sdk/core/agent';
 import { DelegationChain, DelegationIdentity } from '@icp-sdk/core/identity';
-import { type AppDelegationSource, SessionGoneError } from './app-delegation-source.js';
+import { Principal } from '@icp-sdk/core/principal';
+import {
+  type AppDelegationSource,
+  chainAuthorisesKey,
+  SessionGoneError,
+} from './app-delegation-source.js';
 import { withMintLock } from './app-lock.js';
 import type { Credential, CredentialStorage } from './credential-storage.js';
 
@@ -32,14 +37,28 @@ const expiresAtMs = (chain: DelegationChain): number =>
     ) / 1_000_000n,
   );
 
-const sameKey = (a: Uint8Array, b: Uint8Array): boolean =>
-  a.length === b.length && a.every((byte, i) => byte === b[i]);
-
-/** The leaf of a chain: the key it authorises. */
-const delegatesTo = (chain: DelegationChain): Uint8Array | undefined =>
-  chain.delegations[chain.delegations.length - 1]?.delegation.pubkey;
-
 const msLeftOf = (chain: DelegationChain): number => expiresAtMs(chain) - Date.now();
+
+/** The account a chain is rooted at. */
+const accountOf = (chain: DelegationChain): Principal =>
+  Principal.selfAuthenticating(new Uint8Array(chain.publicKey));
+
+/**
+ * Whether a credential may be used for `expected`.
+ *
+ * Two checks at opposite ends of the chain. The leaf must be the key stored
+ * beside it, which is true of any whole record whoever it belongs to. And the
+ * root must be the account the caller names — a credential left by another
+ * account would otherwise decide who this identity is, and requests would go
+ * out as that account and succeed until its delegation expired.
+ *
+ * `expected` is absent only where the caller has no account to name, which is
+ * why a read that cannot check it does not adopt.
+ */
+const isForAccount = (held: Held, expected: Principal | undefined): boolean => {
+  if (!chainAuthorisesKey(held.chain, held.identity.getPublicKey().toDer())) return false;
+  return expected === undefined || accountOf(held.chain).compareTo(expected) === 'eq';
+};
 
 /**
  * Reads what the slot holds, or `undefined` where it holds nothing usable.
@@ -107,6 +126,7 @@ async function acquireCredential({
   source,
   lockName,
   verify,
+  adopt,
   onGone,
 }: {
   storage: CredentialStorage;
@@ -114,11 +134,14 @@ async function acquireCredential({
   source: AppDelegationSource;
   lockName: string | null;
   verify?: (credential: Held) => boolean;
+  adopt: boolean;
   onGone?: () => void;
 }): Promise<Held> {
   return withMintLock(lockName, async (stolen) => {
     const stored = await readSlot({ storage, slot, evictSpent: true, verify });
-    if (stored && msLeftOf(stored.chain) > PRE_MINT_THRESHOLD_MS) return stored;
+    // Read either way, so a spent record is evicted; adopted only where the
+    // caller could say which account it expects.
+    if (adopt && stored && msLeftOf(stored.chain) > PRE_MINT_THRESHOLD_MS) return stored;
 
     const identity = await storage.create();
     let chain: DelegationChain;
@@ -219,6 +242,8 @@ export class SessionIdentity extends DelegationIdentity {
   readonly #slot: string;
   readonly #onSessionGone: () => void;
   readonly #sessionExpiresAtMs: number;
+  /** The account every credential must be rooted at, derived once. */
+  readonly #account: Principal;
   /** Reached by the base class's `sign`, so rotating does not change the object. */
   readonly #held: { current?: Held };
 
@@ -248,10 +273,10 @@ export class SessionIdentity extends DelegationIdentity {
    * @param options - As the constructor takes them, less the account key.
    */
   static async create(
-    options: Omit<SessionIdentityOptions, 'accountKey'>,
+    options: Omit<SessionIdentityOptions, 'accountKey'> & { expectedAccount?: Principal },
   ): Promise<SessionIdentity> {
     if (!sessionHasLifeLeft(options.sessionExpiresAtMs)) {
-      options.onSessionGone?.();
+      options.onSessionGone();
       throw new SessionGoneError('The session has expired');
     }
 
@@ -260,9 +285,11 @@ export class SessionIdentity extends DelegationIdentity {
       slot: options.slot,
       source: options.source,
       lockName: lockNameFor(options.storage, options.slot),
-      // No account is established yet, so there is nothing to check a candidate
-      // against: this is the mint that establishes one. Every later mint verifies
-      // against it, per {@link SessionIdentity.refresh}.
+      verify: (candidate) => isForAccount(candidate, options.expectedAccount),
+      // A caller that cannot name the account has nothing to check the slot
+      // against, so it mints rather than trusting what is there: a mint reports
+      // the account, and is the only thing that can establish one.
+      adopt: options.expectedAccount !== undefined,
       onGone: options.onSessionGone,
     });
 
@@ -296,6 +323,7 @@ export class SessionIdentity extends DelegationIdentity {
     this.#slot = options.slot;
     this.#onSessionGone = options.onSessionGone;
     this.#sessionExpiresAtMs = options.sessionExpiresAtMs;
+    this.#account = Principal.selfAuthenticating(new Uint8Array(options.accountKey));
   }
 
   override getDelegation(): DelegationChain {
@@ -358,13 +386,8 @@ export class SessionIdentity extends DelegationIdentity {
     return lockNameFor(this.#storage, this.#slot);
   }
 
-  #isForThisSession({ identity, chain }: Held): boolean {
-    const leaf = delegatesTo(chain);
-    return (
-      sameKey(chain.publicKey, super.getDelegation().publicKey) &&
-      leaf !== undefined &&
-      sameKey(new Uint8Array(leaf), new Uint8Array(identity.getPublicKey().toDer()))
-    );
+  #isForThisSession(held: Held): boolean {
+    return isForAccount(held, this.#account);
   }
 
   #msLeft(chain: DelegationChain): number {
@@ -434,6 +457,7 @@ export class SessionIdentity extends DelegationIdentity {
       // Every mint after the first must be rooted at the account already
       // established: one that is not is a failed mint, never a new principal.
       verify: (candidate) => this.#isForThisSession(candidate),
+      adopt: true,
       onGone: () => this.#reportGone(),
     });
     this.#adopt(credential);
