@@ -521,6 +521,20 @@ describe('AuthClient', () => {
     expect(released).toHaveBeenCalled();
   });
 
+  it('names no session bounds of its own', async () => {
+    const client = new AuthClient();
+    const transport = FakeTransport.last();
+    handleSignIn(transport);
+
+    await client.signIn();
+
+    // How long a sign-in lasts is the provider's policy. A number invented here
+    // would be a fourth opinion, after the provider, the user at consent, and an
+    // organization's cap.
+    expect(transport.requests[0].params).not.toHaveProperty('maxTimeToLive');
+    expect(transport.requests[0].params).not.toHaveProperty('maxTimeToIdle');
+  });
+
   it('should sign users out', async () => {
     const client = new AuthClient();
     await client.signOut();

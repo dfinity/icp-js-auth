@@ -38,13 +38,8 @@ const CHANNEL_LOCK = 'ic-auth-signer-channel';
 /** The lock over one namespace's sign-in, which `signIn` and `signOut` both move. */
 const signInLockFor = (stateSlot: string): string => `${stateSlot}:sign-in`;
 
-const NANOSECONDS_PER_SECOND = BigInt(1_000_000_000);
-const SECONDS_PER_HOUR = BigInt(3_600);
-const NANOSECONDS_PER_HOUR = NANOSECONDS_PER_SECOND * SECONDS_PER_HOUR;
-
 const IDENTITY_PROVIDER_DEFAULT = 'https://id.ai/authorize';
 const IDENTITY_CANISTER_DEFAULT = 'rdmx6-jaaaa-aaaaa-aaadq-cai';
-const DEFAULT_MAX_TIME_TO_LIVE = BigInt(8) * NANOSECONDS_PER_HOUR;
 
 export type OpenIdProvider = 'google' | 'apple' | 'microsoft';
 
@@ -184,15 +179,7 @@ export interface IdleOptions extends IdleManagerOptions {
 export interface AuthClientSignInOptions {
   /**
    * The longest the session may last, in nanoseconds.
-   *
-   * A ceiling rather than a request: what the user chooses at consent wins over
-   * it, an organization's cap narrows it further, and the canister clamps the
-   * result to between 10 minutes and 30 days.
-   *
-   * The default is what this option defaulted to when it capped a delegation
-   * rather than a session, kept so that no existing sign-in grows longer on
-   * upgrade. It is expected to rise in a later release.
-   * @default 8 hours
+   * @default the identity provider's, currently 30 days
    */
   maxTimeToLive?: bigint;
 
@@ -524,8 +511,6 @@ export class AuthClient {
   }
 
   async #runSignIn(options?: AuthClientSignInOptions): Promise<Identity> {
-    const maxTimeToLive = options?.maxTimeToLive ?? DEFAULT_MAX_TIME_TO_LIVE;
-
     // Journaled first, so a redirect flow finds it on the load that comes back:
     // the ceremony returns to the URL it was started from, which is rarely where
     // the user was. Journaled only when the caller gave one, so the journal of a
@@ -601,7 +586,11 @@ export class AuthClient {
 
       const sessionChain = await requestSessionDelegation(this.#signer, {
         sessionPublicKey: key.getPublicKey().toDer(),
-        maxTimeToLive,
+        // Both bounds are sent only where the caller asked, so the provider's
+        // own defaults apply otherwise rather than numbers this library
+        // invented. How long a sign-in lasts is the provider's policy, narrowed
+        // by what the user chooses at consent and by an organization's cap.
+        maxTimeToLive: options?.maxTimeToLive,
         derivationOrigin: this.#options.derivationOrigin?.toString(),
       });
 
