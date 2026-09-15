@@ -105,17 +105,17 @@ export interface AuthClientBaseOptions {
    *
    * A ceremony is rendered at a URL and delegations are minted by a canister,
    * and they are not the same address: a custom domain can front the mainnet
-   * canister, and a local deployment changes both. Each half defaults to its
-   * mainnet value, so an application deploying against mainnet configures
-   * neither. Nothing is derived from the URL — the origin of one is not a
-   * promise about which canister answers there.
+   * canister, and a local deployment changes both. Nothing is derived from the
+   * URL — the origin of one is not a promise about which canister answers
+   * there — so a deployment is named by both or by neither. Omit the option and
+   * both are mainnet's.
    */
   identityProvider?: {
     /** The authorize URL a ceremony is rendered at. */
-    authorizeUrl?: string | URL;
+    authorizeUrl: string | URL;
 
     /** The canister that mints and revokes this application's delegations. */
-    canisterId?: Principal | string;
+    canisterId: Principal | string;
   };
 
   /**
@@ -394,17 +394,27 @@ export class AuthClient {
     // going to the wrong canister.
     if (typeof options.identityProvider === 'string' || options.identityProvider instanceof URL) {
       throw new TypeError(
-        'identityProvider is now an object: pass { authorizeUrl } for the ceremony URL, and { canisterId } for the canister that mints',
+        'identityProvider is now an object: pass { authorizeUrl, canisterId } — the URL a ceremony is rendered at, and the canister that mints',
       );
     }
 
-    this.#canisterId = Principal.from(
-      options.identityProvider?.canisterId ?? IDENTITY_CANISTER_DEFAULT,
-    );
+    const provider = options.identityProvider ?? {
+      authorizeUrl: IDENTITY_PROVIDER_DEFAULT,
+      canisterId: IDENTITY_CANISTER_DEFAULT,
+    };
 
-    const identityProviderUrl = new URL(
-      options.identityProvider?.authorizeUrl?.toString() || IDENTITY_PROVIDER_DEFAULT,
-    );
+    // Both or neither, for the same reason a bare URL is refused above: half of
+    // a deployment renders the ceremony at one provider and mints against
+    // another. The type says so, and this says it to a caller without one.
+    if (provider.authorizeUrl === undefined || provider.canisterId === undefined) {
+      throw new TypeError(
+        'identityProvider names authorizeUrl and canisterId together, or neither: nothing about the canister is derived from the URL',
+      );
+    }
+
+    this.#canisterId = Principal.from(provider.canisterId);
+
+    const identityProviderUrl = new URL(provider.authorizeUrl.toString());
     if (!options.disableBrowserActivity) {
       // The identity decides whether a mint is due; these only say the moment is
       // a good one. Nothing is hooked where there is no DOM.

@@ -16,14 +16,20 @@ import { AttributesIdentity } from '@icp-sdk/core/identity';
 import { Principal } from '@icp-sdk/core/principal';
 
 const network = 'ic'; // typically, this value is read from the environment (e.g. process.env.DFX_NETWORK)
-const identityProvider =
-  network === 'ic'
-    ? 'https://id.ai/authorize' // Mainnet
-    : 'http://id.ai.localhost:8000'; // default name mapping set by icp-cli when ii is enabled
 
+// The canister that mints delegations and signs attributes. Locally, this is the
+// id your own Internet Identity deployment reported.
 const internetIdentityCanisterId = Principal.fromText('rdmx6-jaaaa-aaaaa-aaadq-cai');
 
-const authClient = new AuthClient({ identityProvider });
+const authClient = new AuthClient({
+  identityProvider: {
+    authorizeUrl:
+      network === 'ic'
+        ? 'https://id.ai/authorize' // Mainnet
+        : 'http://id.ai.localhost:8000/authorize', // default name mapping set by icp-cli when ii is enabled
+    canisterId: internetIdentityCanisterId,
+  },
+});
 
 // Check for an existing session (synchronous)
 if (authClient.isAuthenticated()) {

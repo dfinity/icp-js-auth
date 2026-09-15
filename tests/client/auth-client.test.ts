@@ -514,6 +514,23 @@ describe('AuthClient', () => {
     expect((error as Error).message).toBe('user cancelled');
   });
 
+  it('refuses half of an identity provider, which would mint against mainnet', () => {
+    expect(
+      () =>
+        new AuthClient({
+          // @ts-expect-error the URL and the canister are named together
+          identityProvider: { authorizeUrl: 'https://my-ii.icp0.io/authorize' },
+        }),
+    ).toThrow('together, or neither');
+    expect(
+      () =>
+        new AuthClient({
+          // @ts-expect-error the URL and the canister are named together
+          identityProvider: { canisterId: 'rdmx6-jaaaa-aaaaa-aaadq-cai' },
+        }),
+    ).toThrow('together, or neither');
+  });
+
   it('refuses the identity provider as a bare URL, which it used to be', () => {
     // Silently ignored would mean both halves falling back to mainnet.
     expect(() =>
@@ -1385,7 +1402,7 @@ describe('AuthClient signIn', () => {
     const agentOptions = { host: 'https://example.test' };
     const client = track(
       new AuthClient({
-        identityProvider: { canisterId },
+        identityProvider: { authorizeUrl: 'https://id.ai/authorize', canisterId },
         agentOptions,
       }),
     );
