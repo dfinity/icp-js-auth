@@ -36,7 +36,7 @@ const authClient = new AuthClient({ ssoDomain: 'dfinity.org' });
 await authClient.signIn();
 ```
 
-The identity provider resolves the organization's OpenID configuration from `https://dfinity.org/.well-known/ii-openid-configuration` and sends the user to the provider named there. Any organization that publishes that document can be signed in against, with nothing registered ahead of time.
+The identity provider resolves the organization's OpenID configuration from `https://dfinity.org/.well-known/ii-openid-configuration` and sends the user to the provider named there. Any organization that [publishes that document](https://docs.internetcomputer.org/guides/authentication/enterprise-sso/) can be signed in against, with nothing registered ahead of time.
 
 The domain is normalized before it is sent: it is lowercased, IDNA-encoded, and must be a host with an optional port and nothing else. A value carrying a scheme, a path, a query, or a fragment throws.
 
