@@ -3,7 +3,11 @@ import { DelegationChain, Ed25519KeyIdentity } from '@icp-sdk/core/identity';
 import { Principal } from '@icp-sdk/core/principal';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-import { SessionGoneError } from '../../src/client/app-delegation-source.ts';
+import {
+  AccountMismatchError,
+  SessionGoneError,
+  SessionUnsupportedError,
+} from '../../src/client/app-delegation-source.ts';
 import type { CredentialStorage } from '../../src/client/credential-storage.ts';
 import { MemoryCredentialStorage } from '../../src/client/memory-credential-storage.ts';
 import { SessionIdentity } from '../../src/client/session-identity.ts';
@@ -240,6 +244,28 @@ describe('SessionIdentity', () => {
     expect(onSessionGone).toHaveBeenCalledTimes(1);
   });
 
+  it('stops asking, and leaves the session alone, when it cannot act for it', async () => {
+    const onSessionGone = vi.fn();
+    const { mint, request } = harness({ onSessionGone });
+    await request();
+    mint.mockRejectedValue(new SessionUnsupportedError('read-only'));
+
+    // Far enough in that the delegation cannot serve a request, so one has to
+    // wait for a mint rather than being handed what is held.
+    await vi.advanceTimersByTimeAsync(TTL - 5_000);
+    await expect(request()).rejects.toBeInstanceOf(SessionUnsupportedError);
+    const asked = mint.mock.calls.length;
+
+    // The rotation is dropped rather than left firing, and the next request is
+    // refused from the latch rather than by asking again.
+    await vi.advanceTimersByTimeAsync(TTL * 3);
+    await expect(request()).rejects.toBeInstanceOf(SessionUnsupportedError);
+
+    expect(mint.mock.calls.length).toBe(asked);
+    // Alive, just unusable here: nothing reports it gone.
+    expect(onSessionGone).not.toHaveBeenCalled();
+  });
+
   it('keeps the session when a mint fails for any other reason', async () => {
     const onSessionGone = vi.fn();
     const { mint, request } = harness({ onSessionGone });
@@ -270,7 +296,7 @@ describe('SessionIdentity', () => {
     );
     mint.mockResolvedValue(foreign);
 
-    await expect(request()).rejects.toThrow('not for this account and key');
+    await expect(request()).rejects.toBeInstanceOf(AccountMismatchError);
   });
 
   it('refuses a delegation issued to a key it did not make', async () => {
@@ -279,7 +305,7 @@ describe('SessionIdentity', () => {
     const strangersKey = Ed25519KeyIdentity.generate();
     mint.mockResolvedValue(await appDelegation(strangersKey));
 
-    await expect(request()).rejects.toThrow('not for this account and key');
+    await expect(request()).rejects.toBeInstanceOf(AccountMismatchError);
   });
 
   it('makes a fresh key for every mint, so a key never outlives its delegation', async () => {

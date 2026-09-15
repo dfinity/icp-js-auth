@@ -2,9 +2,11 @@ import type { DerEncodedPublicKey, HttpAgentRequest } from '@icp-sdk/core/agent'
 import { DelegationChain, DelegationIdentity } from '@icp-sdk/core/identity';
 import { Principal } from '@icp-sdk/core/principal';
 import {
+  AccountMismatchError,
   type AppDelegationSource,
   chainAuthorisesKey,
   SessionGoneError,
+  SessionUnsupportedError,
 } from './app-delegation-source.js';
 import { withMintLock } from './app-lock.js';
 import type { Credential, CredentialStorage } from './credential-storage.js';
@@ -154,7 +156,7 @@ async function acquireCredential({
 
     const credential = { identity, chain };
     if (verify !== undefined && !verify(credential)) {
-      throw new Error('The minted delegation is not for this account and key');
+      throw new AccountMismatchError();
     }
 
     // Checked here, after the calls have returned and before anything is written:
@@ -251,6 +253,7 @@ export class SessionIdentity extends DelegationIdentity {
   #currentWasUsed = false;
   #scheduled: ReturnType<typeof setTimeout> | undefined;
   #reportedGone = false;
+  #unsupported: SessionUnsupportedError | undefined;
 
   /**
    * Builds an identity for a session, resolving the account key it needs.
@@ -441,6 +444,12 @@ export class SessionIdentity extends DelegationIdentity {
   }
 
   async #mintOnce(): Promise<Held> {
+    // A session this library cannot act for will answer the same way every time,
+    // so nothing is gained by asking again: the rotation stops and the error
+    // reaches the caller. The record is left alone — the sign-in is alive, and
+    // retracting it would sign every tab on the domain out of it.
+    if (this.#unsupported) throw this.#unsupported;
+
     // A delegation lasts min(its ttl, what remains of the session), so minting
     // against an almost finished session returns one already too short to use,
     // and refreshing on the delegation alone would mint without end.
@@ -449,17 +458,28 @@ export class SessionIdentity extends DelegationIdentity {
       throw new SessionGoneError('The session has expired');
     }
 
-    const credential = await acquireCredential({
-      storage: this.#storage,
-      slot: this.#slot,
-      source: this.#source,
-      lockName: this.#lockName,
-      // Every mint after the first must be rooted at the account already
-      // established: one that is not is a failed mint, never a new principal.
-      verify: (candidate) => this.#isForThisSession(candidate),
-      adopt: true,
-      onGone: () => this.#reportGone(),
-    });
+    let credential: Held;
+    try {
+      credential = await acquireCredential({
+        storage: this.#storage,
+        slot: this.#slot,
+        source: this.#source,
+        lockName: this.#lockName,
+        // Every mint after the first must be rooted at the account already
+        // established: one that is not is a failed mint, never a new principal.
+        verify: (candidate) => this.#isForThisSession(candidate),
+        adopt: true,
+        onGone: () => this.#reportGone(),
+      });
+    } catch (error) {
+      // Latched, and the rotation dropped: asking again would return the same
+      // answer, and a timer that keeps firing for it is a timer that never stops.
+      if (error instanceof SessionUnsupportedError) {
+        this.#unsupported = error;
+        this.dispose();
+      }
+      throw error;
+    }
     this.#adopt(credential);
     return credential;
   }
