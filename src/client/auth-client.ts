@@ -42,8 +42,7 @@ export interface AuthClientCreateOptions {
   identity?: SignIdentity | PartialIdentity;
 
   /**
-   * Persistent storage backend. Defaults to IndexedDB.
-   * @default IdbStorage
+   * Where credentials are kept. Defaults to IndexedDB.
    */
   credentialStorage?: CredentialStorage;
 
@@ -462,14 +461,11 @@ export class AuthClient {
 
     const key: SignIdentity | PartialIdentity | null =
       acquired ?? (await this.#credentialStorage.get(this.#slots.sessionPending))?.identity ?? null;
-    if (key === null) {
-      throw new Error('Session key missing after acquisition');
-    }
-    if (publicKeyOf(key) !== startedWith) {
-      // Another sign-in in this browser took the pending slot while this one was
-      // away. Its delegation was minted for a different key, so this flow cannot
-      // finish; the caller retries, and by then the session that superseded it
-      // has usually been promoted.
+    // Empty or holding another flow's key: either way the key this ceremony
+    // journaled is no longer in the slot, so the delegation being replayed was
+    // minted for a key this flow does not have. The caller retries, and by then
+    // the sign-in that superseded it has usually been promoted.
+    if (key === null || publicKeyOf(key) !== startedWith) {
       throw new Error('This sign-in was superseded by another one in this browser');
     }
     return { key, pending: true };
@@ -701,9 +697,11 @@ export class AuthClient {
     identity: SignIdentity | PartialIdentity,
     chain: DelegationChain,
   ): Promise<void> {
-    // A PartialIdentity is the caller's own and cannot sign, so there is nothing
-    // worth storing: the client uses it for this run and restores nothing later.
-    if (!('toDer' in identity)) {
+    // The client stores only keys it made itself. An identity the caller passed
+    // in is theirs to pass again, and may be of a kind this store cannot hold.
+    // A key the client made can always sign; the second clause is what tells
+    // the compiler so.
+    if (this.#options.identity === undefined && 'sign' in identity) {
       await this.#credentialStorage.set(this.#slots.session, { identity, chain });
     }
 
@@ -765,10 +763,13 @@ export class AuthClient {
     await this.#clearCredentials();
   }
 
-  // Always every slot, so no caller can end a sign-in halfway by naming one. The
-  // state is retracted before this by both callers: it is what says whether this
-  // origin is signed in, and a teardown that failed partway must not leave it
-  // saying yes.
+  // Every slot a completed sign-in writes. Not the ceremony's pending slot: a
+  // flow that completed has already emptied it, and one that has not may still
+  // return for it — a sign-out here cannot tell an abandoned key from a live one.
+  //
+  // The state is retracted before this by both callers: it is what says whether
+  // this origin is signed in, and a teardown that failed partway must not leave
+  // it saying yes.
   async #clearCredentials(): Promise<void> {
     await this.#credentialStorage.remove(this.#slots.session);
   }
