@@ -2,6 +2,7 @@
 
 ### Feat
 
+- say a session ended, and name the identity provider as a pair (#191)
 - one-click SSO sign-in for organization domains (#141)
 - a shared store with no durable medium (#180)
 - acquire a session without a ceremony (#145)

@@ -514,6 +514,23 @@ describe('AuthClient', () => {
     expect((error as Error).message).toBe('user cancelled');
   });
 
+  it('refuses half of an identity provider, which would mint against mainnet', () => {
+    expect(
+      () =>
+        new AuthClient({
+          // @ts-expect-error the URL and the canister are named together
+          identityProvider: { authorizeUrl: 'https://id.ai/authorize' },
+        }),
+    ).toThrow('together, or neither');
+    expect(
+      () =>
+        new AuthClient({
+          // @ts-expect-error the URL and the canister are named together
+          identityProvider: { canisterId: 'rdmx6-jaaaa-aaaaa-aaadq-cai' },
+        }),
+    ).toThrow('together, or neither');
+  });
+
   it('refuses the identity provider as a bare URL, which it used to be', () => {
     // Silently ignored would mean both halves falling back to mainnet.
     expect(() =>
@@ -1385,7 +1402,7 @@ describe('AuthClient signIn', () => {
     const agentOptions = { host: 'https://example.test' };
     const client = track(
       new AuthClient({
-        identityProvider: { canisterId },
+        identityProvider: { authorizeUrl: 'https://id.ai/authorize', canisterId },
         agentOptions,
       }),
     );
@@ -1998,12 +2015,13 @@ describe('AuthClient signIn', () => {
     client.dispose();
   });
 
-  it('ends the sign-in when a refused mint finds the record still naming it', async () => {
+  it('publishes the sign-in as ended when a refused mint finds the record naming it', async () => {
     const credentialStorage = new MemoryCredentialStorage();
     const stateStorage = new CookieStateStorage({ domain: 'localhost' });
     const client = new AuthClient({ credentialStorage, stateStorage });
     handleSignIn(FakeTransport.last());
     const identity = (await client.signIn()) as SessionIdentity;
+    const account = client.getPrincipal();
 
     // Nothing replaced the record, so it names the session that just died — and
     // a domain has one, so it cannot be revived. Nobody can use what it names.
@@ -2011,13 +2029,46 @@ describe('AuthClient signIn', () => {
     vi.useFakeTimers({ toFake: ['Date'] });
     vi.setSystemTime(new Date(Date.now() + 4 * 60 * 1000 + 50_000));
     await identity.refresh();
+
+    // The credentials go and the record stays, saying the session ended rather
+    // than that nobody signed in — so every tab and sibling can name the account
+    // it ended for. Signing out is the act that leaves nothing.
+    expect(await credentialStorage.get(SLOTS.session)).toBeNull();
+    const status = client.getStatus();
+    expect(status.state).toBe('expired');
+    expect(status.state !== 'signed-out' && status.principal.toText()).toBe(account?.toText());
     vi.useRealTimers();
     minted.refuse = false;
-
-    expect(await credentialStorage.get(SLOTS.session)).toBeNull();
-    expect(stateStorage.get(SLOTS.state)).toBeNull();
-    expect(client.getStatus().state).toBe('signed-out');
     client.dispose();
+  });
+
+  it('leaves nothing behind when the session a ceremony obtained is refused', async () => {
+    const credentialStorage = new MemoryCredentialStorage();
+    const stateStorage = new MemoryStateStorage();
+    const client = track(new AuthClient({ credentialStorage, stateStorage }));
+    handleSignIn(FakeTransport.last());
+
+    // A session too short to mint against: the sign-in rejects, and a record
+    // saying a session ended here would describe one nobody ever used.
+    await expect(client.signIn({ maxTimeToLive: 1_000_000n })).rejects.toThrow(SessionGoneError);
+
+    expect(stateStorage.get(SLOTS.state)).toBeNull();
+    expect(client.getStatus()).toEqual({ state: 'signed-out' });
+  });
+
+  it('hands back the anonymous identity for a record whose session ended', async () => {
+    const stateStorage = new MemoryStateStorage();
+    stateStorage.set(SLOTS.state, {
+      principal: Principal.selfAuthenticating(new Uint8Array([1, 2, 3])),
+      expiration: BigInt(Date.now() - 60_000) * 1_000_000n,
+    });
+    const client = track(new AuthClient({ stateStorage }));
+
+    // A live record this origin cannot act on means a credential to acquire, and
+    // failing by name is what sends a caller to acquire one. An ended session has
+    // nothing to acquire, so the anonymous identity is the honest answer.
+    const identity = await client.getIdentity();
+    expect(identity.getPrincipal().isAnonymous()).toBe(true);
   });
 
   it('keeps a record a sibling has moved on, and stops claiming it', async () => {

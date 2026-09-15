@@ -108,13 +108,44 @@ describe('CookieStateStorage', () => {
     expect(storage.get('one:ic-session-state')).not.toBeNull();
   });
 
-  it('removes rather than writes a state whose expiry has already passed', () => {
+  it('keeps a state whose expiry has passed, which is how a session says it ended', () => {
     const storage = new CookieStateStorage({ domain: DOMAIN });
     storage.set(KEY, state());
 
     storage.set(KEY, state(-1000));
 
-    expect(storage.get(KEY)).toBeNull();
+    // Removing it would say nobody ever signed in. The record stands, naming the
+    // account and an expiry now behind us, which is what every sibling reads as
+    // a session that ended rather than one that never was.
+    const kept = storage.get(KEY);
+    expect(kept).not.toBeNull();
+    expect(kept?.expiration).toBeLessThan(BigInt(Date.now()) * 1_000_000n);
+  });
+
+  it('keeps the record past the sign-in it describes, not only as long as it', () => {
+    const written: string[] = [];
+    const cookie = Object.getOwnPropertyDescriptor(Document.prototype, 'cookie');
+    Object.defineProperty(document, 'cookie', {
+      configurable: true,
+      get: () => cookie?.get?.call(document) ?? '',
+      set: (value: string) => {
+        written.push(value);
+        cookie?.set?.call(document, value);
+      },
+    });
+
+    try {
+      const storage = new CookieStateStorage({ domain: DOMAIN });
+      // A minute of session. Were the cookie's life the session's, the browser
+      // would drop the record at the very moment it became worth reading as
+      // ended — so the record outlives what it describes.
+      storage.set(KEY, state(60 * 1000));
+
+      const record = written.find((value) => value.startsWith(encodeURIComponent(KEY)));
+      expect(record).toContain(`Max-Age=${400 * 24 * 60 * 60}`);
+    } finally {
+      Object.defineProperty(document, 'cookie', { configurable: true, ...cookie });
+    }
   });
 
   it('refuses a domain this host cannot write, rather than writing nothing', () => {

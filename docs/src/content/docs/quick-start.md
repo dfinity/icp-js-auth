@@ -15,15 +15,12 @@ import { HttpAgent } from '@icp-sdk/core/agent';
 import { AttributesIdentity } from '@icp-sdk/core/identity';
 import { Principal } from '@icp-sdk/core/principal';
 
-const network = 'ic'; // typically, this value is read from the environment (e.g. process.env.DFX_NETWORK)
-const identityProvider =
-  network === 'ic'
-    ? 'https://id.ai/authorize' // Mainnet
-    : 'http://id.ai.localhost:8000'; // default name mapping set by icp-cli when ii is enabled
-
-const internetIdentityCanisterId = Principal.fromText('rdmx6-jaaaa-aaaaa-aaadq-cai');
-
-const authClient = new AuthClient({ identityProvider });
+const authClient = new AuthClient({
+  identityProvider: {
+    authorizeUrl: process.env.II_AUTHORIZE_URL,
+    canisterId: process.env.II_CANISTER_ID,
+  },
+});
 
 // Check for an existing session (synchronous)
 if (authClient.isAuthenticated()) {
@@ -46,7 +43,7 @@ const identity = await authClient.getIdentity();
 const identityWithAttributes = new AttributesIdentity({
   inner: identity,
   attributes: { data, signature },
-  signer: { canisterId: internetIdentityCanisterId },
+  signer: { canisterId: Principal.fromText(process.env.II_CANISTER_ID) },
 });
 
 const agent = await HttpAgent.create({ identity: identityWithAttributes });

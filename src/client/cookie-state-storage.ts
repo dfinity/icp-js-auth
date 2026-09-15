@@ -2,6 +2,21 @@ import { Principal } from '@icp-sdk/core/principal';
 import { LocalStateStorage, type SessionState, type StateStorage } from './state-storage.js';
 
 /**
+ * How long the browser keeps the record, which is not how long the sign-in
+ * lasts: the record says when the session expires, and it is kept past that so
+ * every sibling can say the session ended rather than that nobody signed in.
+ * Signing in rewrites it and signing out removes it, so this is only the
+ * ceiling on a record nothing came back for.
+ *
+ * Four hundred days because that is what browsers allow — Chrome, Edge and
+ * Firefox cap a persistent cookie there and silently truncate anything longer.
+ * Safari caps a cookie written by script to seven days, which shortens this
+ * without breaking it: the record lapses to signed out, the same answer a
+ * cleared store gives.
+ */
+const RECORD_MAX_AGE_SECONDS = 400 * 24 * 60 * 60;
+
+/**
  * Whether a hostname is loopback, which browsers treat as a secure context, so a
  * cookie set there needs no `Secure` attribute.
  */
@@ -145,18 +160,11 @@ export class CookieStateStorage implements StateStorage {
   }
 
   public set(key: string, state: Omit<SessionState, 'held'>): void {
-    const seconds = Number((state.expiration - BigInt(Date.now()) * 1_000_000n) / 1_000_000_000n);
-    if (seconds <= 0) {
-      // Already over, so there is no state to publish: writing it would announce
-      // a sign-in that has ended.
-      this.remove(key);
-      return;
-    }
     // The local record first, so nothing reads the cookie as held before it is.
     this.#local.set(key, state);
     const payload = `${state.principal.toText()}|${state.expiration.toString()}`;
     // biome-ignore lint/suspicious/noDocumentCookie: the Cookie Store API is async, and this record is read synchronously alongside isAuthenticated().
-    document.cookie = `${encodeURIComponent(key)}=${encodeURIComponent(payload)}; ${this.#attributes}; Max-Age=${seconds}`;
+    document.cookie = `${encodeURIComponent(key)}=${encodeURIComponent(payload)}; ${this.#attributes}; Max-Age=${RECORD_MAX_AGE_SECONDS}`;
     this.#fire(key);
   }
 
