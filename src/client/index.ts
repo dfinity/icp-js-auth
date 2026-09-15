@@ -21,6 +21,7 @@ export {
   DEFAULT_SHARED_MEMORY_NAME,
   SharedMemoryCredentialStorage,
 } from './shared-memory-credential-storage.js';
+export { isValidSsoDomain } from './sso.js';
 export {
   LocalStateStorage,
   MemoryStateStorage,

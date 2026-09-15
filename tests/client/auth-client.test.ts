@@ -8,7 +8,12 @@ import { Principal } from '@icp-sdk/core/principal';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { SessionGoneError } from '../../src/client/app-delegation-source.ts';
 import { stealLock } from '../../src/client/app-lock.ts';
-import { AuthClient, SessionNotHeldError, SupersededError } from '../../src/client/auth-client.ts';
+import {
+  AuthClient,
+  SessionNotHeldError,
+  SupersededError,
+  scopedKeys,
+} from '../../src/client/auth-client.ts';
 import { CookieStateStorage } from '../../src/client/cookie-state-storage.ts';
 import type { Credential, CredentialStorage } from '../../src/client/credential-storage.ts';
 import { IdbCredentialStorage } from '../../src/client/idb-credential-storage.ts';
@@ -820,6 +825,47 @@ describe('AuthClient', () => {
     expect(url.searchParams.get('prompt')).toBe('none');
     expect(url.searchParams.get('hint')).toBe(account?.toText());
     expect(identity.getPrincipal().isAnonymous()).toBe(false);
+  });
+
+  it('should pass a normalized sso search param to the transport', () => {
+    new AuthClient({ ssoDomain: ' DFINITY.org ' });
+    const url = new URL(FakeTransport.last().options.url ?? '');
+    expect(url.searchParams.get('sso')).toBe('dfinity.org');
+  });
+
+  it('should not include sso search param when ssoDomain is not set', () => {
+    new AuthClient();
+    const url = new URL(FakeTransport.last().options.url ?? '');
+    expect(url.searchParams.has('sso')).toBe(false);
+  });
+
+  it('should throw for an ssoDomain that is not a bare domain', () => {
+    expect(() => new AuthClient({ ssoDomain: 'https://dfinity.org' })).toThrow(
+      'ssoDomain must be a domain and optional port',
+    );
+  });
+
+  it('should throw when both one-click entry points are set', () => {
+    expect(
+      () =>
+        new AuthClient({
+          openIdProvider: 'google',
+          // @ts-expect-error the two entry points are mutually exclusive
+          ssoDomain: 'dfinity.org',
+        }),
+    ).toThrow('mutually exclusive');
+  });
+
+  it('should pass derivationOrigin as a search param alongside sso', () => {
+    new AuthClient({ ssoDomain: 'dfinity.org', derivationOrigin: 'https://app.example.com' });
+    const url = new URL(FakeTransport.last().options.url ?? '');
+    expect(url.searchParams.get('derivationOrigin')).toBe('https://app.example.com');
+  });
+
+  it('should not pass derivationOrigin as a search param without sso', () => {
+    new AuthClient({ derivationOrigin: 'https://app.example.com' });
+    const url = new URL(FakeTransport.last().options.url ?? '');
+    expect(url.searchParams.has('derivationOrigin')).toBe(false);
   });
 
   it('should forward windowOpenerFeatures to the transport', () => {
@@ -2340,5 +2386,64 @@ describe('AuthClient signIn + requestAttributes', () => {
 
     expect(Array.from(attributes.data)).toEqual(Array.from(new TextEncoder().encode('hello')));
     expect(identity.getPrincipal().isAnonymous()).toBe(false);
+  });
+});
+
+describe('scopedKeys', () => {
+  it('should scope default keys to an OpenID provider', () => {
+    expect(scopedKeys({ openIdProvider: 'google' })).toEqual([
+      'openid:https://accounts.google.com:name',
+      'openid:https://accounts.google.com:email',
+      'openid:https://accounts.google.com:verified_email',
+    ]);
+  });
+
+  it('should scope given keys to an OpenID provider', () => {
+    expect(scopedKeys({ openIdProvider: 'apple', keys: ['email'] })).toEqual([
+      'openid:https://appleid.apple.com:email',
+    ]);
+  });
+
+  it('should scope default keys to an SSO domain', () => {
+    expect(scopedKeys({ ssoDomain: 'dfinity.org' })).toEqual([
+      'sso:dfinity.org:name',
+      'sso:dfinity.org:email',
+    ]);
+  });
+
+  it('should scope given keys to an SSO domain', () => {
+    expect(scopedKeys({ ssoDomain: 'dfinity.org', keys: ['email'] })).toEqual([
+      'sso:dfinity.org:email',
+    ]);
+  });
+
+  it('should normalize the SSO domain', () => {
+    expect(scopedKeys({ ssoDomain: ' DFINITY.org ', keys: ['email'] })).toEqual([
+      'sso:dfinity.org:email',
+    ]);
+  });
+
+  it('should throw for an SSO domain that is not a bare domain', () => {
+    expect(() => scopedKeys({ ssoDomain: 'dfinity.org/sso' })).toThrow(
+      'ssoDomain must be a domain and optional port',
+    );
+  });
+
+  it('should throw when neither entry point is given', () => {
+    // @ts-expect-error one of the two entry points is required
+    expect(() => scopedKeys({})).toThrow('requires either openIdProvider or ssoDomain');
+  });
+
+  it('should throw when both entry points are given', () => {
+    // @ts-expect-error the two entry points are mutually exclusive
+    expect(() => scopedKeys({ openIdProvider: 'google', ssoDomain: 'dfinity.org' })).toThrow(
+      'mutually exclusive',
+    );
+  });
+
+  it('should scope keys to the punycode form of an internationalized domain', () => {
+    expect(scopedKeys({ ssoDomain: 'zürich.example', keys: ['email'] })).toEqual([
+      'sso:xn--zrich-kva.example:email',
+    ]);
   });
 });

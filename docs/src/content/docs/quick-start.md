@@ -2,7 +2,7 @@
 title: Quick Start
 description: A quick start guide to using the @icp-sdk/auth package.
 next:
-  label: Client Module
+  label: One-Click Sign-In
 ---
 
 This guide offers a simple example of how to use the `@icp-sdk/auth` package to authenticate a user with [Internet Identity](https://internetcomputer.org/docs/building-apps/authentication/overview) on an Internet Computer web app.
@@ -33,7 +33,10 @@ if (authClient.isAuthenticated()) {
 
 // sign in and request attributes in parallel
 const signInPromise = authClient.signIn();
-const attributesPromise = authClient.requestAttributes({ keys: ['email', 'name'] });
+const attributesPromise = authClient.requestAttributes({
+  keys: ['email', 'name'],
+  nonce: () => fetchNonceFromYourBackend(), // () => Promise<Uint8Array>
+});
 
 await signInPromise;
 const { data, signature } = await attributesPromise;

@@ -4,7 +4,8 @@
     "items": [
       { "label": "Overview", "link": "/" },
       { "label": "Installation", "link": "/installation" },
-      { "label": "Quick Start", "link": "/quick-start" }
+      { "label": "Quick Start", "link": "/quick-start" },
+      { "label": "One-Click Sign-In", "link": "/one-click-sign-in" }
     ]
   },
   {
