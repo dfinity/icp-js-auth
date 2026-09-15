@@ -1585,6 +1585,47 @@ describe('AuthClient signIn', () => {
   // `getStatus()` and its neighbours are snapshots, so an application rendering
   // on them has to be told when to read again — and the record changes for
   // reasons that are nothing to do with the client holding it.
+  it('does not re-hydrate off its own ceremony writes', async () => {
+    const credentialStorage = new MemoryCredentialStorage();
+    const stateStorage = new MemoryStateStorage();
+    const client = track(new AuthClient({ credentialStorage, stateStorage }));
+
+    // A same-tab write announces itself, so the ceremony's own `#persistSession`
+    // would otherwise start a restore while the app slot still holds whatever
+    // the previous sign-in left.
+    handleSignIn(FakeTransport.last());
+    const identity = await client.signIn();
+
+    const state = stateStorage.get(SLOTS.state);
+    expect(identity.getPrincipal().toText()).toBe(state?.principal.toText());
+    expect(client.getStatus().state).toBe('signed-in');
+  });
+
+  it('collapses a burst of record changes into one further restore', async () => {
+    const credentialStorage = new MemoryCredentialStorage();
+    const stateStorage = new MemoryStateStorage();
+    const client = track(new AuthClient({ credentialStorage, stateStorage }));
+    handleSignIn(FakeTransport.last());
+    await client.signIn();
+
+    const record = stateStorage.get(SLOTS.state);
+    const reads = vi.spyOn(credentialStorage, 'get');
+
+    // Three changes in one tick. Queueing one restore each would read the
+    // session slot three times and install three identities, disposing two.
+    for (const bump of [1n, 2n, 3n]) {
+      stateStorage.set(SLOTS.state, {
+        principal: record!.principal,
+        expiration: record!.expiration + bump,
+      });
+    }
+    await client.getIdentity();
+
+    const passes = reads.mock.calls.filter(([slot]) => slot === SLOTS.session).length;
+    expect(passes).toBe(1);
+    reads.mockRestore();
+  });
+
   it('tells a subscriber when who is signed in here changes', async () => {
     const credentialStorage = new MemoryCredentialStorage();
     const stateStorage = new MemoryStateStorage();

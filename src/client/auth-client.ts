@@ -288,6 +288,8 @@ export class AuthClient {
   // next event finds a fresher answer than the one already in flight anyway.
   #refreshingInForeground = false;
   #disposed = false;
+  // Set while a further restore is pending, so a burst of changes is one pass.
+  #restoreQueued = false;
   #stateStorage: StateStorage;
   #signer: Signer;
   // Set only in redirect mode, so the redirect-specific paths (nonce/key
@@ -347,6 +349,11 @@ export class AuthClient {
     // answering for a sign-in the record no longer names is wrong rather than
     // stale.
     this.#unwatchState = this.#stateStorage.subscribe(this.#slots.state, () => {
+      // Only a change this client did not cause. A ceremony writes this record
+      // itself and installs the identity that goes with it, and a same-tab write
+      // announces itself — so reacting to our own would re-hydrate mid-ceremony,
+      // when the app slot still holds the previous account's credential.
+      if (this.#interactions > 0 || this.#disposed) return;
       this.#restoreAgain();
     });
     if (options.openIdProvider) {
@@ -1199,10 +1206,22 @@ export class AuthClient {
    * {@link AuthClient.#init} forgets one, so the next call tries again.
    */
   #restoreAgain(): void {
+    // Coalescing, not queueing: a pass that has not started yet will read the
+    // same record a second one would, so any burst collapses to one more pass.
+    // Each pass can install an identity, and installing disposes the one it
+    // replaces — redundant passes mean disposing an identity with requests in
+    // flight against it.
+    if (this.#restoreQueued) return;
+    this.#restoreQueued = true;
+
     const promise = (this.#initPromise ?? Promise.resolve())
       .catch(() => undefined)
-      .then(() => this.#hydrate())
+      .then(() => {
+        this.#restoreQueued = false;
+        return this.#hydrate();
+      })
       .catch((error: unknown) => {
+        this.#restoreQueued = false;
         if (this.#initPromise === promise) {
           this.#initPromise = null;
         }
