@@ -8,6 +8,15 @@
     ]
   },
   {
+    "label": "Guides",
+    "items": [
+      {
+        "label": "Shared sessions across subdomains",
+        "link": "/shared-sessions"
+      }
+    ]
+  },
+  {
     "label": "Modules",
     "items": [
       {
