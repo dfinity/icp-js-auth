@@ -542,9 +542,15 @@ export class AuthClient {
     // asking about it would have let exactly that through.
     //
     // A disposed client is exempt: it holds nothing because it was told to stop,
-    // which is not the same as being unable to act on a sign-in that exists.
-    const state = this.#stateStorage.get(this.#slots.state);
-    if (state !== null && !this.#disposed && this.#identity instanceof AnonymousIdentity) {
+    // which is not the same as being unable to act on a sign-in that exists. So
+    // is a record past its expiry: it names a session that has ended, and there
+    // is nothing to acquire for one of those.
+    const live = this.#readStatus().state;
+    if (
+      (live === 'signed-in' || live === 'signed-in-elsewhere') &&
+      !this.#disposed &&
+      this.#identity instanceof AnonymousIdentity
+    ) {
       throw new SessionNotHeldError();
     }
     return this.#identity;
@@ -1332,17 +1338,24 @@ export class AuthClient {
     // sign-in may still own.
     const held = this.#stateStorage.get(this.#slots.state);
 
-    return SessionIdentity.create({
+    // True only for the mint a ceremony's own session is opened with. A session
+    // refused there never worked: `signIn` rejects, and a record saying a
+    // session ended here would describe one nobody ever used. Every refusal
+    // after it is a session that was in use ending.
+    let opening = source !== undefined;
+    const identity = await SessionIdentity.create({
       sessionExpiresAtMs: earliestExpiryMs(sessionChain),
       source: minter,
       storage: this.#credentialStorage,
       slot: this.#slots.app,
       expectedAccount: held?.principal,
       onSessionGone: () => {
-        void this.#endOrDrop(held).catch(() => undefined);
+        void this.#endOrDrop(held, !opening).catch(() => undefined);
         this.#installIdentity(new AnonymousIdentity());
       },
     });
+    opening = false;
+    return identity;
   }
 
   /**
@@ -1351,19 +1364,45 @@ export class AuthClient {
    * A refused mint says the session this origin held is dead, and a domain has
    * one: it cannot be revived, only replaced. So if the record still names what
    * this origin was operating under — same account, same expiry — it names a
-   * session nobody can use, and it goes. If it has moved on in either respect,
-   * someone else owns the sign-in now and this origin converges to them rather
-   * than retracting what they published.
+   * session nobody can use, and it is published as over. If it has moved on in
+   * either respect, someone else owns the sign-in now and this origin converges
+   * to them rather than retracting what they published.
    * @param held - The record as it stood when the session was opened.
+   * @param ended - Whether a session that was in use has ended, as opposed to a
+   *   ceremony's session being refused before it was ever usable. The first is
+   *   published as expired; the second leaves nothing behind.
    */
-  async #endOrDrop(held: SessionState | null): Promise<void> {
+  async #endOrDrop(held: SessionState | null, ended: boolean): Promise<void> {
     const now = this.#stateStorage.get(this.#slots.state);
     const unchanged =
       held !== null &&
       now !== null &&
       now.principal.compareTo(held.principal) === 'eq' &&
       now.expiration === held.expiration;
-    await (unchanged ? this.#endSession() : this.#dropSession());
+    if (!unchanged) {
+      await this.#dropSession();
+      return;
+    }
+    await (ended ? this.#expireSession(now.principal) : this.#endSession());
+  }
+
+  /**
+   * Publishes the sign-in as over, rather than as never having happened.
+   *
+   * A session that ran out or was revoked ended on its own, and an application
+   * says so differently: "your session ended, sign back in" names the account it
+   * ended for, which a removed record cannot. Every tab and sibling reads
+   * `expired` from it for the same reason. Signing out removes the record
+   * instead — that is the user asking to leave, not a session running its
+   * course.
+   * @param principal - The account whose session ended.
+   */
+  async #expireSession(principal: Principal): Promise<void> {
+    this.#stateStorage.set(this.#slots.state, {
+      principal,
+      expiration: BigInt(Date.now()) * 1_000_000n,
+    });
+    await this.#clearCredentials();
   }
 
   /**
@@ -1442,8 +1481,10 @@ export class AuthClient {
     if (!key || !chain) {
       // Nothing to restore, so this origin cannot act — and saying otherwise is
       // what the state leading forbids. Discarded rather than removed, because a
-      // record that reaches past this origin belongs to whoever published it.
-      if (this.#stateStorage.get(this.#slots.state)?.held) await this.#dropSession();
+      // record that reaches past this origin belongs to whoever published it. A
+      // record already past its expiry says the session ended rather than that
+      // this origin holds it, so it is left to say so.
+      if (this.#readStatus().state === 'signed-in') await this.#dropSession();
       this.#installIdentity(new AnonymousIdentity());
       return;
     }
@@ -1537,9 +1578,11 @@ export class AuthClient {
     if (credential === null) return null;
 
     // A record with no chain is not a session: only a ceremony's own slot may
-    // hold a key alone.
+    // hold a key alone. The credentials go, and the record stays: its expiry is
+    // the session's, so a chain this old leaves a record that reads as expired —
+    // which is what a page loading after a session ran out should say.
     if (credential.chain === undefined || !isDelegationValid(credential.chain)) {
-      await this.#endSession();
+      await this.#clearCredentials();
       return null;
     }
     return credential;
