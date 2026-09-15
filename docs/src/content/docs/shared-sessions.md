@@ -17,10 +17,12 @@ your UI.
 
 Every app builds its `AuthClient` with the same `derivationOrigin` and the same
 cookie `domain`, so a sign-in on one writes a record the others read. The record
-holds only the signed-in principal and when the session ends — no chain and no
-key, so it is not something a sibling can act with. It is what decides whether an
-origin is signed in, which is why removing it is how a sign-out reaches the
-others.
+holds only the signed-in principal and when the session ends. It is what decides
+whether an origin is signed in, which is why removing it is how a sign-out
+reaches the others.
+
+Choosing a cookie domain means trusting every origin under it. Don't do this on a
+domain where you don't control all the subdomains.
 
 ```typescript
 import { AuthClient, CookieStateStorage } from "@icp-sdk/auth/client";
@@ -48,9 +50,11 @@ The derivation origin must authorize the apps. Serve this at
 ## 2. Acquire on page load
 
 An app that finds the shared record naming an account it holds no credentials for
-asks Internet Identity to answer from the session it already has. Nothing is
-rendered: `prompt: "none"` says the request may be answered without the user, and
-`hint` names which account to answer for.
+asks Internet Identity to answer from the session it already has. The user is
+redirected to the provider and straight back, with no screen to interact with.
+
+`hint` pins the re-issue to the account the record names — without it the provider
+may answer for a different one, and the record would be overwritten with it.
 
 Add a `/reauth` page that does this and returns the user to the path in `?next=`,
 or home if there is nothing to answer with:
@@ -62,74 +66,45 @@ import {
   InteractionRequiredError,
 } from "@icp-sdk/auth/client";
 
-const stateStorage = new CookieStateStorage({ domain: "example.com" });
-const shared = { derivationOrigin: "https://auth.example.com", stateStorage };
+const clientOptions = {
+  derivationOrigin: "https://auth.example.com",
+  stateStorage: new CookieStateStorage({ domain: "example.com" }),
+};
 
-// The page's own client, which is what names the account to re-issue for.
-// `getStatus()` rather than `getPrincipal()`: an expired record is exactly when
-// a re-issue is wanted, and `getPrincipal()` answers `undefined` for one.
-const status = new AuthClient(shared).getStatus();
+const status = new AuthClient(clientOptions).getStatus();
 
-const reissue = new AuthClient({
-  ...shared,
-  transport: "redirect",
-  prompt: "none",
-  hint: status.status === "signed-out" ? undefined : status.principal,
-});
-
-await reissue
-  .signIn({ returnTo: new URLSearchParams(location.search).get("next") ?? "/" })
-  .catch((error) => {
-    // The identity provider says there is nothing to re-issue from: the session
-    // was revoked or expired rather than replaced. That is the only reliable
-    // evidence the shared record is stale, so this is the one place an origin
-    // may retract what it did not write.
-    if (error instanceof InteractionRequiredError) void reissue.signOut();
-    location.replace("/");
+if (status.state === "signed-in-elsewhere") {
+  const authClient = new AuthClient({
+    ...clientOptions,
+    transport: "redirect",
+    prompt: "none",
+    hint: status.principal,
   });
-```
 
-Two clients, because `prompt` and `hint` are fixed when a client is built: they
-ride on the authorize URL, and that URL belongs to the channel a ceremony opens
-rather than to one request on it. The first client is only asked who is signed
-in; the second is the one that signs in.
-
-`prompt` and `hint` are fixed when the client is built, so this is a separate
-client from the one your app signs in with interactively. Both share the same
-storage, so whichever resolves populates the same session.
-
-`/reauth` is a redirect callback, so list it at
-`https://chat.example.com/.well-known/ii-auth-callbacks`:
-
-```json
-{ "callbacks": ["https://chat.example.com/reauth"] }
-```
-
-On every other page, redirect to `/reauth` on load when the shared record names
-someone but this app has nothing to act with yet:
-
-```typescript
-if (authClient.getStatus().status === "signed-in-elsewhere") {
-  location.replace(
-    `/reauth?next=${encodeURIComponent(location.pathname + location.search)}`,
-  );
+  try {
+    await authClient.signIn({
+      returnTo: new URLSearchParams(location.search).get("next") ?? "/",
+    });
+  } catch (error) {
+    if (error instanceof InteractionRequiredError) {
+      await authClient.signOut().catch(() => {});
+    }
+    location.replace("/");
+  }
+} else {
+  location.replace("/");
 }
 ```
 
-`getStatus()` is what separates the two questions. `isAuthenticated()` answers
-_can this origin act_; the shared record answers _is anyone signed in on this
-domain_, which every sibling reads the same. A sibling that has not acquired a
-credential of its own is `signed-in-elsewhere`, and that is the case this
-redirect exists for.
+Two clients, because `prompt` and `hint` are fixed when a client is built.
 
-If your app asks for an identity before the redirect runs, it will not be handed
-an anonymous one — `getIdentity()` rejects with `SessionNotHeldError` rather than
-letting unauthenticated calls go out while the record says someone is signed in.
+If the provider has nothing to re-issue from, the shared record is stale — sign
+out to clear it, or every app on the domain keeps sending the user here.
 
 ## What ends a session on its own
 
-A session also ends when nothing mints from it. Pass `maxTimeToIdle` to `signIn()`
-to say how long that may be:
+A session also ends when nobody uses it. Pass `maxTimeToIdle` to `signIn()` to
+say how long that may be:
 
 ```typescript
 await authClient.signIn({
@@ -138,20 +113,16 @@ await authClient.signIn({
 });
 ```
 
-The identity provider enforces it, so it covers every tab of the browser at once
-and holds whether or not any of them is open. Omit it and the provider applies
-its own default of seven days.
+The identity provider enforces it, so it covers every tab at once and holds
+whether or not any of them is open. Omit it and the provider applies its own
+default of seven days.
 
-Using a page counts as use — a pointer moving or a key pressed mints, exactly as
-making a request does — so a user reading rather than clicking keeps the session
-alive. Both halves matter: the bound is what ends an abandoned browser's sign-in,
-and activity is what keeps it from ending anyone else's.
+Using the app keeps the sign-in alive — a pointer, a key, or a request. A user who
+touches nothing at all will be signed out, so don't set this near its ten-minute
+minimum unless that is what you want.
 
-This replaces the idle timer this library used to run. A timer in a page is
-skipped by clearing storage or by a tab that never runs it, and it saw one
-document, so a backgrounded tab could sign a user out of the tab beside it. To
-react to the session ending, subscribe to the state as in step 3: a lapsed
-session shows up as `expired` on the next read.
+Your app finds out the next time it uses the sign-in: the state becomes
+`signed-out`, and the subscription from step 3 fires.
 
 ## What signing out does
 
@@ -189,7 +160,7 @@ the user is about to act on what they see.
 ```typescript
 function render() {
   const auth = authClient.getStatus();
-  switch (auth.status) {
+  switch (auth.state) {
     case "signed-in":
       return showSignedIn(auth.principal);
     case "expired":
