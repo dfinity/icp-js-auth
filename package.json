@@ -57,7 +57,7 @@
     "jsdom": "^27.4.0",
     "publint": "^0.3.22",
     "typescript": "^5.9.3",
-    "vitest": "4.0.14"
+    "vitest": "4.1.11"
   },
   "peerDependencies": {
     "@icp-sdk/core": "^5"
