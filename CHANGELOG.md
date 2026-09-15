@@ -16,6 +16,7 @@
 
 ### Fix
 
+- name the identity provider's URL and canister together (#191)
 - recover from force-closed IndexedDB connections (#137)
 
 ## 8.0.3 (2026-08-03)
