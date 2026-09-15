@@ -17,13 +17,8 @@ import { Principal } from '@icp-sdk/core/principal';
 
 const { II_AUTHORIZE_URL, II_CANISTER_ID } = process.env;
 
-const internetIdentityCanisterId = Principal.fromText(II_CANISTER_ID);
-
 const authClient = new AuthClient({
-  identityProvider: {
-    authorizeUrl: II_AUTHORIZE_URL,
-    canisterId: internetIdentityCanisterId,
-  },
+  identityProvider: { authorizeUrl: II_AUTHORIZE_URL, canisterId: II_CANISTER_ID },
 });
 
 // Check for an existing session (synchronous)
@@ -47,7 +42,7 @@ const identity = await authClient.getIdentity();
 const identityWithAttributes = new AttributesIdentity({
   inner: identity,
   attributes: { data, signature },
-  signer: { canisterId: internetIdentityCanisterId },
+  signer: { canisterId: Principal.fromText(II_CANISTER_ID) },
 });
 
 const agent = await HttpAgent.create({ identity: identityWithAttributes });
