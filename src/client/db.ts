@@ -1,5 +1,7 @@
 import { type IDBPDatabase, openDB } from 'idb';
-import { DB_VERSION, KEY_STORAGE_DELEGATION, KEY_STORAGE_KEY } from './storage.js';
+
+// Increment when the shape of what is stored changes.
+export const DB_VERSION = 1;
 
 type Database = IDBPDatabase<unknown>;
 type IDBValidKey = string | number | Date | BufferSource | IDBValidKey[];
@@ -10,12 +12,8 @@ const _openDbStore = async (
   dbName = AUTH_DB_NAME,
   storeName = OBJECT_STORE_NAME,
   version: number,
+  onTerminated?: () => void,
 ) => {
-  // Clear legacy stored delegations
-  if (globalThis.localStorage?.getItem(KEY_STORAGE_DELEGATION)) {
-    globalThis.localStorage.removeItem(KEY_STORAGE_DELEGATION);
-    globalThis.localStorage.removeItem(KEY_STORAGE_KEY);
-  }
   return await openDB(dbName, version, {
     upgrade: (database) => {
       if (database.objectStoreNames.contains(storeName)) {
@@ -23,6 +21,7 @@ const _openDbStore = async (
       }
       database.createObjectStore(storeName);
     },
+    terminated: onTerminated,
   });
 };
 
@@ -72,15 +71,60 @@ export class IdbKeyVal {
       storeName = OBJECT_STORE_NAME,
       version = DB_VERSION,
     } = options ?? {};
-    const db = await _openDbStore(dbName, storeName, version);
-    return new IdbKeyVal(db, storeName);
+    const keyVal = new IdbKeyVal(dbName, storeName, version);
+    // Open eagerly so an unavailable database fails at creation time.
+    await keyVal._openDb();
+    return keyVal;
   }
+
+  private _dbPromise: Promise<Database> | null = null;
 
   // Do not use - instead prefer create
   private constructor(
-    private _db: Database,
+    private _dbName: string,
     private _storeName: string,
+    private _version: number,
   ) {}
+
+  // The browser can force-close the connection at any time; the `terminated`
+  // hook drops it so the next operation opens a fresh one.
+  private _openDb(): Promise<Database> {
+    if (this._dbPromise === null) {
+      const promise = _openDbStore(this._dbName, this._storeName, this._version, () => {
+        if (this._dbPromise === promise) {
+          this._dbPromise = null;
+        }
+      }).catch((error) => {
+        if (this._dbPromise === promise) {
+          this._dbPromise = null;
+        }
+        throw error;
+      });
+      this._dbPromise = promise;
+    }
+    return this._dbPromise;
+  }
+
+  // Chrome can force-close a connection without firing `terminated`; the next
+  // transaction then throws an InvalidStateError. Drop the dead connection and
+  // retry once on a fresh one.
+  private async _withDb<T>(action: (db: Database) => Promise<T>): Promise<T> {
+    const promise = this._openDb();
+    const db = await promise;
+    try {
+      return await action(db);
+    } catch (error) {
+      // Matched by name: a DOMException does not inherit from Error.
+      const name = error !== null && typeof error === 'object' && 'name' in error && error.name;
+      if (name !== 'InvalidStateError') {
+        throw error;
+      }
+      if (this._dbPromise === promise) {
+        this._dbPromise = null;
+      }
+      return await action(await this._openDb());
+    }
+  }
 
   /**
    * Basic setter
@@ -89,7 +133,7 @@ export class IdbKeyVal {
    * @returns void
    */
   public async set<T>(key: IDBValidKey, value: T) {
-    return await _setValue<T>(this._db, this._storeName, key, value);
+    return await this._withDb((db) => _setValue<T>(db, this._storeName, key, value));
   }
   /**
    * Basic getter
@@ -100,7 +144,7 @@ export class IdbKeyVal {
    * await get<string>('exampleKey') -> 'exampleValue'
    */
   public async get<T>(key: IDBValidKey): Promise<T | null> {
-    return (await _getValue<T>(this._db, this._storeName, key)) ?? null;
+    return await this._withDb(async (db) => (await _getValue<T>(db, this._storeName, key)) ?? null);
   }
 
   /**
@@ -109,6 +153,6 @@ export class IdbKeyVal {
    * @returns void
    */
   public async remove(key: IDBValidKey) {
-    return await _removeValue(this._db, this._storeName, key);
+    return await this._withDb((db) => _removeValue(db, this._storeName, key));
   }
 }

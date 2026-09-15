@@ -1,60 +1,46 @@
-import { AnonymousIdentity, type Identity, type SignIdentity } from '@icp-sdk/core/agent';
 import {
-  DelegationChain,
-  DelegationIdentity,
-  ECDSAKeyIdentity,
-  Ed25519KeyIdentity,
+  AnonymousIdentity,
+  type DerEncodedPublicKey,
+  type HttpAgentOptions,
+  type Identity,
+  type SignIdentity,
+} from '@icp-sdk/core/agent';
+import {
+  type DelegationChain,
   isDelegationValid,
-  PartialDelegationIdentity,
   type PartialIdentity,
 } from '@icp-sdk/core/identity';
-import type { Principal } from '@icp-sdk/core/principal';
+import { Principal } from '@icp-sdk/core/principal';
 import { Signer } from '@icp-sdk/signer';
 import { PostMessageTransport, UrlTransport } from '@icp-sdk/signer/web';
-import { IdleManager, type IdleManagerOptions } from './idle-manager.js';
+import { AccountMismatchError, chainAuthorisesKey } from './app-delegation-source.js';
+import { type HeldLock, stealLock, stealMintLock } from './app-lock.js';
+import { fromBase64, toBase64 } from './base64.js';
+import type { Credential, CredentialStorage } from './credential-storage.js';
+import { watchActivity, watchForeground } from './foreground-refresh.js';
+import { IdbCredentialStorage } from './idb-credential-storage.js';
+import { requestSessionDelegation } from './session-delegation.js';
+import { SessionIdentity } from './session-identity.js';
+import { SessionMinter } from './session-minter.js';
+import { type Slots, slotsFor } from './slots.js';
 import { normalizeSsoDomain } from './sso.js';
-import {
-  type AuthClientStorage,
-  IdbStorage,
-  KEY_STORAGE_DELEGATION,
-  KEY_STORAGE_KEY,
-  KEY_VECTOR,
-  LocalStorage,
-  type StoredKey,
-} from './storage.js';
+import { LocalStateStorage, type SessionState, type StateStorage } from './state-storage.js';
 
-const NANOSECONDS_PER_SECOND = BigInt(1_000_000_000);
-const SECONDS_PER_HOUR = BigInt(3_600);
-const NANOSECONDS_PER_HOUR = NANOSECONDS_PER_SECOND * SECONDS_PER_HOUR;
+/**
+ * The lock one signer interaction at a time holds.
+ *
+ * Per origin rather than per namespace, because what cannot be shared is not
+ * namespaced: an origin has one signer window — `${origin}-signer-window` — and
+ * one redirect journal per route. Two clients in different namespaces are two
+ * sign-ins, and they still cannot both have the window.
+ */
+const CHANNEL_LOCK = 'ic-auth-signer-channel';
+
+/** The lock over one namespace's sign-in, which `signIn` and `signOut` both move. */
+const signInLockFor = (stateSlot: string): string => `${stateSlot}:sign-in`;
 
 const IDENTITY_PROVIDER_DEFAULT = 'https://id.ai/authorize';
-const DEFAULT_MAX_TIME_TO_LIVE = BigInt(8) * NANOSECONDS_PER_HOUR;
-
-const ECDSA_KEY_LABEL = 'ECDSA';
-const ED25519_KEY_LABEL = 'Ed25519';
-type BaseKeyType = typeof ECDSA_KEY_LABEL | typeof ED25519_KEY_LABEL;
-
-// localStorage key used to cache the delegation expiration so that
-// isAuthenticated() can answer synchronously without hitting IndexedDB.
-const KEY_STORAGE_EXPIRATION = 'ic-delegation_expiration';
-
-// Storage key prefix for a redirect flow's session key, held only while the
-// flow is in progress (keyed by a per-flow id) and removed once the delegation
-// is persisted. See AuthClient.#acquireSessionKey.
-const PENDING_KEY_PREFIX = 'ic-auth-pending-key:';
-
-// The storage backend has no key enumeration, so pending-key slots are tracked
-// explicitly here: an abandoned flow never removes its key, so a later flow
-// prunes expired orphans by slot instead of leaking them forever.
-const PENDING_KEYS_REGISTRY_KEY = 'ic-auth-pending-keys';
-// Past the URL transport's ~10-min flow window the flow can't resume, so a
-// pending key older than this is treated as abandoned.
-const PENDING_KEY_TTL_MS = 10 * 60 * 1000;
-
-interface PendingKeyEntry {
-  slot: string;
-  expiresAt: number;
-}
+const IDENTITY_CANISTER_DEFAULT = 'rdmx6-jaaaa-aaaaa-aaadq-cai';
 
 export type OpenIdProvider = 'google' | 'apple' | 'microsoft';
 
@@ -74,35 +60,71 @@ const DEFAULT_SSO_SCOPE_KEYS = ['name', 'email'] as const;
  */
 export interface AuthClientBaseOptions {
   /**
-   * An identity to authenticate via delegation.
+   * Where credentials are kept. Defaults to IndexedDB.
    */
-  identity?: SignIdentity | PartialIdentity;
+  credentialStorage?: CredentialStorage;
 
   /**
-   * Persistent storage backend. Defaults to IndexedDB.
-   * @default IdbStorage
-   */
-  storage?: AuthClientStorage;
-
-  /**
-   * Type of session key to generate on each sign-in.
+   * Prefix for every slot this client writes under.
    *
-   * Use `'Ed25519'` when your storage provider does not support `CryptoKey`.
-   * @default 'ECDSA'
+   * Slots are assigned in one place rather than defaulted by each store, and this
+   * moves all of them at once — so an application running two clients under one
+   * origin separates them with a single string and cannot rename some while
+   * missing others.
+   *
+   * Leave it unset unless a second client shares this origin.
    */
-  keyType?: BaseKeyType;
+  namespace?: string;
 
   /**
-   * Idle timeout configuration.
-   * @default after 10 minutes, invalidates the identity
+   * Where the state of the sign-in is kept: which account is signed in here,
+   * and until when. Defaults to `localStorage`.
    */
-  idleOptions?: IdleOptions;
+  stateStorage?: StateStorage;
 
   /**
-   * Identity provider URL.
-   * @default "https://id.ai/authorize"
+   * Stops this client from watching the browser for signs that somebody is here.
+   *
+   * All of them together, because they make one claim: the page being shown, the
+   * window regaining focus, a pointer or a key. A backgrounded tab has its timers
+   * throttled, so its delegation can lapse while nobody is looking and the first
+   * click after coming back waits for a mint; returning to the tab is early
+   * enough to hide that.
+   *
+   * Nothing is hooked where there is no DOM, so a client outside a browser needs
+   * no option. Setting it makes requests the only thing that says this session is
+   * in use — including to the identity provider, which ends a session nothing
+   * has minted from for long enough. An application whose users read more than
+   * they click should leave it alone.
+   * @default false
    */
-  identityProvider?: string | URL;
+  disableBrowserActivity?: boolean;
+
+  /**
+   * Where the identity provider is, as two values rather than one.
+   *
+   * A ceremony is rendered at a URL and delegations are minted by a canister,
+   * and they are not the same address: a custom domain can front the mainnet
+   * canister, and a local deployment changes both. Each half defaults to its
+   * mainnet value, so an application deploying against mainnet configures
+   * neither. Nothing is derived from the URL — the origin of one is not a
+   * promise about which canister answers there.
+   */
+  identityProvider?: {
+    /** The authorize URL a ceremony is rendered at. */
+    authorizeUrl?: string | URL;
+
+    /** The canister that mints and revokes this application's delegations. */
+    canisterId?: Principal | string;
+  };
+
+  /**
+   * Options for the agent that makes the mint and revoke calls.
+   *
+   * `identity` is not among them: the agent signs as the session, which is what
+   * those calls rest on.
+   */
+  agentOptions?: Omit<HttpAgentOptions, 'identity'>;
 
   /**
    * Derivation origin for the identity provider.
@@ -139,6 +161,54 @@ export interface AuthClientBaseOptions {
    * @see https://github.com/dfinity/wg-identity-authentication/blob/main/topics/icrc_167_browser_url_transport.md
    */
   transport?: 'window' | 'redirect';
+
+  /**
+   * Whether Internet Identity may answer without user interaction.
+   *
+   * - `'login'` (the effect of omitting it): run a normal sign-in ceremony.
+   * - `'none'`: Internet Identity answers from a session it already holds for
+   *   this app and returns without rendering anything, or fails with an
+   *   `interaction_required` error if it cannot. Pair with {@link hint} to name
+   *   which account to re-issue for. Use it on a page load where the state names
+   *   an account this origin has no credentials for — a sibling subdomain signed
+   *   in — so this origin acquires its own without a ceremony.
+   *
+   * Sent as a `prompt` query param on the authorize URL. An Internet Identity
+   * extension inspired by OpenID Connect's `prompt`, and not part of any ICRC
+   * standard — which is why it travels on the URL rather than in the request.
+   */
+  prompt?: 'none' | 'login';
+
+  /**
+   * The account to re-issue for, which is the principal the state names.
+   *
+   * Sent as text in a `hint` query param on the authorize URL; Internet Identity
+   * uses it to pick which session a {@link prompt} `'none'` request resolves to
+   * when the user has more than one for this app. Inspired by OpenID Connect's
+   * `login_hint`.
+   */
+  hint?: Principal;
+
+  /**
+   * Whether Internet Identity may keep this sign-in so that a later
+   * {@link prompt} `'none'` request can be answered from it.
+   *
+   * Defaults to what {@link AuthClientCreateOptions.stateStorage} says, which is
+   * `true` only for {@link CookieStateStorage}: an application declares this
+   * intent by choosing a store whose record reaches its siblings, and making it
+   * say so a second time would be noise. Set it here for a cross-origin
+   * arrangement that is not sibling subdomains, or to force it off for siblings
+   * that should each sign in properly.
+   *
+   * Off means the provider keeps no session for this app on this device, so
+   * there is nothing for a silent request to find. It says nothing about how
+   * long a session lasts: {@link AuthClientSignInOptions.maxTimeToIdle} applies
+   * either way.
+   *
+   * Sent as a `resumable` query param on the authorize URL, for the same reason
+   * {@link prompt} is: the URL is assembled once, here.
+   */
+  resumable?: boolean;
 }
 
 /**
@@ -172,34 +242,33 @@ export type AuthClientCreateOptions = AuthClientBaseOptions &
       }
   );
 
-export interface IdleOptions extends IdleManagerOptions {
-  /**
-   * Disables idle functionality entirely.
-   * @default false
-   */
-  disableIdle?: boolean;
-
-  /**
-   * Disables the default idle callback (sign-out & reload).
-   * @default false
-   */
-  disableDefaultIdleCallback?: boolean;
-}
-
 /**
  * Options for {@link AuthClient.signIn}.
  */
 export interface AuthClientSignInOptions {
   /**
-   * Maximum lifetime of the delegation in nanoseconds.
-   * @default 8 hours
+   * The longest the session may last, in nanoseconds.
+   * @default the identity provider's, currently 30 days
    */
   maxTimeToLive?: bigint;
 
   /**
-   * Restrict the delegation to specific canisters.
+   * How long a signed-in user may be idle before the sign-in ends, in nanoseconds.
+   * @default the identity provider's, currently 7 days
    */
-  targets?: Principal[];
+  maxTimeToIdle?: bigint;
+
+  /**
+   * Where to go once the sign-in completes, ignored unless it is a same-origin
+   * `http(s)` target.
+   *
+   * For the flow that leaves the page: a redirect sign-in comes back to whatever
+   * URL the ceremony was started from, which is rarely where the user was. It is
+   * journaled, so it survives the round trip, and the navigation replaces the
+   * current history entry rather than adding one — the sign-in page and the
+   * redirect chain are not somewhere a back button should return to.
+   */
+  returnTo?: string;
 }
 
 export interface SignedAttributes {
@@ -217,29 +286,169 @@ export interface SignedAttributes {
  *   ? await authClient.getIdentity()
  *   : await authClient.signIn();
  */
+/**
+ * Who is signed in for this origin, and until when.
+ *
+ * `principal` and `expiresAtMs` are present in every case where a record
+ * exists, so an application can name the account and count down to the end of a
+ * sign-in without reading the store itself.
+ */
+export type SessionStatus =
+  | { state: 'signed-in'; principal: Principal; expiresAtMs: number }
+  /**
+   * Someone is signed in on this domain, but this origin holds no credential
+   * for them, so it cannot act yet. Acquire one silently, or ask the user.
+   */
+  | { state: 'signed-in-elsewhere'; principal: Principal; expiresAtMs: number }
+  | { state: 'expired'; principal: Principal; expiresAtMs: number }
+  | { state: 'signed-out' };
+
+/**
+ * Thrown when a sign-in exists within the state store's reach but this origin
+ * holds no credential for it.
+ *
+ * A sibling subdomain reads the shared record on its first load and is in exactly
+ * this position: someone is signed in, and it has nothing to act with until it
+ * acquires its own. Catching this is where a silent re-issue belongs.
+ */
+export class SessionNotHeldError extends Error {
+  constructor(
+    message = 'A sign-in exists for this domain, but this origin holds no credential for it',
+  ) {
+    super(message);
+    this.name = 'SessionNotHeldError';
+  }
+}
+
+/**
+ * Manages authentication and identity for Internet Computer web apps.
+ *
+ * `getStatus()`, `isAuthenticated()` and `getPrincipal()` are synchronous, so a
+ * page renders on them; `getIdentity()` is what an agent signs with.
+ *
+ * @example
+ * const authClient = new AuthClient();
+ *
+ * const identity = authClient.isAuthenticated()
+ *   ? await authClient.getIdentity()
+ *   : await authClient.signIn();
+ */
+/**
+ * Thrown when a later sign-in or sign-out took over from this one.
+ *
+ * Not a failure of the operation so much as a change of mind: an origin has one
+ * signer window and one sign-in, so the newer intent is the one honoured, and
+ * the earlier one reports this rather than writing what it had assembled. A
+ * caller may usually ignore it — the user is getting what they asked for second.
+ */
+export class SupersededError extends Error {
+  constructor(message = 'A later sign-in or sign-out took over from this one') {
+    super(message);
+    this.name = 'SupersededError';
+  }
+}
+
 export class AuthClient {
   #identity: Identity | PartialIdentity = new AnonymousIdentity();
-  #chain: DelegationChain | null = null;
-  #storage: AuthClientStorage;
+  #credentialStorage: CredentialStorage;
+  readonly #slots: Slots;
+  readonly #canisterId: Principal;
+  #unwatchForeground: (() => void) | undefined;
+  #unwatchState: (() => void) | undefined;
+  #unwatchActivity: (() => void) | undefined;
+  // `mousemove` fires by the dozen per second, and each call awaits a restore
+  // before it can decide there is nothing to do. One at a time is enough: the
+  // next event finds a fresher answer than the one already in flight anyway.
+  #refreshingInForeground = false;
+  #disposed = false;
+  // Set while a further restore is pending, so a burst of changes is one pass.
+  #restoreQueued = false;
+  // What `getStatus` answers with, replaced only when the record changes.
+  #status: SessionStatus;
+  readonly #listeners = new Set<() => void>();
+  // Set while a restore is running, so its own writes are not news.
+  #restoring = false;
+  #stateStorage: StateStorage;
   #signer: Signer;
   // Set only in redirect mode, so the redirect-specific paths (nonce/key
   // journaling) can reach `memoize`. Undefined in the default 'window' mode.
   #urlTransport: UrlTransport | undefined;
   #options: AuthClientCreateOptions;
   #initPromise: Promise<void> | null = null;
-  idleManager: IdleManager | undefined;
+  // Signer interactions this client has in flight. One lock covers all of them:
+  // `signIn` and `requestAttributes` overlapped share a channel on purpose, and
+  // the channel closes when the last request settles, so they are one
+  // interaction rather than two.
+  #interactions = 0;
+  #channelLock: HeldLock | undefined;
 
   constructor(options: AuthClientCreateOptions = {}) {
     this.#options = options;
-    this.#storage = options.storage ?? new IdbStorage();
+    this.#credentialStorage = options.credentialStorage ?? new IdbCredentialStorage();
+    this.#slots = slotsFor(options.namespace);
+    this.#stateStorage = options.stateStorage ?? new LocalStateStorage();
+
+    // A string or URL is what this option used to be, and a caller still passing
+    // one would otherwise be silently ignored — both halves falling back to
+    // mainnet, which is the kind of misconfiguration that only shows up as calls
+    // going to the wrong canister.
+    if (typeof options.identityProvider === 'string' || options.identityProvider instanceof URL) {
+      throw new TypeError(
+        'identityProvider is now an object: pass { authorizeUrl } for the ceremony URL, and { canisterId } for the canister that mints',
+      );
+    }
+
+    this.#canisterId = Principal.from(
+      options.identityProvider?.canisterId ?? IDENTITY_CANISTER_DEFAULT,
+    );
 
     const identityProviderUrl = new URL(
-      options.identityProvider?.toString() || IDENTITY_PROVIDER_DEFAULT,
+      options.identityProvider?.authorizeUrl?.toString() || IDENTITY_PROVIDER_DEFAULT,
     );
+    if (!options.disableBrowserActivity) {
+      // The identity decides whether a mint is due; these only say the moment is
+      // a good one. Nothing is hooked where there is no DOM.
+      //
+      // The page arriving and the user using it are the same claim — somebody is
+      // here — so both trigger the same refresh and one option governs both.
+      const refresh = (): void => {
+        void this.#refreshInForeground();
+      };
+      this.#unwatchForeground = watchForeground(refresh);
+      this.#unwatchActivity = watchActivity(refresh);
+    }
+
+    // The third outside signal, and the one that is not about a moment being a
+    // good one: the record can be replaced under this client — by a peer client
+    // on this page sharing its stores, or by another tab — and nothing about a
+    // restore already done reflects that. Hooked whatever
+    // `disableBrowserActivity` says, because it is not a refresh: a client
+    // answering for a sign-in the record no longer names is wrong rather than
+    // stale.
+    this.#status = this.#readStatus();
+    this.#unwatchState = this.#stateStorage.subscribe(this.#slots.state, () => {
+      // The held answer first, then the listeners, then whatever this client has
+      // to do about it — so a listener asking who is signed in sees what it was
+      // told about, whether or not the guard below lets a restore run.
+      this.#status = this.#readStatus();
+      for (const listener of [...this.#listeners]) listener();
+
+      // Only a change this client did not cause. A ceremony writes this record
+      // itself and installs the identity that goes with it, and a restore writes
+      // it too when what it found turns out not to be usable — reacting to
+      // either would re-hydrate mid-ceremony, when the app slot still holds the
+      // previous account's credential. The same reason the foreground refresh
+      // stands down for a ceremony.
+      //
+      // What this gives up is a peer's change arriving during our own restore,
+      // which the next change reports.
+      if (this.#interactions > 0 || this.#restoring || this.#disposed) return;
+      this.#restoreAgain();
+    });
     if (options.openIdProvider !== undefined && options.ssoDomain !== undefined) {
       throw new Error('openIdProvider and ssoDomain are mutually exclusive');
     }
-    if (options.openIdProvider !== undefined) {
+    if (options.openIdProvider) {
       identityProviderUrl.searchParams.set('openid', OPENID_PROVIDER_URLS[options.openIdProvider]);
     }
     if (options.ssoDomain !== undefined) {
@@ -252,6 +461,24 @@ export class AuthClient {
           options.derivationOrigin.toString(),
         );
       }
+    }
+    // `prompt` and `hint` are Internet Identity extensions, so they ride on the
+    // authorize URL rather than in the ICRC request. Baking them in here, as
+    // `openid` is, means a client is configured for one authorize intent —
+    // construct a separate client for a silent re-issue and for an interactive
+    // sign-in. Both share this client's storage, so whichever resolves populates
+    // the same session.
+    if (options.prompt) {
+      identityProviderUrl.searchParams.set('prompt', options.prompt);
+    }
+    if (options.hint) {
+      identityProviderUrl.searchParams.set('hint', options.hint.toText());
+    }
+    // The store already carries the intent, so the option only has to override
+    // it. Written only when true: absent is what the provider reads as "keep
+    // nothing", and an explicit `false` would say the same thing louder.
+    if (options.resumable ?? this.#stateStorage.resumable ?? false) {
+      identityProviderUrl.searchParams.set('resumable', 'true');
     }
 
     const transport =
@@ -281,8 +508,6 @@ export class AuthClient {
       derivationOrigin: this.memoize(() => options.derivationOrigin?.toString()),
     });
 
-    this.#registerDefaultIdleCallback();
-
     // Eagerly start restoring a previous session from storage.
     // The result is awaited in getIdentity() before returning.
     this.#init();
@@ -293,6 +518,25 @@ export class AuthClient {
    */
   async getIdentity(): Promise<Identity> {
     await this.#init();
+
+    // A record exists and this client holds nothing to act with. Handing back an
+    // anonymous identity here is the dangerous answer: calls would go out
+    // unauthenticated while `isAuthenticated()` and the record both say someone
+    // is signed in. Failing by name is what lets a caller acquire one.
+    //
+    // Any record, not only one this origin does not hold. A sibling subdomain
+    // arriving without a credential is the case this was written for, and it is
+    // not the only way to get here: a store that cannot report a change — or
+    // reports it wrongly — leaves this client on an answer the record has moved
+    // past, and `held` is `true` for every record a same-origin store keeps, so
+    // asking about it would have let exactly that through.
+    //
+    // A disposed client is exempt: it holds nothing because it was told to stop,
+    // which is not the same as being unable to act on a sign-in that exists.
+    const state = this.#stateStorage.get(this.#slots.state);
+    if (state !== null && !this.#disposed && this.#identity instanceof AnonymousIdentity) {
+      throw new SessionNotHeldError();
+    }
     return this.#identity;
   }
 
@@ -300,11 +544,132 @@ export class AuthClient {
    * Checks whether the user has an active, non-expired session.
    */
   isAuthenticated(): boolean {
-    // Uses a cached expiration in localStorage to avoid an async IndexedDB read.
-    const expiration = getExpirationFlag();
-    if (expiration === null) return false;
-    const nowNs = BigInt(Date.now()) * BigInt(1_000_000);
-    return nowNs < expiration;
+    return this.getStatus().state === 'signed-in';
+  }
+
+  /**
+   * Who this origin can act as, or `undefined` where it cannot act.
+   *
+   * The same question {@link isAuthenticated} answers, returning who rather than
+   * whether — so the two never disagree. Synchronous, and read from the state
+   * rather than from whatever material happens to be held, so a page renders on
+   * it without opening a store and without waiting for a mint. That is the
+   * difference from `(await getIdentity()).getPrincipal()`, which is asynchronous
+   * and, on a load with no delegation worth adopting, waits for one to be minted.
+   *
+   * A principal here means calls made as it will be accepted, so an expired
+   * record answers `undefined` even though it still names an account, and so does
+   * a record naming an account this origin holds nothing for. Returning one
+   * anyway would have an application acting on a session that has ended: the
+   * check most reach for is `if (getPrincipal())`, and it has to mean what it
+   * looks like it means.
+   *
+   * {@link getStatus} is where those cases are readable, and it carries the
+   * account principal in each of them — so nothing is lost by this being narrow,
+   * and an application wanting to say whose session ended asks there.
+   */
+  getPrincipal(): Principal | undefined {
+    const status = this.getStatus();
+    return status.state === 'signed-in' ? status.principal : undefined;
+  }
+
+  /**
+   * Who is signed in for this origin right now.
+   *
+   * Synchronous, so a page can render on it without opening a store.
+   */
+  getStatus(): SessionStatus {
+    // The same object until something actually changes. A page renders on this,
+    // and a framework asking "did it change?" compares the object rather than
+    // its contents — a fresh one per call reads as a change on every render, and
+    // `useSyncExternalStore` refuses a snapshot that never settles. Returning
+    // the held one also means no `Principal.fromText` per call.
+    //
+    // Expiry is the one transition with no write behind it, so it is the one
+    // thing checked here: a number comparison, and the answer is rebuilt once
+    // when it flips.
+    if (this.#status.state !== 'signed-out' && Date.now() >= this.#status.expiresAtMs) {
+      if (this.#status.state !== 'expired') {
+        const { principal, expiresAtMs } = this.#status;
+        this.#status = { state: 'expired', principal, expiresAtMs };
+      }
+    }
+    return this.#status;
+  }
+
+  /** Reads the record and builds the answer `getStatus` hands out. */
+  #readStatus(): SessionStatus {
+    const record = this.#stateStorage.get(this.#slots.state);
+    if (record === null) return { state: 'signed-out' };
+
+    const { principal } = record;
+    const expiresAtMs = Number(record.expiration / 1_000_000n);
+    if (Date.now() >= expiresAtMs) {
+      return { state: 'expired', principal, expiresAtMs };
+    }
+    return record.held
+      ? { state: 'signed-in', principal, expiresAtMs }
+      : { state: 'signed-in-elsewhere', principal, expiresAtMs };
+  }
+
+  /**
+   * Watches who is signed in here, and returns a function that stops watching.
+   *
+   * `getStatus()` and the predicates beside it are snapshots, so an application
+   * rendering on them needs to be told when to read again. The record changes
+   * for reasons that are nothing to do with this client — another tab signing
+   * out, a sibling subdomain publishing a sign-in, a peer client on this page
+   * re-issuing silently — and this is how those arrive.
+   *
+   * Fired once the record is readable, so a listener asking who is signed in
+   * sees what it was told about. It says that something changed and not what: a
+   * listener reads the answer it wants, which for most is `getStatus()`.
+   *
+   * What it does not cover is the identity being replaced under an application
+   * that holds one — an app delegation rotating is deliberately invisible, and
+   * nothing about who is signed in has changed when it does.
+   * @param listener - Called after the record changes.
+   * @returns A function that unregisters it.
+   */
+  subscribe(listener: () => void): () => void {
+    // Fired by this client rather than by the store, because the answer has to
+    // be up to date before a listener asks for it: the store announcing first
+    // would let a listener read a status one change behind.
+    this.#listeners.add(listener);
+    return () => {
+      this.#listeners.delete(listener);
+    };
+  }
+
+  /**
+   * Releases what this client hooked: the browser listeners, the state
+   * subscription, and the refresh the identity has scheduled. Call it when
+   * discarding a client, so nothing it registered outlives it.
+   */
+  dispose(): void {
+    // Recorded, because the constructor starts the restore without awaiting it:
+    // a client disposed while one is in flight would otherwise have an identity
+    // installed afterwards, scheduling refreshes nobody can stop.
+    this.#disposed = true;
+    if (this.#identity instanceof SessionIdentity) this.#identity.dispose();
+    // Its own interaction and no one else's: the locks it holds are released
+    // rather than taken, its own channel is closed, and nothing shared is
+    // written. Disposing means stop using this client, not sign out — another
+    // instance may be acting on the same slots.
+    //
+    // Fired rather than awaited, because this stays synchronous: an application
+    // discarding a client has nothing to do with the answer.
+    if (this.#interactions > 0) {
+      void this.#signer.closeChannel().catch(() => undefined);
+    }
+    this.#channelLock?.release();
+    this.#channelLock = undefined;
+    this.#unwatchForeground?.();
+    this.#unwatchForeground = undefined;
+    this.#unwatchActivity?.();
+    this.#unwatchActivity = undefined;
+    this.#unwatchState?.();
+    this.#unwatchState = undefined;
   }
 
   /**
@@ -323,9 +688,125 @@ export class AuthClient {
    *   console.error('Sign-in failed:', error);
    * }
    */
+  /**
+   * Records that an interaction is under way, without asking the browser for
+   * anything.
+   *
+   * Separate from taking the lock because of when each may happen: the count has
+   * to be up before the first await, and a lock may only be asked for once the
+   * signer window is open.
+   */
+  /**
+   * Installs the identity this client acts with, releasing the one it replaces.
+   *
+   * A {@link SessionIdentity} holds a scheduled refresh, so dropping the
+   * reference without disposing leaves a timer that can still mint — into a slot
+   * this client may no longer be the writer of, for a session it may no longer
+   * hold. Every assignment goes through here so that no path can forget, which
+   * matters most for the paths that give up rather than the ones that succeed:
+   * those are the paths written to stop acting.
+   */
+  #installIdentity(next: Identity | PartialIdentity): void {
+    const previous = this.#identity;
+    if (previous !== next && previous instanceof SessionIdentity) previous.dispose();
+    this.#identity = next;
+  }
+
+  #beginInteraction(): void {
+    this.#interactions += 1;
+  }
+
+  /**
+   * Opens the signer channel and takes the lock that makes this the only
+   * interaction on it.
+   *
+   * One method because the order is the whole point. A popup may only be opened
+   * from the task the click started, so nothing may be asked of the browser
+   * before `openChannel` — two lock requests in front of it were enough for
+   * Chromium to refuse the window — and the lock has to be taken as soon as it
+   * is open. Two callers doing that by hand is one place too many for the order
+   * to come out backwards.
+   */
+  async #openSignerChannel(): Promise<void> {
+    await this.#signer.openChannel();
+
+    if (this.#channelLock === undefined) {
+      const lock = stealLock(CHANNEL_LOCK);
+      // Whoever took the channel has already renavigated the window this one was
+      // talking to, so its requests will never be answered. Closing it is what
+      // turns waiting forever into failing, and it releases the window for the
+      // interaction that took over.
+      lock.stolen.addEventListener(
+        'abort',
+        () => {
+          void this.#signer.closeChannel().catch(() => undefined);
+        },
+        { once: true },
+      );
+      this.#channelLock = lock;
+    }
+  }
+
+  #endInteraction(): void {
+    this.#interactions -= 1;
+    if (this.#interactions === 0) {
+      this.#channelLock?.release();
+      this.#channelLock = undefined;
+    }
+  }
+
+  /**
+   * Refuses to go on where this operation is no longer the current one.
+   *
+   * Asked after the calls have returned and before anything shared is written,
+   * which is where `acquireCredential` asks it for a mint and for the same
+   * reason: a call already sent cannot be recalled, so the only thing left to
+   * decide is whether to keep its result.
+   */
+  #assertCurrent(signInLock: HeldLock): void {
+    if (this.#disposed) {
+      throw new SupersededError('This client was disposed while signing in');
+    }
+    if (this.#channelLock?.stolen.aborted === true) {
+      throw new SupersededError('Another signer interaction took the channel');
+    }
+    if (signInLock.stolen.aborted) {
+      throw new SupersededError();
+    }
+  }
+
   async signIn(options?: AuthClientSignInOptions): Promise<Identity> {
-    const maxTimeToLive = options?.maxTimeToLive ?? DEFAULT_MAX_TIME_TO_LIVE;
-    const keyType = this.#options.keyType ?? ECDSA_KEY_LABEL;
+    // Counted here and locked inside, once the window is open: a ceremony is
+    // both things — the signer channel an origin has one of, and this
+    // namespace's sign-in, which `signOut` moves too — but neither lock may be
+    // asked for before the popup exists.
+    //
+    // The count is also what stands the foreground refresh down: a ceremony
+    // backgrounds this tab and foregrounds it again on its way back, so without
+    // it the return fires a refresh against the identity this call is in the
+    // middle of replacing — a mint spent on a session being discarded, and
+    // written to the store as though it were current. It asks the browser for
+    // nothing, so it is safe to do first.
+    this.#beginInteraction();
+    try {
+      return await this.#runSignIn(options);
+    } finally {
+      this.#endInteraction();
+    }
+  }
+
+  async #runSignIn(options?: AuthClientSignInOptions): Promise<Identity> {
+    // Journaled first, so a redirect flow finds it on the load that comes back:
+    // the ceremony returns to the URL it was started from, which is rarely where
+    // the user was. Journaled only when the caller gave one, so the journal of a
+    // flow that omits it is unchanged.
+    //
+    // Validated inside the producer, so what is written down is an already-safe
+    // href or nothing — never the raw value, which the journal would otherwise
+    // carry across the round trip for the return leg to trust.
+    const raw = options?.returnTo;
+    const returnTo =
+      raw === undefined ? undefined : this.memoize(() => sameOriginTarget(raw)?.href ?? null);
 
     // Start session-key acquisition BEFORE opening the channel, awaiting it only
     // after. In the redirect flow the acquisition's first `transport.memoize`
@@ -337,10 +818,10 @@ export class AuthClient {
     // request is buffered.
     const sessionKeyPromise: Promise<{
       key: SignIdentity | PartialIdentity;
-      pendingKeySlot?: string;
+      pending?: boolean;
     }> = this.#urlTransport
-      ? this.#ensureSessionKeyForRedirectFlow(this.#urlTransport, keyType)
-      : this.#ensureSessionKeyForWindowFlow(keyType).then((key) => ({ key }));
+      ? this.#ensureSessionKeyForRedirectFlow(this.#urlTransport)
+      : this.#ensureSessionKeyForWindowFlow().then((key) => ({ key }));
     // The acquisition is started eagerly, before the awaits below. If one of
     // those throws first, `sessionKeyPromise` is never awaited, so attach a
     // no-op rejection handler now to keep a later acquisition failure from
@@ -348,113 +829,188 @@ export class AuthClient {
     // rejection and propagates it when reached.
     void sessionKeyPromise.catch(() => undefined);
 
-    await this.#signer.openChannel();
+    // Must stay the first await: it opens the signer window, which the browser
+    // allows only in the tick the click started.
+    await this.#openSignerChannel();
 
-    const { key, pendingKeySlot } = await sessionKeyPromise;
+    // The other lock a ceremony needs, taken once the window is open for the
+    // same reason. Stolen rather than queued for, so the newer intent wins and
+    // the loser learns of it before writing anything.
+    //
+    // A local, not a field: two overlapping calls would each write the field,
+    // and then both the supersede check and the release would read whichever
+    // wrote last — leaving the running call unlocked and unable to notice a
+    // steal, while the stolen lock's own signal went to an object nothing held.
+    const signInLock = stealLock(signInLockFor(this.#slots.state));
 
-    const delegationChain = await this.#signer.requestDelegation({
-      publicKey: key.getPublicKey(),
-      targets: options?.targets,
-      maxTimeToLive,
-    });
+    // Every shared write goes through this. One check before the first write is
+    // not enough: the lock reaches across tabs, so a sign-out can land between
+    // any two of the writes below, clear the slots and the record, and this flow
+    // would put them all back — signing the user out and straight back in.
+    const guarded = async (write: () => Promise<void>): Promise<void> => {
+      this.#assertCurrent(signInLock);
+      await write();
+    };
 
-    this.#chain = delegationChain;
+    // Released here rather than by the caller: the lock belongs to this call,
+    // and a call that hands it to a field cannot tell its own from another's.
+    try {
+      // Wait for the constructor's session restore, so this flow's storage
+      // writes cannot interleave with hydration's reads.
+      await this.#init();
 
-    // PartialIdentity only has the public key — no signing capability.
-    if ('toDer' in key) {
-      this.#identity = PartialDelegationIdentity.fromDelegation(key, this.#chain);
-    } else {
-      this.#identity = DelegationIdentity.fromDelegation(key, this.#chain);
-    }
+      const { key, pending } = await sessionKeyPromise;
 
-    const idleOptions = this.#options?.idleOptions;
-    if (!this.idleManager && !idleOptions?.disableIdle) {
-      this.idleManager = IdleManager.create(idleOptions);
-      this.#registerDefaultIdleCallback();
-    }
-
-    // Persist so the session survives page reloads.
-    await persistChain(this.#storage, this.#chain);
-    await persistKey(this.#storage, key);
-
-    // The flow is complete: the delegation is bound to this key and stored, so
-    // the per-flow pending copy is no longer needed. Best-effort — the user is
-    // already signed in, so a cleanup failure must not fail signIn(); a later
-    // flow sweeps whatever is left behind.
-    if (pendingKeySlot !== undefined) {
-      try {
-        await this.#storage.remove(pendingKeySlot);
-        await unregisterPendingKey(this.#storage, pendingKeySlot);
-      } catch {
-        // ignore
+      if (!('sign' in key)) {
+        // Unreachable for a typed caller, since `identity` is a SignIdentity.
+        // Minting is a canister call signed by the session key, so a key that
+        // cannot sign cannot hold a session, and failing here beats handing back
+        // an identity whose first request fails for a reason nothing explains.
+        throw new Error('A session needs a key that can sign');
       }
-    }
 
-    return this.#identity;
+      const sessionChain = await requestSessionDelegation(this.#signer, {
+        sessionPublicKey: key.getPublicKey().toDer(),
+        // Both bounds are sent only where the caller asked, so the provider's
+        // own defaults apply otherwise rather than numbers this library
+        // invented. How long a sign-in lasts is the provider's policy, narrowed
+        // by what the user chooses at consent and by an organization's cap.
+        maxTimeToLive: options?.maxTimeToLive,
+        maxTimeToIdle: options?.maxTimeToIdle,
+        derivationOrigin: this.#options.derivationOrigin?.toString(),
+      });
+
+      // The chain comes from the signer over a transport shared with others, so
+      // the key it delegates to is checked here rather than assumed. A chain for
+      // another key mints nothing, and failing now names the cause instead of
+      // leaving it to the first request.
+      if (!chainAuthorisesKey(sessionChain, key.getPublicKey().toDer())) {
+        throw new Error('The session chain does not delegate to the key it was requested for');
+      }
+
+      // Mint inside the ceremony the user is already waiting through, so the first
+      // request after signing in does not wait. This is also where the account key
+      // comes from: the session chain is rooted at the session's own key, and only
+      // a mint reports the key an application's canisters will see.
+      //
+      // Into the ceremony's own slot, not the one every tab of this origin acts
+      // with. Clearing that slot up front, or writing to it here, would change what
+      // those tabs hold before this sign-in has succeeded — and a ceremony that
+      // then failed would have cost each of them a mint for nothing.
+      const minter = await this.#minterFor(key, sessionChain);
+      const appKey = await this.#credentialStorage.create();
+      const appChain = await minter.mint(appKey.getPublicKey().toDer());
+
+      // Everything above was a call, and none of it is shared; everything below is
+      // a write four other things read.
+      await guarded(() =>
+        this.#credentialStorage.set(this.#slots.appPending, { identity: appKey, chain: appChain }),
+      );
+
+      // The session and the state first, because the state is what makes this
+      // account the one this origin answers for; promoting ahead of it would
+      // publish a credential for a sign-in nothing has recorded yet.
+      await guarded(() => this.#persistSession(key, sessionChain, appChain.publicKey));
+      await guarded(() => this.#promoteAppCredential(appKey, appChain));
+
+      await guarded(async () => {
+        this.#installIdentity(await this.#openSession(key, sessionChain, minter));
+      });
+
+      // Best-effort — the user is already signed in, so a cleanup failure must not
+      // fail signIn(), and the next ceremony overwrites what is left behind.
+      if (pending) {
+        try {
+          await this.#credentialStorage.remove(this.#slots.sessionPending);
+        } catch {
+          // ignore
+        }
+      }
+
+      // Last, once the sign-in is stored, because this leaves the page: navigating
+      // earlier would abandon the flow partway. Replaced rather than pushed, so the
+      // sign-in page and the redirect chain are not what a back button returns to.
+      // `await` above resolved the journaled value to a validated href or null.
+      const target = await returnTo;
+      if (typeof target === 'string') location.replace(target);
+
+      return this.#identity;
+    } finally {
+      signInLock.release();
+    }
   }
 
   // Window flow: sign-in completes in a single load, so a fresh session key per
-  // sign-in is enough (or the caller-provided identity), with nothing to
-  // persist for a later load.
-  async #ensureSessionKeyForWindowFlow(
-    keyType: BaseKeyType,
-  ): Promise<SignIdentity | PartialIdentity> {
-    return this.#options.identity ?? (await generateKey(keyType));
+  // sign-in is enough, with nothing to persist for a later load.
+  #ensureSessionKeyForWindowFlow(): Promise<SignIdentity> {
+    return this.#credentialStorage.create();
   }
 
   // Redirect flow: `signIn` runs twice — once on the load that navigates to the
   // identity provider, and again on the return load that replays the delegation
-  // minted for the FIRST load's key. Both runs must therefore use the same key.
-  // A per-flow key id is journaled via the transport (stable across the
-  // redirect) and the key is kept in storage under that id, so the return load
-  // restores the same key rather than generating a fresh one that would not
-  // match the replayed delegation. A caller-provided identity is already stable
-  // across the redirect, so it is used as-is with nothing persisted.
+  // minted for the FIRST load's key. Both runs must therefore use the same key,
+  // so the first load writes it to the pending slot and the return load reads it
+  // back.
   async #ensureSessionKeyForRedirectFlow(
     transport: UrlTransport,
-    keyType: BaseKeyType,
-  ): Promise<{ key: SignIdentity | PartialIdentity; pendingKeySlot?: string }> {
-    if (this.#options.identity !== undefined) {
-      return { key: this.#options.identity };
+  ): Promise<{ key: SignIdentity; pending?: boolean }> {
+    // A redirect leaves the document, so the key this flow starts with has to be
+    // readable again on the load that comes back, which takes a medium that
+    // survives the teardown. Refusing before navigating beats sending the user to
+    // the identity provider and failing on their return.
+    //
+    // A store other tabs can read is not enough. It answers only while one of
+    // them is open, so the same flow in the only tab of an origin loses the key
+    // the moment it navigates — a rule that holds sometimes is worse than one
+    // that holds never, because it fails on the user rather than on the
+    // developer.
+    if (!this.#credentialStorage.durable) {
+      throw new Error(
+        'A redirect sign-in needs a credential store that survives the navigation, and this one does not. Use a durable store or the window transport.',
+      );
     }
 
-    const keyId = await transport.memoize(() => globalThis.crypto.randomUUID());
-    const pendingKeySlot = `${PENDING_KEY_PREFIX}${keyId}`;
-
-    // Acquire the per-flow key inside a `memoize` producer so the transport
-    // holds its batch flush across the (async) key restore/generate + storage
-    // write. The transport coalesces concurrently issued requests into one
-    // redirect by flushing on a macrotask once no memoize producer is in
-    // flight; without this hold, a faster concurrent request (e.g. the nonce
-    // path of `requestAttributes`) buffers first and trips that flush before
-    // this flow's delegation request — issued only once the key is ready — is
-    // buffered, splitting what should be one redirect into two.
+    // Acquire the key inside a `memoize` producer so the transport holds its
+    // batch flush across the (async) key read/create + storage write. The
+    // transport coalesces concurrently issued requests into one redirect by
+    // flushing on a macrotask once no memoize producer is in flight; without
+    // this hold, a faster concurrent request (e.g. the nonce path of
+    // `requestAttributes`) buffers first and trips that flush before this flow's
+    // delegation request — issued only once the key is ready — is buffered,
+    // splitting what should be one redirect into two.
     //
-    // The key is captured in a closure, not read back after the producer: on
-    // the FIRST load the producer sets `acquired`, so the delegation request
-    // that follows is issued with no intervening storage read — a read there
-    // would re-open the very flush gap this closes. The producer is skipped on
-    // the replay load (its result is journaled), where the key is instead
-    // restored from storage. Only the id is journaled; the key lives in storage.
-    let acquired: SignIdentity | PartialIdentity | null = null;
-    await transport.memoize(async () => {
-      acquired = await restoreKeyAt(this.#storage, pendingKeySlot);
-      if (acquired === null) {
-        acquired = await generateKey(keyType);
-        // Register before writing the key: if the write then fails, a stray
-        // registry entry is harmless (swept on expiry), whereas a key with no
-        // registry entry would leak un-sweepably.
-        await sweepAndRegisterPendingKey(this.#storage, pendingKeySlot, Date.now());
-        await this.#storage.set(pendingKeySlot, serializeKey(acquired));
+    // The key is captured in a closure, not read back after the producer: on the
+    // FIRST load the producer sets `acquired`, so the delegation request that
+    // follows is issued with no intervening storage read — a read there would
+    // re-open the very flush gap this closes. The producer is skipped on the
+    // replay load (its result is journaled), where the key is instead read from
+    // the pending slot.
+    //
+    // What is journaled is the key's *public* half: not a secret, it survives the
+    // redirect as text, and on the return load it says whether the pending slot
+    // still holds the key this ceremony started with.
+    let acquired: SignIdentity | null = null;
+    const startedWith = await transport.memoize(async () => {
+      const stored = await this.#credentialStorage.get(this.#slots.sessionPending);
+      if (stored !== null) {
+        acquired = stored.identity;
+      } else {
+        acquired = await this.#credentialStorage.create();
+        await this.#credentialStorage.set(this.#slots.sessionPending, { identity: acquired });
       }
-      return keyId;
+      return publicKeyOf(acquired);
     });
 
-    const key = acquired ?? (await restoreKeyAt(this.#storage, pendingKeySlot));
-    if (key === null) {
-      throw new Error('Session key missing after acquisition');
+    const key: SignIdentity | PartialIdentity | null =
+      acquired ?? (await this.#credentialStorage.get(this.#slots.sessionPending))?.identity ?? null;
+    // Empty or holding another flow's key: either way the key this ceremony
+    // journaled is no longer in the slot, so the delegation being replayed was
+    // minted for a key this flow does not have. The caller retries, and by then
+    // the sign-in that superseded it has usually been promoted.
+    if (key === null || publicKeyOf(key) !== startedWith) {
+      throw new Error('This sign-in was superseded by another one in this browser');
     }
-    return { key, pendingKeySlot };
+    return { key, pending: true };
   }
 
   /**
@@ -481,6 +1037,21 @@ export class AuthClient {
    * @throws When the identity provider returns an error or an invalid response.
    */
   async requestAttributes(params: {
+    keys: string[];
+    nonce: () => Promise<Uint8Array>;
+  }): Promise<SignedAttributes> {
+    // The channel lock and not the sign-in lock: this opens the signer channel,
+    // which an origin has one of, and writes nothing anyone else reads. Held
+    // together with a `signIn` overlapping it, which shares the same channel.
+    this.#beginInteraction();
+    try {
+      return await this.#runRequestAttributes(params);
+    } finally {
+      this.#endInteraction();
+    }
+  }
+
+  async #runRequestAttributes(params: {
     keys: string[];
     nonce: () => Promise<Uint8Array>;
   }): Promise<SignedAttributes> {
@@ -569,33 +1140,65 @@ export class AuthClient {
    * @param options.returnTo - URL to navigate to after sign-out.
    */
   async signOut(options: { returnTo?: string } = {}): Promise<void> {
-    await deleteStorage(this.#storage);
+    // Wait for the constructor's session restore: hydration racing the
+    // deletion below could re-populate the identity from already-read state.
+    await this.#init();
 
-    this.#identity = new AnonymousIdentity();
-    this.#chain = null;
+    // The same lock a ceremony takes, and taken the same way: this is the other
+    // operation that moves this namespace's sign-in. No channel lock — a revoke
+    // is an agent call to the canister, so nothing here touches the signer.
+    const signOutLock = stealLock(signInLockFor(this.#slots.state));
+
+    // Read before anything is cleared: the revoke call is made as the session,
+    // so it needs what the wipe is about to remove.
+    const session = await this.#credentialStorage.get(this.#slots.session).catch(() => null);
+
+    // Taken away rather than queued for. Waiting would make a sign-out the user
+    // asked for wait on a canister call in another tab; the tab that loses the
+    // lock finishes the call it cannot recall, sees that it lost it, and throws
+    // the result away rather than writing a credential into the slot cleared
+    // below. Nothing holds the lock where no other tab can read the store.
+    await stealMintLock(this.#credentialStorage.shared ? this.#slots.app : null);
+
+    // Ending the session at the canister and clearing what is held here are
+    // independent, so they run together: a slow or failing revoke must not hold
+    // up a wipe the user asked for, and a user who pressed sign out must not
+    // stay signed in on the device in front of them because a call failed.
+    //
+    // A failed revoke is carried rather than thrown, so the wipe below still
+    // finishes, and rather than dropped, so it can be raised once it has.
+    const revoked: Promise<unknown> =
+      session?.chain === undefined || !('sign' in session.identity)
+        ? Promise.resolve(undefined)
+        : this.#revoke(session.identity, session.chain).then(
+            () => undefined,
+            (error: unknown) => error,
+          );
+    const cleared = this.#endSession();
+
+    this.#installIdentity(new AnonymousIdentity());
+
+    const [revokeFailure] = await Promise.all([revoked, cleared]);
+
+    signOutLock.release();
+
+    // Raised after the wipe and before the navigation. The device is signed out
+    // whatever happened at the canister, and an application that told a user it
+    // had signed them out of their apps can find out that it had not — which it
+    // could not if this were swallowed, and could not act on if it arrived after
+    // the page had left.
+    if (revokeFailure !== undefined) throw revokeFailure;
 
     if (options.returnTo !== undefined) {
-      // Navigate exactly as before (pushState, else location.href), but only to
-      // a validated same-origin http(s) target, and feed that validated
-      // `target.href` to both sinks rather than the raw `returnTo`. An invalid
-      // or cross-origin `returnTo` is ignored, so the fallback can no longer be
-      // turned into an open redirect or a `javascript:` execution.
-      let target: URL | undefined;
-      try {
-        target = new URL(options.returnTo, window.location.href);
-      } catch {
-        target = undefined;
-      }
-      if (
-        target !== undefined &&
-        (target.protocol === 'https:' || target.protocol === 'http:') &&
-        target.origin === window.location.origin
-      ) {
-        try {
-          window.history.pushState({}, '', target.href);
-        } catch {
-          window.location.href = target.href;
-        }
+      // A navigation rather than a `pushState`: nothing obliges an application to
+      // re-render when the history entry changes — `pushState` fires no
+      // `popstate` — so the signed-in view would sit under a signed-out URL. The
+      // validated `href` is what reaches the sink rather than the raw value, so
+      // neither an open redirect nor a `javascript:` execution can be built
+      // from it.
+      const target = sameOriginTarget(options.returnTo);
+      if (target !== undefined) {
+        window.location.assign(target.href);
       }
     }
   }
@@ -608,7 +1211,7 @@ export class AuthClient {
   // normal close behaviour.
   async #resolveNonce(nonce: () => Promise<Uint8Array>): Promise<Uint8Array> {
     const value = nonce();
-    await this.#signer.openChannel();
+    await this.#openSignerChannel();
     const previousAutoClose = this.#signer.autoCloseTransportChannel;
     this.#signer.autoCloseTransportChannel = false;
     try {
@@ -618,327 +1221,404 @@ export class AuthClient {
     }
   }
 
+  /**
+   * Mints ahead of the next request when the page comes back, if one is due.
+   *
+   * Silent by design: this is not a request anyone is waiting on, so a failure
+   * leaves what is held in place for the next one to retry.
+   */
+  async #refreshInForeground(): Promise<void> {
+    if (this.#interactions > 0 || this.#refreshingInForeground) return;
+    this.#refreshingInForeground = true;
+    try {
+      await this.#refreshIfDue();
+    } finally {
+      this.#refreshingInForeground = false;
+    }
+  }
+
+  async #refreshIfDue(): Promise<void> {
+    // Waited for rather than raced: a `pageshow` or a pointer arriving before the
+    // restore has installed an identity would find an anonymous one and do
+    // nothing, and the moment would be spent. The restore mints on its own where
+    // a load needs one, so what this adds is the page coming back from the
+    // back-forward cache, and every later sign that somebody is here.
+    //
+    // Nothing is waiting on this, so a restore that fails is not this path's to
+    // report — and an unhandled rejection from an event handler is worse than
+    // the mint it was going to attempt.
+    const restored = await this.#init().then(
+      () => true,
+      () => false,
+    );
+    if (!restored) return;
+    // Re-checked: a ceremony can start while the restore is resolving.
+    if (this.#interactions > 0) return;
+    const identity = this.#identity;
+    if (identity instanceof SessionIdentity) await identity.refresh().catch(() => undefined);
+  }
+
+  /** Ends the session at the canister, so nothing more can be minted from it. */
+  async #revoke(key: SignIdentity, sessionChain: DelegationChain): Promise<void> {
+    const minter = await SessionMinter.create({
+      sessionKey: key,
+      sessionChain,
+      canisterId: this.#canisterId,
+      agentOptions: this.#options.agentOptions,
+    });
+    await minter.revoke();
+  }
+
+  /**
+   * Moves what a ceremony minted into the slot every tab acts with.
+   *
+   * Overwrites rather than clearing and re-filling, so there is no moment where
+   * the origin holds nothing — and what it replaces is a credential rooted at
+   * whatever account the previous session belonged to.
+   */
+  async #promoteAppCredential(identity: SignIdentity, chain: DelegationChain): Promise<void> {
+    // Written from what the ceremony minted rather than read back out of the
+    // pending slot: a read that came back empty returned silently and left the
+    // slot holding the previous account's credential, which the identity opened
+    // on the next line would then adopt.
+    await this.#credentialStorage.set(this.#slots.app, { identity, chain });
+    // Best-effort: what is left behind is a spent five-minute record in a slot
+    // nothing reads, replaced by the next ceremony.
+    await this.#credentialStorage.remove(this.#slots.appPending).catch(() => undefined);
+  }
+
+  #minterFor(key: SignIdentity, sessionChain: DelegationChain): Promise<SessionMinter> {
+    return SessionMinter.create({
+      sessionKey: key,
+      sessionChain,
+      canisterId: this.#canisterId,
+      agentOptions: this.#options.agentOptions,
+    });
+  }
+
+  /**
+   * Builds the identity an application acts with, from a session it holds.
+   *
+   * Little more than a constructor call: the identity resolves the account key it
+   * needs, so this passes the session's own shape and the slot to use and nothing
+   * more.
+   * @param key - The session key, which signs the mints.
+   * @param sessionChain - The chain that authorises it, and whose earliest
+   *   delegation bounds how long anything can be minted.
+   * @param source - A minter already built for this session, where the caller has
+   *   one. A sign-in does; a page load does not.
+   */
+  async #openSession(
+    key: SignIdentity,
+    sessionChain: DelegationChain,
+    source?: SessionMinter,
+  ): Promise<SessionIdentity> {
+    const minter = source ?? (await this.#minterFor(key, sessionChain));
+
+    // The account comes from the record, which both callers have already
+    // written or checked: a ceremony persists the session before this runs, and
+    // a restore refuses a record that names nobody. Without it the identity
+    // would take its account from whatever the app slot held, which a previous
+    // sign-in may still own.
+    const held = this.#stateStorage.get(this.#slots.state);
+
+    return SessionIdentity.create({
+      sessionExpiresAtMs: earliestExpiryMs(sessionChain),
+      source: minter,
+      storage: this.#credentialStorage,
+      slot: this.#slots.app,
+      expectedAccount: held?.principal,
+      onSessionGone: () => {
+        void this.#endOrDrop(held).catch(() => undefined);
+        this.#installIdentity(new AnonymousIdentity());
+      },
+    });
+  }
+
+  /**
+   * Ends the sign-in, or only this origin's claim on it.
+   *
+   * A refused mint says the session this origin held is dead, and a domain has
+   * one: it cannot be revived, only replaced. So if the record still names what
+   * this origin was operating under — same account, same expiry — it names a
+   * session nobody can use, and it goes. If it has moved on in either respect,
+   * someone else owns the sign-in now and this origin converges to them rather
+   * than retracting what they published.
+   * @param held - The record as it stood when the session was opened.
+   */
+  async #endOrDrop(held: SessionState | null): Promise<void> {
+    const now = this.#stateStorage.get(this.#slots.state);
+    const unchanged =
+      held !== null &&
+      now !== null &&
+      now.principal.compareTo(held.principal) === 'eq' &&
+      now.expiration === held.expiration;
+    await (unchanged ? this.#endSession() : this.#dropSession());
+  }
+
+  /**
+   * Restores again, because the record changed under this client.
+   *
+   * Queued behind whatever restore is in flight rather than replacing it: two
+   * restores reading one store would both install an identity, and the order
+   * they finished in would decide which. A failure is forgotten the same way
+   * {@link AuthClient.#init} forgets one, so the next call tries again.
+   */
+  #restoreAgain(): void {
+    // Coalescing, not queueing: a pass that has not started yet will read the
+    // same record a second one would, so any burst collapses to one more pass.
+    // Each pass can install an identity, and installing disposes the one it
+    // replaces — redundant passes mean disposing an identity with requests in
+    // flight against it.
+    if (this.#restoreQueued) return;
+    this.#restoreQueued = true;
+
+    const promise = (this.#initPromise ?? Promise.resolve())
+      .catch(() => undefined)
+      .then(() => {
+        this.#restoreQueued = false;
+        return this.#restore();
+      })
+      .catch((error: unknown) => {
+        this.#restoreQueued = false;
+        if (this.#initPromise === promise) {
+          this.#initPromise = null;
+        }
+        throw error;
+      });
+    this.#initPromise = promise;
+    // Nothing is waiting on this yet — the next `getIdentity()` is — so a
+    // rejection here would be unhandled until then.
+    promise.catch(() => undefined);
+  }
+
   // Memoized — only runs #hydrate once, returns the same promise on repeat calls.
+  //
+  // Forgotten again if it rejected, so a later call restores rather than
+  // replaying the failure: a restore reaches the network, and one unreachable
+  // boundary node at load would otherwise leave every `getIdentity()` for the
+  // life of the page rejecting with an error nothing can retry past.
   #init(): Promise<void> {
     if (!this.#initPromise) {
-      this.#initPromise = this.#hydrate();
+      const promise = this.#restore().catch((error: unknown) => {
+        if (this.#initPromise === promise) {
+          this.#initPromise = null;
+        }
+        throw error;
+      });
+      this.#initPromise = promise;
     }
     return this.#initPromise;
+  }
+
+  // Marks a restore as running, so what it writes does not come back as a
+  // record that changed under this client.
+  async #restore(): Promise<void> {
+    this.#restoring = true;
+    try {
+      await this.#hydrate();
+    } finally {
+      this.#restoring = false;
+    }
   }
 
   // Attempts to restore a previous session (key + delegation chain) from
   // storage. If found and still valid, sets #identity and #chain so the
   // client is ready to use without a new signIn().
   async #hydrate(): Promise<void> {
-    const key =
-      this.#options.identity ??
-      (await restoreKey(this.#storage, this.#options.keyType ?? ECDSA_KEY_LABEL));
-    if (!key) return;
-
-    const chain = await restoreChain(this.#storage);
-    if (!chain) return;
-
-    this.#chain = chain;
-    if ('toDer' in key) {
-      this.#identity = PartialDelegationIdentity.fromDelegation(key, chain);
-    } else {
-      this.#identity = DelegationIdentity.fromDelegation(key, chain);
+    const restored = await this.#restoreSession();
+    const key = restored?.identity;
+    const chain = restored?.chain;
+    if (!key || !chain) {
+      // Nothing to restore, so this origin cannot act — and saying otherwise is
+      // what the state leading forbids. Discarded rather than removed, because a
+      // record that reaches past this origin belongs to whoever published it.
+      if (this.#stateStorage.get(this.#slots.state)?.held) await this.#dropSession();
+      this.#installIdentity(new AnonymousIdentity());
+      return;
     }
 
-    if (!this.#options.idleOptions?.disableIdle && !this.idleManager) {
-      this.idleManager = IdleManager.create(this.#options.idleOptions);
-      this.#registerDefaultIdleCallback();
+    // The state decides whether this origin is signed in, so a chain it does not
+    // back belongs to a sign-in that has ended: drop it rather than restore it,
+    // or getIdentity() would hand back an identity isAuthenticated() calls
+    // signed out. Asked after the chain is read, so a visitor who was never
+    // signed in removes nothing.
+    if (this.#stateStorage.get(this.#slots.state) === null) {
+      await this.#endSession();
+      return;
     }
+
+    if (!('sign' in key)) {
+      this.#installIdentity(new AnonymousIdentity());
+      return;
+    }
+
+    let identity: SessionIdentity;
+    try {
+      identity = await this.#openSession(key, chain);
+    } catch (error) {
+      // The record names an account this session cannot produce a credential
+      // for, so it is not a sign-in this origin can act on. Dropped rather than
+      // ended: on a shared store the record belongs to whoever published it,
+      // and only the identity provider can say it is stale.
+      if (!(error instanceof AccountMismatchError)) throw error;
+      await this.#dropSession();
+      this.#installIdentity(new AnonymousIdentity());
+      return;
+    }
+
+    if (this.#disposed) {
+      // Disposed while this was in flight: install nothing, and stop the refresh
+      // this identity has already scheduled for itself.
+      identity.dispose();
+      return;
+    }
+
+    // The state decides who is signed in here, and a sibling subdomain can have
+    // changed it while this origin was away. Credentials rooted at an account the
+    // state no longer names belong to a sign-in that has ended, so they go rather
+    // than being restored — the app credential with them, since `#openSession`
+    // may have minted one for an account the state no longer names.
+    const state = this.#stateStorage.get(this.#slots.state);
+    if (state === null || state.principal.toText() !== identity.getPrincipal().toText()) {
+      // Both of them: the one just opened, which was never installed, and
+      // whatever this client was still answering with.
+      identity.dispose();
+      this.#installIdentity(new AnonymousIdentity());
+      await this.#dropSession();
+      return;
+    }
+    this.#installIdentity(identity);
   }
 
-  #registerDefaultIdleCallback() {
-    const idleOptions = this.#options?.idleOptions;
-    if (!idleOptions?.onIdle && !idleOptions?.disableDefaultIdleCallback) {
-      // Invoked without being awaited, so handle the promise here. Reload only
-      // after teardown resolves, and only if it succeeded — a reload before or
-      // without teardown lets #hydrate restore the still-valid session.
-      this.idleManager?.registerCallback(() => {
-        void this.signOut()
-          .then(() => location.reload())
-          .catch(() => {});
+  /**
+   * Stores the session as one record and records the state it puts this origin
+   * in, so {@link isAuthenticated} can answer without reading it back.
+   */
+  async #persistSession(
+    identity: SignIdentity,
+    chain: DelegationChain,
+    accountKey: DerEncodedPublicKey,
+  ): Promise<void> {
+    await this.#credentialStorage.set(this.#slots.session, { identity, chain });
+
+    let earliest: bigint | null = null;
+    for (const { delegation } of chain.delegations) {
+      if (earliest === null || delegation.expiration < earliest) {
+        earliest = delegation.expiration;
+      }
+    }
+    if (earliest !== null) {
+      // The account is what a mint reported, and the sign-in lasts as long as
+      // the session chain's earliest delegation.
+      this.#stateStorage.set(this.#slots.state, {
+        principal: Principal.selfAuthenticating(new Uint8Array(accountKey)),
+        expiration: earliest,
       });
     }
   }
-}
 
-/**
- * Encodes a Uint8Array to a base64 string.
- * @param bytes - The bytes to encode.
- */
-function toBase64(bytes: Uint8Array): string {
-  if ('toBase64' in bytes && typeof bytes.toBase64 === 'function') {
-    return bytes.toBase64();
-  }
-  let binary = '';
-  for (let i = 0; i < bytes.byteLength; i++) {
-    binary += String.fromCharCode(bytes[i]);
-  }
-  return globalThis.btoa(binary);
-}
+  /**
+   * Loads the stored session. Returns `null` and ends the sign-in where the
+   * delegation has expired or the record cannot be read.
+   */
+  async #restoreSession(): Promise<Credential | null> {
+    const credential = await this.#credentialStorage.get(this.#slots.session);
+    if (credential === null) return null;
 
-/**
- * Decodes a base64 string to a Uint8Array.
- * @param str - The base64-encoded string.
- */
-function fromBase64(str: string): Uint8Array {
-  if ('fromBase64' in Uint8Array && typeof Uint8Array.fromBase64 === 'function') {
-    return Uint8Array.fromBase64(str);
-  }
-  const binary = globalThis.atob(str);
-  const bytes = new Uint8Array(binary.length);
-  for (let i = 0; i < binary.length; i++) {
-    bytes[i] = binary.charCodeAt(i);
-  }
-  return bytes;
-}
-
-/**
- * Generates a new session key.
- * @param keyType - The key algorithm to use.
- */
-async function generateKey(keyType: BaseKeyType): Promise<SignIdentity> {
-  if (keyType === ED25519_KEY_LABEL) {
-    return Ed25519KeyIdentity.generate();
-  }
-  return await ECDSAKeyIdentity.generate();
-}
-
-/**
- * Saves a session key to storage.
- * @param storage - The storage backend.
- * @param key - The key to persist.
- */
-async function persistKey(
-  storage: AuthClientStorage,
-  key: SignIdentity | PartialIdentity,
-): Promise<void> {
-  await storage.set(KEY_STORAGE_KEY, serializeKey(key));
-}
-
-/**
- * Loads a session key from storage. Falls back to migrating a legacy
- * key from localStorage if nothing is found in the primary store.
- * @param storage - The storage backend.
- * @param keyType - The expected key algorithm (determines deserialization).
- */
-async function restoreKey(
-  storage: AuthClientStorage,
-  keyType: BaseKeyType,
-): Promise<SignIdentity | PartialIdentity | null> {
-  let stored = await storage.get(KEY_STORAGE_KEY);
-  if (!stored) {
-    stored = await migrateFromLocalStorage(storage, keyType);
-  }
-  if (!stored) return null;
-
-  try {
-    // CryptoKeyPair (object) → ECDSA, JSON string → Ed25519
-    if (typeof stored === 'object') {
-      return await ECDSAKeyIdentity.fromKeyPair(stored);
+    // A record with no chain is not a session: only a ceremony's own slot may
+    // hold a key alone.
+    if (credential.chain === undefined || !isDelegationValid(credential.chain)) {
+      await this.#endSession();
+      return null;
     }
-    return Ed25519KeyIdentity.fromJSON(stored);
-  } catch {
-    // The stored value may be corrupt or from an incompatible version.
-    // Returning null lets the caller fall through to key generation,
-    // which is safer than crashing on startup.
-    return null;
+    return credential;
+  }
+
+  /**
+   * Ends the sign-in: what a user pressing sign out asks for.
+   *
+   * Retracts the state, including anything the store publishes beyond this
+   * origin, because a sibling reading a shared record must stop seeing one.
+   */
+  async #endSession(): Promise<void> {
+    this.#stateStorage.remove(this.#slots.state);
+    await this.#clearCredentials();
+  }
+
+  /**
+   * Drops this origin's claim on a sign-in without retracting what is published.
+   *
+   * What finding out does, which is a different act. An origin whose chain turns
+   * out to be dead cannot tell a revoked session from one a sibling replaced by
+   * signing in — and in the second case the shared record was written by that
+   * sibling a moment ago, so retracting it would tell it that the session it just
+   * obtained is gone.
+   */
+  async #dropSession(): Promise<void> {
+    this.#stateStorage.discard(this.#slots.state);
+    await this.#clearCredentials();
+  }
+
+  // Every slot a completed sign-in writes. Not the ceremony's pending slot: a
+  // flow that completed has already emptied it, and one that has not may still
+  // return for it — a sign-out here cannot tell an abandoned key from a live one.
+  //
+  // The state is retracted before this by both callers: it is what says whether
+  // this origin is signed in, and a teardown that failed partway must not leave
+  // it saying yes.
+  //
+  // Both are attempted whatever either does, since a credential that survives can
+  // still be adopted; the first failure is reported once neither is left behind.
+  async #clearCredentials(): Promise<void> {
+    const outcomes = await Promise.allSettled([
+      this.#credentialStorage.remove(this.#slots.session),
+      this.#credentialStorage.remove(this.#slots.app),
+    ]);
+    const failed = outcomes.find((outcome) => outcome.status === 'rejected');
+    if (failed !== undefined) throw failed.reason;
   }
 }
 
-// Reads the pending-key registry, dropping malformed entries. The value comes
-// from storage, so guard against corruption: keep only real pending-key slots
-// with a finite expiry (a NaN expiry compares false forever and never sweeps;
-// a foreign slot would make the sweep remove an unrelated storage key).
-async function readPendingRegistry(storage: AuthClientStorage): Promise<PendingKeyEntry[]> {
-  const raw = await storage.get(PENDING_KEYS_REGISTRY_KEY);
-  if (typeof raw !== 'string') return [];
-  try {
-    const parsed: unknown = JSON.parse(raw);
-    if (!Array.isArray(parsed)) return [];
-    return parsed.filter((entry): entry is PendingKeyEntry => {
-      if (typeof entry !== 'object' || entry === null) return false;
-      const { slot, expiresAt } = entry as PendingKeyEntry;
-      return (
-        typeof slot === 'string' &&
-        slot.startsWith(PENDING_KEY_PREFIX) &&
-        typeof expiresAt === 'number' &&
-        Number.isFinite(expiresAt)
-      );
-    });
-  } catch {
-    return [];
-  }
-}
-
-async function writePendingRegistry(
-  storage: AuthClientStorage,
-  entries: PendingKeyEntry[],
-): Promise<void> {
-  if (entries.length === 0) {
-    await storage.remove(PENDING_KEYS_REGISTRY_KEY);
-    return;
-  }
-  await storage.set(PENDING_KEYS_REGISTRY_KEY, JSON.stringify(entries));
-}
-
-// Removes expired pending-key slots, then registers `slot` with a fresh expiry.
-async function sweepAndRegisterPendingKey(
-  storage: AuthClientStorage,
-  slot: string,
-  now: number,
-): Promise<void> {
-  const entries = await readPendingRegistry(storage);
-  const live: PendingKeyEntry[] = [];
-  for (const entry of entries) {
-    if (entry.slot === slot) continue; // re-registered with a fresh expiry below
-    if (entry.expiresAt <= now) {
-      await storage.remove(entry.slot);
-    } else {
-      live.push(entry);
-    }
-  }
-  live.push({ slot, expiresAt: now + PENDING_KEY_TTL_MS });
-  await writePendingRegistry(storage, live);
-}
-
-// Drops a slot from the pending-key registry once its flow completes.
-async function unregisterPendingKey(storage: AuthClientStorage, slot: string): Promise<void> {
-  const entries = await readPendingRegistry(storage);
-  const remaining = entries.filter((entry) => entry.slot !== slot);
-  if (remaining.length !== entries.length) {
-    await writePendingRegistry(storage, remaining);
-  }
-}
-
-/**
- * Loads a session key from a specific storage slot, deserializing by stored
- * shape (`CryptoKeyPair` → ECDSA, JSON string → Ed25519). Unlike
- * {@link restoreKey} it does not migrate from localStorage — it reads only the
- * given slot, as used for a redirect flow's per-flow pending key.
- * @param storage - The storage backend.
- * @param storageKey - The slot to read.
- */
-async function restoreKeyAt(
-  storage: AuthClientStorage,
-  storageKey: string,
-): Promise<SignIdentity | PartialIdentity | null> {
-  const stored = await storage.get(storageKey);
-  if (!stored) return null;
-
-  try {
-    if (typeof stored === 'object') {
-      return await ECDSAKeyIdentity.fromKeyPair(stored);
-    }
-    return Ed25519KeyIdentity.fromJSON(stored);
-  } catch {
-    return null;
-  }
-}
-
-/**
- * Converts a key into a format suitable for storage.
- * @param key - The key to serialize.
- */
-function serializeKey(key: SignIdentity | PartialIdentity): StoredKey {
-  if (key instanceof ECDSAKeyIdentity) return key.getKeyPair();
-  if (key instanceof Ed25519KeyIdentity) return JSON.stringify(key.toJSON());
-  throw new Error('Unsupported key type');
-}
-
-/**
- * Saves the delegation chain and caches its earliest expiration
- * in localStorage so {@link AuthClient.isAuthenticated} can check it synchronously.
- * @param storage - The storage backend.
- * @param chain - The delegation chain to persist.
- */
-async function persistChain(storage: AuthClientStorage, chain: DelegationChain): Promise<void> {
-  await storage.set(KEY_STORAGE_DELEGATION, JSON.stringify(chain.toJSON()));
-
+/** The moment a chain stops being usable: its earliest delegation's expiry. */
+function earliestExpiryMs(chain: DelegationChain): number {
   let earliest: bigint | null = null;
   for (const { delegation } of chain.delegations) {
     if (earliest === null || delegation.expiration < earliest) {
       earliest = delegation.expiration;
     }
   }
-  if (earliest !== null) {
-    localStorage.setItem(KEY_STORAGE_EXPIRATION, earliest.toString());
-  }
+  return earliest === null ? 0 : Number(earliest / 1_000_000n);
+}
+
+/** A key's public half as text, for comparing two keys without holding both. */
+function publicKeyOf(key: SignIdentity | PartialIdentity): string {
+  return toBase64(new Uint8Array(key.getPublicKey().toDer()));
 }
 
 /**
- * Loads the delegation chain from storage. Returns `null` and wipes
- * storage if the chain is expired or corrupted.
- * @param storage - The storage backend.
+ * The `returnTo` as a URL this origin may navigate to, or `undefined`.
+ *
+ * Same-origin and `http(s)` only. Anything else is ignored rather than refused,
+ * because a `returnTo` is a convenience and failing a sign-in or a sign-out over
+ * one would be worse than landing on the page the caller started from. Returning
+ * the parsed URL rather than a boolean is what lets callers navigate to
+ * `target.href` instead of to the raw value they were handed.
  */
-async function restoreChain(storage: AuthClientStorage): Promise<DelegationChain | null> {
+function sameOriginTarget(returnTo: string): URL | undefined {
+  let target: URL;
   try {
-    const raw = await storage.get(KEY_STORAGE_DELEGATION);
-    if (!raw || typeof raw !== 'string') return null;
-
-    const chain = DelegationChain.fromJSON(raw);
-    if (!isDelegationValid(chain)) {
-      await deleteStorage(storage);
-      return null;
-    }
-    return chain;
-  } catch (e) {
-    console.error(e);
-    await deleteStorage(storage);
-    return null;
+    target = new URL(returnTo, window.location.href);
+  } catch {
+    return undefined;
   }
-}
-
-/**
- * Clears all session data from storage.
- * @param storage - The storage backend.
- */
-async function deleteStorage(storage: AuthClientStorage): Promise<void> {
-  await storage.remove(KEY_STORAGE_KEY);
-  await storage.remove(KEY_STORAGE_DELEGATION);
-  await storage.remove(KEY_VECTOR);
-  localStorage.removeItem(KEY_STORAGE_EXPIRATION);
-}
-
-/** Reads the cached delegation expiration from localStorage (nanoseconds). */
-function getExpirationFlag(): bigint | null {
-  const value = localStorage.getItem(KEY_STORAGE_EXPIRATION);
-  if (value === null) return null;
-  return BigInt(value);
-}
-
-/**
- * One-time migration: moves a legacy session stored in localStorage
- * into the primary storage, then cleans up the old entries.
- * @param storage - The target storage backend.
- * @param keyType - The expected key algorithm (only ECDSA keys are migrated).
- */
-async function migrateFromLocalStorage(
-  storage: AuthClientStorage,
-  keyType: BaseKeyType,
-): Promise<StoredKey | null> {
-  try {
-    const fallback = new LocalStorage();
-    const localChain = await fallback.get(KEY_STORAGE_DELEGATION);
-    const localKey = await fallback.get(KEY_STORAGE_KEY);
-
-    if (!localChain || !localKey || keyType !== ECDSA_KEY_LABEL) return null;
-
-    console.log('Discovered an identity stored in localstorage. Migrating to IndexedDB');
-    await storage.set(KEY_STORAGE_DELEGATION, localChain);
-    await storage.set(KEY_STORAGE_KEY, localKey);
-    await fallback.remove(KEY_STORAGE_DELEGATION);
-    await fallback.remove(KEY_STORAGE_KEY);
-
-    return localKey;
-  } catch (error) {
-    console.error(`error while attempting to recover localstorage: ${error}`);
-    return null;
+  if (
+    (target.protocol === 'https:' || target.protocol === 'http:') &&
+    target.origin === window.location.origin
+  ) {
+    return target;
   }
+  return undefined;
 }
 
 /**

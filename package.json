@@ -44,6 +44,7 @@
   "scripts": {
     "build": "tsc -p tsconfig.build.json && pnpm lint:package",
     "test": "vitest",
+    "typecheck": "tsc -p tsconfig.test.json --noEmit",
     "codestyle:check": "biome check",
     "codestyle:fix": "biome check --write",
     "lint:package": "publint --strict"
