@@ -121,8 +121,10 @@ Using the app keeps the sign-in alive — a pointer, a key, or a request. A user
 touches nothing at all will be signed out, so don't set this near its ten-minute
 minimum unless that is what you want.
 
-Your app finds out the next time it uses the sign-in: the state becomes
-`signed-out`, and the subscription from step 3 fires.
+Your app finds out the next time it uses the sign-in: the record is published as
+over, the state becomes `expired`, and the subscription from step 3 fires. It
+still names the account, so the screen can say whose session ended. Only signing
+out reads as `signed-out`.
 
 ## What signing out does
 
@@ -147,7 +149,8 @@ that record belongs to the sign-in that replaced it. Its own reads then report
 A revoked session looks identical at that moment, so the difference only shows in
 what `/reauth` gets back: a replacement resolves silently, while a session that is
 genuinely gone comes back `interaction_required` — and that is what tells the
-origin the shared record is stale and may be removed.
+origin the shared record names a session nobody can use, which it publishes as
+over.
 
 ## 3. Reflect it in your UI
 

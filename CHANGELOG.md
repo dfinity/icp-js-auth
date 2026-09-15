@@ -2,6 +2,7 @@
 
 ### Feat
 
+- say a session ended, and name the identity provider as a pair (#191)
 - one-click SSO sign-in for organization domains (#141)
 - a shared store with no durable medium (#180)
 - acquire a session without a ceremony (#145)
@@ -16,7 +17,6 @@
 
 ### Fix
 
-- name the identity provider's URL and canister together (#191)
 - recover from force-closed IndexedDB connections (#137)
 
 ## 8.0.3 (2026-08-03)
