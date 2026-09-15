@@ -15,18 +15,16 @@ import { HttpAgent } from '@icp-sdk/core/agent';
 import { AttributesIdentity } from '@icp-sdk/core/identity';
 import { Principal } from '@icp-sdk/core/principal';
 
-const { DFX_NETWORK, II_AUTHORIZE_URL, II_CANISTER_ID } = process.env;
+const { II_AUTHORIZE_URL, II_CANISTER_ID } = process.env;
 
 const internetIdentityCanisterId = Principal.fromText(II_CANISTER_ID);
 
-// Mainnet Internet Identity is the default, so only a local deployment says
-// where to go — both halves of it, since neither is derived from the other.
-const identityProvider =
-  DFX_NETWORK === 'ic'
-    ? undefined
-    : { authorizeUrl: II_AUTHORIZE_URL, canisterId: internetIdentityCanisterId };
-
-const authClient = new AuthClient({ identityProvider });
+const authClient = new AuthClient({
+  identityProvider: {
+    authorizeUrl: II_AUTHORIZE_URL,
+    canisterId: internetIdentityCanisterId,
+  },
+});
 
 // Check for an existing session (synchronous)
 if (authClient.isAuthenticated()) {
