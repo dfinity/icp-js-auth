@@ -519,7 +519,7 @@ describe('AuthClient', () => {
       () =>
         new AuthClient({
           // @ts-expect-error the URL and the canister are named together
-          identityProvider: { authorizeUrl: 'https://my-ii.icp0.io/authorize' },
+          identityProvider: { authorizeUrl: 'https://id.ai/authorize' },
         }),
     ).toThrow('together, or neither');
     expect(
