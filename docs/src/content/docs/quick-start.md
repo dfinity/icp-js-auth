@@ -21,15 +21,17 @@ const network = 'ic'; // typically, this value is read from the environment (e.g
 // id your own Internet Identity deployment reported.
 const internetIdentityCanisterId = Principal.fromText('rdmx6-jaaaa-aaaaa-aaadq-cai');
 
-const authClient = new AuthClient({
-  identityProvider: {
-    authorizeUrl:
-      network === 'ic'
-        ? 'https://id.ai/authorize' // Mainnet
-        : 'http://id.ai.localhost:8000/authorize', // default name mapping set by icp-cli when ii is enabled
-    canisterId: internetIdentityCanisterId,
-  },
-});
+// Mainnet Internet Identity is the default, so only a local deployment says
+// where to go — and it names both halves, since neither is derived from the other.
+const identityProvider =
+  network === 'ic'
+    ? undefined
+    : {
+        authorizeUrl: 'http://id.ai.localhost:8000/authorize', // default name mapping set by icp-cli when ii is enabled
+        canisterId: internetIdentityCanisterId,
+      };
+
+const authClient = new AuthClient({ identityProvider });
 
 // Check for an existing session (synchronous)
 if (authClient.isAuthenticated()) {
