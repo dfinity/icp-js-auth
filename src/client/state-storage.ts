@@ -241,9 +241,28 @@ export class LocalStateStorage implements StateStorage {
     };
     globalThis.addEventListener('storage', onStorage);
 
+    // `storage` is the only notice this store gets, and a page restored from the
+    // back-forward cache was not listening while it was frozen. So the record is
+    // re-read when the page is shown or its window regains focus, which is when
+    // somebody is about to act on the answer.
+    const onVisible = (): void => {
+      if (document.visibilityState === 'visible') check();
+    };
+    const hooked = typeof document !== 'undefined';
+    if (hooked) {
+      document.addEventListener('visibilitychange', onVisible);
+      globalThis.addEventListener('pageshow', check);
+      globalThis.addEventListener('focus', check);
+    }
+
     return () => {
       listeners.delete(check);
       globalThis.removeEventListener('storage', onStorage);
+      if (hooked) {
+        document.removeEventListener('visibilitychange', onVisible);
+        globalThis.removeEventListener('pageshow', check);
+        globalThis.removeEventListener('focus', check);
+      }
     };
   }
 

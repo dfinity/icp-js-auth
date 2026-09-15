@@ -290,6 +290,9 @@ export class AuthClient {
   #disposed = false;
   // Set while a further restore is pending, so a burst of changes is one pass.
   #restoreQueued = false;
+  // What `getStatus` answers with, replaced only when the record changes.
+  #status: SessionStatus;
+  readonly #listeners = new Set<() => void>();
   #stateStorage: StateStorage;
   #signer: Signer;
   // Set only in redirect mode, so the redirect-specific paths (nonce/key
@@ -348,7 +351,14 @@ export class AuthClient {
     // `disableBrowserActivity` says, because it is not a refresh: a client
     // answering for a sign-in the record no longer names is wrong rather than
     // stale.
+    this.#status = this.#readStatus();
     this.#unwatchState = this.#stateStorage.subscribe(this.#slots.state, () => {
+      // The held answer first, then the listeners, then whatever this client has
+      // to do about it — so a listener asking who is signed in sees what it was
+      // told about, whether or not the guard below lets a restore run.
+      this.#status = this.#readStatus();
+      for (const listener of [...this.#listeners]) listener();
+
       // Only a change this client did not cause. A ceremony writes this record
       // itself and installs the identity that goes with it, and a same-tab write
       // announces itself — so reacting to our own would re-hydrate mid-ceremony,
@@ -441,6 +451,26 @@ export class AuthClient {
    * Synchronous, so a page can render on it without opening a store.
    */
   getStatus(): SessionStatus {
+    // The same object until something actually changes. A page renders on this,
+    // and a framework asking "did it change?" compares the object rather than
+    // its contents — a fresh one per call reads as a change on every render, and
+    // `useSyncExternalStore` refuses a snapshot that never settles. Returning
+    // the held one also means no `Principal.fromText` per call.
+    //
+    // Expiry is the one transition with no write behind it, so it is the one
+    // thing checked here: a number comparison, and the answer is rebuilt once
+    // when it flips.
+    if (this.#status.state !== 'signed-out' && Date.now() >= this.#status.expiresAtMs) {
+      if (this.#status.state !== 'expired') {
+        const { principal, expiresAtMs } = this.#status;
+        this.#status = { state: 'expired', principal, expiresAtMs };
+      }
+    }
+    return this.#status;
+  }
+
+  /** Reads the record and builds the answer `getStatus` hands out. */
+  #readStatus(): SessionStatus {
     const record = this.#stateStorage.get(this.#slots.state);
     if (record === null) return { state: 'signed-out' };
 
@@ -474,7 +504,13 @@ export class AuthClient {
    * @returns A function that unregisters it.
    */
   subscribe(listener: () => void): () => void {
-    return this.#stateStorage.subscribe(this.#slots.state, listener);
+    // Fired by this client rather than by the store, because the answer has to
+    // be up to date before a listener asks for it: the store announcing first
+    // would let a listener read a status one change behind.
+    this.#listeners.add(listener);
+    return () => {
+      this.#listeners.delete(listener);
+    };
   }
 
   /**

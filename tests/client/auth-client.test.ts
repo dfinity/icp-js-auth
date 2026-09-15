@@ -1626,6 +1626,45 @@ describe('AuthClient signIn', () => {
     reads.mockRestore();
   });
 
+  it('answers with the same status object until something changes', async () => {
+    const credentialStorage = new MemoryCredentialStorage();
+    const stateStorage = new MemoryStateStorage();
+    const client = track(new AuthClient({ credentialStorage, stateStorage }));
+
+    // What `useSyncExternalStore` needs: two calls with nothing in between are
+    // the same object, or a framework comparing them sees a change per render.
+    const first = client.getStatus();
+    expect(client.getStatus()).toBe(first);
+
+    handleSignIn(FakeTransport.last());
+    await client.signIn();
+
+    const signedIn = client.getStatus();
+    expect(signedIn).not.toBe(first);
+    expect(signedIn.state).toBe('signed-in');
+    expect(client.getStatus()).toBe(signedIn);
+  });
+
+  it('flips to expired without a write, and holds that answer too', async () => {
+    const stateStorage = new MemoryStateStorage();
+    stateStorage.set(SLOTS.state, {
+      principal: Principal.selfAuthenticating(new Uint8Array([1, 2, 3])),
+      expiration: (BigInt(Date.now()) + 60_000n) * 1_000_000n,
+    });
+    const client = track(new AuthClient({ credentialStorage: spyStorage(), stateStorage }));
+
+    expect(client.getStatus().state).toBe('signed-in');
+
+    // Expiry is the one transition with no write behind it, so nothing announces
+    // it — but the answer still has to move, and then stay put.
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(new Date(Date.now() + 120_000));
+    const expired = client.getStatus();
+    expect(expired.state).toBe('expired');
+    expect(client.getStatus()).toBe(expired);
+    vi.useRealTimers();
+  });
+
   it('tells a subscriber when who is signed in here changes', async () => {
     const credentialStorage = new MemoryCredentialStorage();
     const stateStorage = new MemoryStateStorage();
