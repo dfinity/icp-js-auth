@@ -29,9 +29,9 @@ export interface SessionState {
 /**
  * Holds the state of a sign-in.
  *
- * This is what decides whether this origin is signed in and as whom. It is read
- * synchronously, because a page renders on the answer and cannot await one, and
- * that is why {@link AuthClient.isAuthenticated} needs no asynchronous read.
+ * This is what decides whether this origin is signed in and as whom. It is a
+ * store of its own because it has to be readable without awaiting, which a
+ * credential store does not.
  *
  * A record can be stale — a session revoked at the canister still reads as
  * signed in until something calls and is refused — so it is the state as this

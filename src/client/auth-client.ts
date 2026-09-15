@@ -79,11 +79,6 @@ export interface AuthClientCreateOptions {
   /**
    * Where the state of the sign-in is kept: which account is signed in here,
    * and until when. Defaults to `localStorage`.
-   *
-   * This is what {@link AuthClient.isAuthenticated} answers from, which is why
-   * it is a store of its own rather than something read back out of
-   * {@link AuthClientCreateOptions.storage}: the state has to be readable
-   * without awaiting, and a credential store does not have to be.
    */
   stateStorage?: StateStorage;
 
@@ -197,29 +192,21 @@ export interface SignedAttributes {
  *   : await authClient.signIn();
  */
 /**
- * What the state adds up to for this origin, once the clock is applied.
+ * Who is signed in for this origin, and until when.
  *
- * The record says what is signed in and whether this origin holds a credential
- * for it; this says what that means. The principal is present in every case
- * where a record exists, which is what a silent re-issue needs in order to name
- * the account it is for. So is the expiration, which the client already reads to
- * decide `expired`: an application counting down to the end of a sign-in would
- * otherwise have to reach into the store for it, and which key a store answers
- * for is the client's to know.
+ * `principal` and `expiresAtMs` are present in every case where a record
+ * exists, so an application can name the account and count down to the end of a
+ * sign-in without reading the store itself.
  */
 export type SessionStatus =
-  | { status: 'signed-in'; principal: Principal; expiration: bigint }
+  | { state: 'signed-in'; principal: Principal; expiresAtMs: number }
   /**
-   * A sign-in this origin has no credential for, so it cannot act on it yet.
-   *
-   * Only reachable where the record reaches past this origin: a sibling
-   * subdomain signed in and this one has not acquired its own credential. The
-   * silent re-issue that fixes it can still fail, and the fallback is asking the
-   * user.
+   * Someone is signed in on this domain, but this origin holds no credential
+   * for them, so it cannot act yet. Acquire one silently, or ask the user.
    */
-  | { status: 'signed-in-elsewhere'; principal: Principal; expiration: bigint }
-  | { status: 'expired'; principal: Principal; expiration: bigint }
-  | { status: 'signed-out' };
+  | { state: 'signed-in-elsewhere'; principal: Principal; expiresAtMs: number }
+  | { state: 'expired'; principal: Principal; expiresAtMs: number }
+  | { state: 'signed-out' };
 
 export class AuthClient {
   #identity: Identity | PartialIdentity = new AnonymousIdentity();
@@ -292,7 +279,7 @@ export class AuthClient {
    * Checks whether the user has an active, non-expired session.
    */
   isAuthenticated(): boolean {
-    return this.getStatus().status === 'signed-in';
+    return this.getStatus().state === 'signed-in';
   }
 
   /**
@@ -318,37 +305,26 @@ export class AuthClient {
    */
   getPrincipal(): Principal | undefined {
     const status = this.getStatus();
-    return status.status === 'signed-in' ? status.principal : undefined;
+    return status.state === 'signed-in' ? status.principal : undefined;
   }
 
   /**
-   * What this origin's sign-in amounts to right now.
+   * Who is signed in for this origin right now.
    *
-   * Four cases, tested in one place so an application does not have to know the
-   * order in which they exclude each other. Reading the record directly means
-   * recombining `held` and the expiry at every call site, which is where the
-   * difference between "signed in here" and "signed in on this domain" gets lost.
-   *
-   * Reads the state rather than the delegation, so the answer needs no
-   * asynchronous store and a page load can render on it.
+   * Synchronous, so a page can render on it without opening a store.
    */
   getStatus(): SessionStatus {
     const state = this.#stateStorage.get(STATE_KEY);
-    if (state === null) return { status: 'signed-out' };
+    if (state === null) return { state: 'signed-out' };
 
-    const { principal, expiration } = state;
-    // Expiry first: a record that has run out says nothing about who may act,
-    // whoever it belongs to, and an application showing "your session ended"
-    // wants that ahead of the rest.
-    if (BigInt(Date.now()) * BigInt(1_000_000) >= expiration) {
-      return { status: 'expired', principal, expiration };
+    const { principal } = state;
+    const expiresAtMs = Number(state.expiration / 1_000_000n);
+    if (Date.now() >= expiresAtMs) {
+      return { state: 'expired', principal, expiresAtMs };
     }
-    // `held` is what separates "this origin can act" from "someone is signed in
-    // within this store's reach" — the second is a sibling subdomain that has not
-    // acquired a credential of its own.
     return state.held
-      ? { status: 'signed-in', principal, expiration }
-      : { status: 'signed-in-elsewhere', principal, expiration };
+      ? { state: 'signed-in', principal, expiresAtMs }
+      : { state: 'signed-in-elsewhere', principal, expiresAtMs };
   }
 
   /**

@@ -222,7 +222,7 @@ describe('AuthClient', () => {
 
     const client = new AuthClient({ stateStorage, idleOptions: { disableIdle: true } });
 
-    expect(client.getStatus().status).toBe(expected);
+    expect(client.getStatus().state).toBe(expected);
     // The predicate is the same rule, so the two can never disagree.
     expect(client.isAuthenticated()).toBe(authenticated);
   });
@@ -252,8 +252,10 @@ describe('AuthClient', () => {
         idleOptions: { disableIdle: true },
       }).getStatus();
 
-      expect(status.status).toBe(held);
-      expect(status.status === 'signed-out' ? undefined : status.expiration).toBe(expiration);
+      expect(status.state).toBe(held);
+      expect(status.state === 'signed-out' ? undefined : status.expiresAtMs).toBe(
+        Number(expiration / 1_000_000n),
+      );
     }
 
     // Nothing to carry where nothing is signed in.
@@ -267,7 +269,7 @@ describe('AuthClient', () => {
       },
       idleOptions: { disableIdle: true },
     }).getStatus();
-    expect(signedOut).toEqual({ status: 'signed-out' });
+    expect(signedOut).toEqual({ state: 'signed-out' });
   });
 
   it('carries the account in every case where a record exists', () => {
@@ -288,7 +290,7 @@ describe('AuthClient', () => {
 
     // A silent re-issue needs it to name the account, so the type carries it
     // wherever there is one to carry.
-    expect(status.status === 'signed-out' ? null : status.principal).toEqual(principal);
+    expect(status.state === 'signed-out' ? null : status.principal).toEqual(principal);
   });
 
   it('clears the credentials it could not restore, not just the claim on them', async () => {
@@ -624,8 +626,8 @@ describe('AuthClient signIn', () => {
     // Nothing is lost: getStatus() carries the account, with the status attached
     // so it cannot be mistaken for permission to act.
     const status = client.getStatus();
-    expect(status.status).toBe('expired');
-    expect(status.status !== 'signed-out' && status.principal.toText()).toBe(principal.toText());
+    expect(status.state).toBe('expired');
+    expect(status.state !== 'signed-out' && status.principal.toText()).toBe(principal.toText());
   });
 
   it('never disagrees with isAuthenticated', () => {
