@@ -1,3 +1,19 @@
+## Unreleased
+
+### Feat
+
+- the idle timeout belongs to the canister (#181)
+- mint when a tab comes back, before the first click does (#171)
+- sign in to a session, and end it at the canister (#159)
+- mint app delegations from the Internet Identity canister (#156)
+- an identity that replaces its own delegation as it ages (#155)
+- hold a key and its delegation as one credential (#169)
+- keep the state of a sign-in in a store of its own (#170)
+
+### Fix
+
+- recover from force-closed IndexedDB connections (#137)
+
 ## 8.0.3 (2026-08-03)
 
 ### Fix
