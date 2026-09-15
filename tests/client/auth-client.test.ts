@@ -123,7 +123,11 @@ function spyStorage(seed?: Credential): CredentialStorage & {
 function stateFor(chain: DelegationChain): MemoryStateStorage {
   const storage = new MemoryStateStorage();
   storage.set(SLOTS.state, {
-    principal: Principal.selfAuthenticating(new Uint8Array(chain.publicKey)),
+    // The account is what a mint reports, not the session chain's root — that is
+    // the session's own key. The fake minter roots every app delegation here.
+    principal: Principal.selfAuthenticating(
+      new Uint8Array(minted.accountKey!.getPublicKey().toDer()),
+    ),
     expiration: chain.delegations[0]!.delegation.expiration,
   });
   return storage;
@@ -278,18 +282,6 @@ describe('AuthClient', () => {
     expect(client.isAuthenticated()).toBe(false);
     const identity = await client.getIdentity();
     expect(identity.getPrincipal().isAnonymous()).toBe(true);
-  });
-
-  it('should use a provided identity as the key for hydration', async () => {
-    const identity = Ed25519KeyIdentity.generate();
-    const chain = await createTestDelegation(identity);
-    const client = new AuthClient({
-      identity,
-      credentialStorage: spyStorage({ identity, chain }),
-      stateStorage: stateFor(chain),
-    });
-    const resolved = await client.getIdentity();
-    expect(resolved.getPrincipal().isAnonymous()).toBe(false);
   });
 
   it('stops claiming a sign-in it has nothing left to restore', async () => {
@@ -1274,6 +1266,39 @@ describe('AuthClient signIn', () => {
     expect(await credentialStorage.get(SLOTS.session)).toBeNull();
     expect(await credentialStorage.get(SLOTS.app)).toBeNull();
     expect(client.isAuthenticated()).toBe(false);
+  });
+
+  it('supersedes the earlier of two sign-ins on one client', async () => {
+    stubLocks();
+    const client = new AuthClient({
+      credentialStorage: new MemoryCredentialStorage(),
+      stateStorage: new MemoryStateStorage(),
+      idleOptions: { disableIdle: true },
+    });
+
+    let releaseMint: () => void = () => {};
+    const mintReached = new Promise<void>((reached) => {
+      minted.onMint = () => {
+        reached();
+        return new Promise<void>((done) => {
+          releaseMint = done;
+        });
+      };
+    });
+
+    handleSignIn(FakeTransport.last());
+    const earlier = client.signIn();
+    await mintReached;
+    minted.onMint = undefined;
+
+    // The double click, on the same client. Both calls used to write one field,
+    // so the first checked the second's lock and carried on writing.
+    handleSignIn(FakeTransport.last());
+    const later = client.signIn();
+    releaseMint();
+
+    await expect(earlier).rejects.toBeInstanceOf(SupersededError);
+    await expect(later).resolves.toBeDefined();
   });
 
   it('the later of two sign-ins wins, and the earlier writes nothing', async () => {

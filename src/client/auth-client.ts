@@ -13,6 +13,7 @@ import {
 import { Principal } from '@icp-sdk/core/principal';
 import { Signer } from '@icp-sdk/signer';
 import { PostMessageTransport, UrlTransport } from '@icp-sdk/signer/web';
+import { AccountMismatchError, chainAuthorisesKey } from './app-delegation-source.js';
 import { type HeldLock, stealLock, stealMintLock } from './app-lock.js';
 import { fromBase64, toBase64 } from './base64.js';
 import type { Credential, CredentialStorage } from './credential-storage.js';
@@ -22,7 +23,7 @@ import { requestSessionDelegation } from './session-delegation.js';
 import { SessionIdentity } from './session-identity.js';
 import { SessionMinter } from './session-minter.js';
 import { type Slots, slotsFor } from './slots.js';
-import { LocalStateStorage, type StateStorage } from './state-storage.js';
+import { LocalStateStorage, type SessionState, type StateStorage } from './state-storage.js';
 
 /**
  * The lock one signer interaction at a time holds.
@@ -59,11 +60,6 @@ const DEFAULT_OPENID_SCOPE_KEYS = ['name', 'email', 'verified_email'] as const;
  * Options for creating an {@link AuthClient}.
  */
 export interface AuthClientCreateOptions {
-  /**
-   * An identity to authenticate via delegation.
-   */
-  identity?: SignIdentity | PartialIdentity;
-
   /**
    * Where credentials are kept. Defaults to IndexedDB.
    */
@@ -291,7 +287,6 @@ export class AuthClient {
   // interaction rather than two.
   #interactions = 0;
   #channelLock: HeldLock | undefined;
-  #signInLock: HeldLock | undefined;
   idleManager: IdleManager | undefined;
 
   constructor(options: AuthClientCreateOptions = {}) {
@@ -506,11 +501,11 @@ export class AuthClient {
    * reason: a call already sent cannot be recalled, so the only thing left to
    * decide is whether to keep its result.
    */
-  #assertCurrent(): void {
+  #assertCurrent(signInLock: HeldLock): void {
     if (this.#channelLock?.stolen.aborted === true) {
       throw new SupersededError('Another signer interaction took the channel');
     }
-    if (this.#signInLock?.stolen.aborted === true) {
+    if (signInLock.stolen.aborted) {
       throw new SupersededError();
     }
   }
@@ -524,8 +519,6 @@ export class AuthClient {
     try {
       return await this.#runSignIn(options);
     } finally {
-      this.#signInLock?.release();
-      this.#signInLock = undefined;
       this.#endInteraction();
     }
   }
@@ -573,110 +566,125 @@ export class AuthClient {
     // The other lock a ceremony needs, taken once the window is open for the
     // same reason. Stolen rather than queued for, so the newer intent wins and
     // the loser learns of it before writing anything.
-    this.#signInLock = stealLock(signInLockFor(this.#slots.state));
-
-    // Wait for the constructor's session restore, so this flow's storage
-    // writes cannot interleave with hydration's reads.
-    await this.#init();
-
-    const { key, pending } = await sessionKeyPromise;
-
-    if (!('sign' in key)) {
-      // Unreachable for a typed caller, since `identity` is a SignIdentity.
-      // Minting is a canister call signed by the session key, so a key that
-      // cannot sign cannot hold a session, and failing here beats handing back
-      // an identity whose first request fails for a reason nothing explains.
-      throw new Error('A session needs a key that can sign');
-    }
-
-    const sessionChain = await requestSessionDelegation(this.#signer, {
-      sessionPublicKey: key.getPublicKey().toDer(),
-      maxTimeToLive,
-      derivationOrigin: this.#options.derivationOrigin?.toString(),
-    });
-
-    // The chain comes from the signer over a transport shared with others, so
-    // the key it delegates to is checked here rather than assumed. A chain for
-    // another key mints nothing, and failing now names the cause instead of
-    // leaving it to the first request.
-    if (!keyMatchesChain(key, sessionChain)) {
-      throw new Error('The session chain does not delegate to the key it was requested for');
-    }
-
-    const idleOptions = this.#options?.idleOptions;
-    if (!this.idleManager && !idleOptions?.disableIdle) {
-      this.idleManager = IdleManager.create(idleOptions);
-      this.#registerDefaultIdleCallback();
-    }
-
-    // Mint inside the ceremony the user is already waiting through, so the first
-    // request after signing in does not wait. This is also where the account key
-    // comes from: the session chain is rooted at the session's own key, and only
-    // a mint reports the key an application's canisters will see.
     //
-    // Into the ceremony's own slot, not the one every tab of this origin acts
-    // with. Clearing that slot up front, or writing to it here, would change what
-    // those tabs hold before this sign-in has succeeded — and a ceremony that
-    // then failed would have cost each of them a mint for nothing.
-    const minter = await this.#minterFor(key, sessionChain);
-    const appKey = await this.#credentialStorage.create();
-    const appChain = await minter.mint(appKey.getPublicKey().toDer());
+    // A local, not a field: two overlapping calls would each write the field,
+    // and then both the supersede check and the release would read whichever
+    // wrote last — leaving the running call unlocked and unable to notice a
+    // steal, while the stolen lock's own signal went to an object nothing held.
+    const signInLock = stealLock(signInLockFor(this.#slots.state));
 
-    // Everything above was a call, and none of it is shared; everything below is
-    // a write four other things read. A sign-out or a later sign-in that took
-    // over while this was in flight has already cleared or replaced what these
-    // would write, so this stops here rather than putting it back.
-    this.#assertCurrent();
+    // Every shared write goes through this. One check before the first write is
+    // not enough: the lock reaches across tabs, so a sign-out can land between
+    // any two of the writes below, clear the slots and the record, and this flow
+    // would put them all back — signing the user out and straight back in.
+    const guarded = async (write: () => Promise<void>): Promise<void> => {
+      this.#assertCurrent(signInLock);
+      await write();
+    };
 
-    await this.#credentialStorage.set(this.#slots.appPending, {
-      identity: appKey,
-      chain: appChain,
-    });
+    // Released here rather than by the caller: the lock belongs to this call,
+    // and a call that hands it to a field cannot tell its own from another's.
+    try {
+      // Wait for the constructor's session restore, so this flow's storage
+      // writes cannot interleave with hydration's reads.
+      await this.#init();
 
-    // The session and the state first, because the state is what makes this
-    // account the one this origin answers for; promoting ahead of it would
-    // publish a credential for a sign-in nothing has recorded yet.
-    await this.#persistSession(key, sessionChain, appChain.publicKey);
-    await this.#promoteAppCredential();
+      const { key, pending } = await sessionKeyPromise;
 
-    this.#installIdentity(await this.#openSession(key, sessionChain, minter));
-
-    // Best-effort — the user is already signed in, so a cleanup failure must not
-    // fail signIn(), and the next ceremony overwrites what is left behind.
-    if (pending) {
-      try {
-        await this.#credentialStorage.remove(this.#slots.sessionPending);
-      } catch {
-        // ignore
+      if (!('sign' in key)) {
+        // Unreachable for a typed caller, since `identity` is a SignIdentity.
+        // Minting is a canister call signed by the session key, so a key that
+        // cannot sign cannot hold a session, and failing here beats handing back
+        // an identity whose first request fails for a reason nothing explains.
+        throw new Error('A session needs a key that can sign');
       }
+
+      const sessionChain = await requestSessionDelegation(this.#signer, {
+        sessionPublicKey: key.getPublicKey().toDer(),
+        maxTimeToLive,
+        derivationOrigin: this.#options.derivationOrigin?.toString(),
+      });
+
+      // The chain comes from the signer over a transport shared with others, so
+      // the key it delegates to is checked here rather than assumed. A chain for
+      // another key mints nothing, and failing now names the cause instead of
+      // leaving it to the first request.
+      if (!chainAuthorisesKey(sessionChain, key.getPublicKey().toDer())) {
+        throw new Error('The session chain does not delegate to the key it was requested for');
+      }
+
+      const idleOptions = this.#options?.idleOptions;
+      if (!this.idleManager && !idleOptions?.disableIdle) {
+        this.idleManager = IdleManager.create(idleOptions);
+        this.#registerDefaultIdleCallback();
+      }
+
+      // Mint inside the ceremony the user is already waiting through, so the first
+      // request after signing in does not wait. This is also where the account key
+      // comes from: the session chain is rooted at the session's own key, and only
+      // a mint reports the key an application's canisters will see.
+      //
+      // Into the ceremony's own slot, not the one every tab of this origin acts
+      // with. Clearing that slot up front, or writing to it here, would change what
+      // those tabs hold before this sign-in has succeeded — and a ceremony that
+      // then failed would have cost each of them a mint for nothing.
+      const minter = await this.#minterFor(key, sessionChain);
+      const appKey = await this.#credentialStorage.create();
+      const appChain = await minter.mint(appKey.getPublicKey().toDer());
+
+      // Everything above was a call, and none of it is shared; everything below is
+      // a write four other things read.
+      await guarded(() =>
+        this.#credentialStorage.set(this.#slots.appPending, { identity: appKey, chain: appChain }),
+      );
+
+      // The session and the state first, because the state is what makes this
+      // account the one this origin answers for; promoting ahead of it would
+      // publish a credential for a sign-in nothing has recorded yet.
+      await guarded(() => this.#persistSession(key, sessionChain, appChain.publicKey));
+      await guarded(() => this.#promoteAppCredential(appKey, appChain));
+
+      await guarded(async () => {
+        this.#installIdentity(await this.#openSession(key, sessionChain, minter));
+      });
+
+      // Best-effort — the user is already signed in, so a cleanup failure must not
+      // fail signIn(), and the next ceremony overwrites what is left behind.
+      if (pending) {
+        try {
+          await this.#credentialStorage.remove(this.#slots.sessionPending);
+        } catch {
+          // ignore
+        }
+      }
+
+      // Last, once the sign-in is stored, because this leaves the page: navigating
+      // earlier would abandon the flow partway. Replaced rather than pushed, so the
+      // sign-in page and the redirect chain are not what a back button returns to.
+      // `await` above resolved the journaled value to a validated href or null.
+      const target = await returnTo;
+      if (typeof target === 'string') location.replace(target);
+
+      return this.#identity;
+    } finally {
+      signInLock.release();
     }
-
-    // Last, once the sign-in is stored, because this leaves the page: navigating
-    // earlier would abandon the flow partway. Replaced rather than pushed, so the
-    // sign-in page and the redirect chain are not what a back button returns to.
-    // `await` above resolved the journaled value to a validated href or null.
-    const target = await returnTo;
-    if (typeof target === 'string') location.replace(target);
-
-    return this.#identity;
   }
 
   // Window flow: sign-in completes in a single load, so a fresh session key per
-  // sign-in is enough (or the caller-provided identity), with nothing to
-  // persist for a later load.
-  async #ensureSessionKeyForWindowFlow(): Promise<SignIdentity | PartialIdentity> {
-    return this.#options.identity ?? (await this.#credentialStorage.create());
+  // sign-in is enough, with nothing to persist for a later load.
+  #ensureSessionKeyForWindowFlow(): Promise<SignIdentity> {
+    return this.#credentialStorage.create();
   }
 
   // Redirect flow: `signIn` runs twice — once on the load that navigates to the
   // identity provider, and again on the return load that replays the delegation
   // minted for the FIRST load's key. Both runs must therefore use the same key,
   // so the first load writes it to the pending slot and the return load reads it
-  // back. A caller-provided identity is already stable across the redirect, so it
-  // is used as-is with nothing persisted.
+  // back.
   async #ensureSessionKeyForRedirectFlow(
     transport: UrlTransport,
-  ): Promise<{ key: SignIdentity | PartialIdentity; pending?: boolean }> {
+  ): Promise<{ key: SignIdentity; pending?: boolean }> {
     // A redirect leaves the document, so the key this flow starts with has to be
     // readable again on the load that comes back, which takes a medium that
     // survives the teardown. Refusing before navigating beats sending the user to
@@ -691,10 +699,6 @@ export class AuthClient {
       throw new Error(
         'A redirect sign-in needs a credential store that survives the navigation, and this one does not. Use a durable store or the window transport.',
       );
-    }
-
-    if (this.#options.identity !== undefined) {
-      return { key: this.#options.identity };
     }
 
     // Acquire the key inside a `memoize` producer so the transport holds its
@@ -966,14 +970,12 @@ export class AuthClient {
    * the origin holds nothing — and what it replaces is a credential rooted at
    * whatever account the previous session belonged to.
    */
-  async #promoteAppCredential(): Promise<void> {
-    const minted = await this.#credentialStorage.get(this.#slots.appPending);
-    if (minted?.chain === undefined) return;
-
-    await this.#credentialStorage.set(this.#slots.app, {
-      identity: minted.identity,
-      chain: minted.chain,
-    });
+  async #promoteAppCredential(identity: SignIdentity, chain: DelegationChain): Promise<void> {
+    // Written from what the ceremony minted rather than read back out of the
+    // pending slot: a read that came back empty returned silently and left the
+    // slot holding the previous account's credential, which the identity opened
+    // on the next line would then adopt.
+    await this.#credentialStorage.set(this.#slots.app, { identity, chain });
     // Best-effort: what is left behind is a spent five-minute record in a slot
     // nothing reads, replaced by the next ceremony.
     await this.#credentialStorage.remove(this.#slots.appPending).catch(() => undefined);
@@ -1007,25 +1009,45 @@ export class AuthClient {
   ): Promise<SessionIdentity> {
     const minter = source ?? (await this.#minterFor(key, sessionChain));
 
-    // The identity resolves its own account key, through the same locked
-    // read-or-mint every rotation uses. Doing it here instead meant a second
-    // writer of the app slot that took no lock: a load could overwrite a
-    // credential a peer tab had just minted, and would not see the credential
-    // that peer had left for it to adopt.
+    // The account comes from the record, which both callers have already
+    // written or checked: a ceremony persists the session before this runs, and
+    // a restore refuses a record that names nobody. Without it the identity
+    // would take its account from whatever the app slot held, which a previous
+    // sign-in may still own.
+    const held = this.#stateStorage.get(this.#slots.state);
+
     return SessionIdentity.create({
       sessionExpiresAtMs: earliestExpiryMs(sessionChain),
       source: minter,
       storage: this.#credentialStorage,
       slot: this.#slots.app,
+      expectedAccount: held?.principal,
       onSessionGone: () => {
-        // Drops this origin's claim on the sign-in. A store that shares its
-        // record keeps it — a dead chain can mean a sibling replaced the session
-        // rather than that it ended — and a store that shares nothing answers
-        // `discard` with a removal.
-        void this.#dropSession().catch(() => undefined);
+        void this.#endOrDrop(held).catch(() => undefined);
         this.#installIdentity(new AnonymousIdentity());
       },
     });
+  }
+
+  /**
+   * Ends the sign-in, or only this origin's claim on it.
+   *
+   * A refused mint says the session this origin held is dead, and a domain has
+   * one: it cannot be revived, only replaced. So if the record still names what
+   * this origin was operating under — same account, same expiry — it names a
+   * session nobody can use, and it goes. If it has moved on in either respect,
+   * someone else owns the sign-in now and this origin converges to them rather
+   * than retracting what they published.
+   * @param held - The record as it stood when the session was opened.
+   */
+  async #endOrDrop(held: SessionState | null): Promise<void> {
+    const now = this.#stateStorage.get(this.#slots.state);
+    const unchanged =
+      held !== null &&
+      now !== null &&
+      now.principal.compareTo(held.principal) === 'eq' &&
+      now.expiration === held.expiration;
+    await (unchanged ? this.#endSession() : this.#dropSession());
   }
 
   // Memoized — only runs #hydrate once, returns the same promise on repeat calls.
@@ -1052,7 +1074,7 @@ export class AuthClient {
   // client is ready to use without a new signIn().
   async #hydrate(): Promise<void> {
     const restored = await this.#restoreSession();
-    const key = this.#options.identity ?? restored?.identity;
+    const key = restored?.identity;
     const chain = restored?.chain;
     if (!key || !chain) {
       // Nothing to restore, so this origin cannot act — and saying otherwise is
@@ -1078,7 +1100,17 @@ export class AuthClient {
       return;
     }
 
-    this.#installIdentity(await this.#openSession(key, chain));
+    try {
+      this.#installIdentity(await this.#openSession(key, chain));
+    } catch (error) {
+      // The record names an account this session cannot produce a credential
+      // for, so it is not a sign-in this origin can act on. Dropped rather than
+      // ended: on a shared store the record belongs to whoever published it,
+      // and only the identity provider can say it is stale.
+      if (!(error instanceof AccountMismatchError)) throw error;
+      await this.#dropSession();
+      this.#installIdentity(new AnonymousIdentity());
+    }
 
     if (!this.#options.idleOptions?.disableIdle && !this.idleManager) {
       this.idleManager = IdleManager.create(this.#options.idleOptions);
@@ -1091,17 +1123,11 @@ export class AuthClient {
    * in, so {@link isAuthenticated} can answer without reading it back.
    */
   async #persistSession(
-    identity: SignIdentity | PartialIdentity,
+    identity: SignIdentity,
     chain: DelegationChain,
     accountKey: DerEncodedPublicKey,
   ): Promise<void> {
-    // The client stores only keys it made itself. An identity the caller passed
-    // in is theirs to pass again, and may be of a kind this store cannot hold.
-    // A key the client made can always sign; the second clause is what tells
-    // the compiler so.
-    if (this.#options.identity === undefined && 'sign' in identity) {
-      await this.#credentialStorage.set(this.#slots.session, { identity, chain });
-    }
+    await this.#credentialStorage.set(this.#slots.session, { identity, chain });
 
     let earliest: bigint | null = null;
     for (const { delegation } of chain.delegations) {
@@ -1204,13 +1230,6 @@ function earliestExpiryMs(chain: DelegationChain): number {
     }
   }
   return earliest === null ? 0 : Number(earliest / 1_000_000n);
-}
-
-/** Whether a chain's leaf authorises the key it was requested for. */
-function keyMatchesChain(key: SignIdentity | PartialIdentity, chain: DelegationChain): boolean {
-  const leaf = chain.delegations[chain.delegations.length - 1]?.delegation.pubkey;
-  if (leaf === undefined) return false;
-  return publicKeyOf(key) === toBase64(new Uint8Array(leaf));
 }
 
 /** A key's public half as text, for comparing two keys without holding both. */
