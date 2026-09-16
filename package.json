@@ -52,7 +52,7 @@
   "packageManager": "pnpm@10.13.1",
   "devDependencies": {
     "@biomejs/biome": "^2.5.6",
-    "@icp-sdk/core": "^5.4.0",
+    "@icp-sdk/core": "^6.1.0",
     "fake-indexeddb": "^6.2.5",
     "jsdom": "^27.4.0",
     "publint": "^0.3.22",
@@ -60,10 +60,10 @@
     "vitest": "4.0.14"
   },
   "peerDependencies": {
-    "@icp-sdk/core": "^5"
+    "@icp-sdk/core": "^6"
   },
   "dependencies": {
-    "@icp-sdk/signer": "^5.6.2",
+    "@icp-sdk/signer": "^6.0.0",
     "idb": "^7.1.1"
   }
 }

@@ -214,16 +214,6 @@ export function appDelegationChain(
     signature: Uint8Array;
   },
 ): DelegationChain {
-  // The signature covers whatever fields the canister set, and a delegation
-  // carrying permissions cannot be represented by the chain type, so sending one
-  // without it would fail verification at the boundary node with nothing to point
-  // at. Read-only sessions are unsupported until the type carries the field.
-  if (signed.delegation.permissions.length > 0) {
-    throw new Error(
-      'This session is read-only, which @icp-sdk/auth cannot act for yet: its delegations carry permissions that a delegation chain has no room for',
-    );
-  }
-
   return DelegationChain.fromDelegations(
     [
       {
@@ -231,6 +221,7 @@ export function appDelegationChain(
           signed.delegation.pubkey,
           signed.delegation.expiration,
           signed.delegation.targets[0],
+          signed.delegation.permissions[0],
         ),
         signature: signed.signature as DelegationChain['delegations'][number]['signature'],
       },
