@@ -9,8 +9,8 @@ importers:
   .:
     dependencies:
       '@icp-sdk/signer':
-        specifier: ^5.6.2
-        version: 5.6.2(@icp-sdk/core@5.4.0)
+        specifier: ^6.0.0
+        version: 6.0.0(@icp-sdk/core@6.1.0)
       idb:
         specifier: ^7.1.1
         version: 7.1.1
@@ -19,14 +19,14 @@ importers:
         specifier: ^2.5.6
         version: 2.5.6
       '@icp-sdk/core':
-        specifier: ^5.4.0
-        version: 5.4.0
+        specifier: ^6.1.0
+        version: 6.1.0
       fake-indexeddb:
         specifier: ^6.2.5
         version: 6.2.5
       jsdom:
         specifier: ^27.4.0
-        version: 27.4.0(@noble/hashes@2.2.0)
+        version: 27.4.0(@noble/hashes@2.4.0)
       publint:
         specifier: ^0.3.22
         version: 0.3.22
@@ -35,7 +35,7 @@ importers:
         version: 5.9.3
       vitest:
         specifier: 4.0.14
-        version: 4.0.14(@types/node@24.5.2)(jsdom@27.4.0(@noble/hashes@2.2.0))(yaml@2.8.3)
+        version: 4.0.14(@types/node@24.5.2)(jsdom@27.4.0(@noble/hashes@2.4.0))(yaml@2.8.3)
 
   docs:
     devDependencies:
@@ -334,27 +334,27 @@ packages:
   '@gerrit0/mini-shiki@3.23.0':
     resolution: {integrity: sha512-bEMORlG0cqdjVyCEuU0cDQbORWX+kYCeo0kV1lbxF5bt4r7SID2l9bqsxJEM0zndaxpOUT7riCyIVEuqq/Ynxg==}
 
-  '@icp-sdk/core@5.4.0':
-    resolution: {integrity: sha512-yedhCkHIhCxI65W8id99Mi8fUgSyqKSTbD57AphquNcFV2/3Rjykng0/6H08mHswKydDcv6Y0+e8aPdrznewCw==}
+  '@icp-sdk/core@6.1.0':
+    resolution: {integrity: sha512-hw3kozrCoP/JqRLXmG35stFjNOyzfA7FU+lPm66WdcSEIS5PD/sMu2yhNiPIkXFJ+jodeJyxX/a379nMvLS/3g==}
 
-  '@icp-sdk/signer@5.6.2':
-    resolution: {integrity: sha512-QYqArHpe+uTHMEEoj7w/ET2hKSarsCBbvcQEs+GJrdIcMIm/gNIsFIrJVRB6YIPlgROYNkiK4ZjfNHMZsK5CyQ==}
+  '@icp-sdk/signer@6.0.0':
+    resolution: {integrity: sha512-P+ltVK1uV/CT8UiakoYCm3+F/e5+Jj53BaicZ0sgXphcwsWSEy93xeur3XRicBqUtMHGlYi062DEpve+tfe4pg==}
     peerDependencies:
-      '@icp-sdk/core': ^5
+      '@icp-sdk/core': ^6.0.0
 
   '@jridgewell/sourcemap-codec@1.5.5':
     resolution: {integrity: sha512-cYQ9310grqxueWbl+WuIUIaiUaDcj7WOq5fVhEljNVgRfOUhY9fy2zTvfoqWsnebh8Sl70VScFbICvJnLKB0Og==}
 
-  '@noble/curves@1.9.7':
-    resolution: {integrity: sha512-gbKGcRUYIjA3/zCCNaWDciTMFI0dCkvou3TL8Zmy5Nc7sJ47a0jtOeZoTaMxkuqRo9cRhjOdZJXegxYE5FN/xw==}
-    engines: {node: ^14.21.3 || >=16}
-
-  '@noble/hashes@1.8.0':
-    resolution: {integrity: sha512-jCs9ldd7NwzpgXDIf6P3+NrHh9/sD6CQdxHyjQI+h/6rDNo88ypBxxz45UDuZHz9r3tNz7N/VInSVoVdtXEI4A==}
-    engines: {node: ^14.21.3 || >=16}
+  '@noble/curves@2.4.0':
+    resolution: {integrity: sha512-P4/62zrgfH33CneE3Dn4WhJVA22YUU0eR51wKIan4NVRvwsA0YnPTwWGpNbpuacSujmSFLvyzpyuR30+fbq2Ew==}
+    engines: {node: '>= 20.19.0'}
 
   '@noble/hashes@2.2.0':
     resolution: {integrity: sha512-IYqDGiTXab6FniAgnSdZwgWbomxpy9FtYvLKs7wCUs2a8RkITG+DFGO1DM9cr+E3/RgADRpFjrKVaJ1z6sjtEg==}
+    engines: {node: '>= 20.19.0'}
+
+  '@noble/hashes@2.4.0':
+    resolution: {integrity: sha512-X5XaVWZIBCT7HHZGm5I7ZQXDwLG+bGXuSrMQAW+7Zvl87h1kmc1ZB1VSRJcpUfoUrGQp4Fkoxm5kZ+Ms+aW+eA==}
     engines: {node: '>= 20.19.0'}
 
   '@publint/pack@0.1.6':
@@ -486,14 +486,14 @@ packages:
     cpu: [x64]
     os: [win32]
 
-  '@scure/base@1.2.6':
-    resolution: {integrity: sha512-g/nm5FgUa//MCj1gV09zTJTaM6KBAHqLN907YVQqf7zC49+DcO4B1so4ZX07Ef10Twr6nuqYEH9GEggFXA4Fmg==}
+  '@scure/base@2.4.0':
+    resolution: {integrity: sha512-thZ1TuJwFwBblOhgsjDKvvGirBxNp+wSvY/DR6tJBJOTDhdAAcHJ8Vbr2eFnqaxeca4+t0i9KBf+uHYGWwZORg==}
 
-  '@scure/bip32@1.7.0':
-    resolution: {integrity: sha512-E4FFX/N3f4B80AKWp5dP6ow+flD1LQZo/w8UnLGYZO674jS6YnYeepycOOksv+vLPSpgN35wgKgy+ybfTb2SMw==}
+  '@scure/bip32@2.4.0':
+    resolution: {integrity: sha512-i3DS0CptAocyvqE4n3SUkpzeQK4vJMFwWLofTwRiiKo2aWojBOfyMCgfKw9HVpO6fSY5AK86sHS/Uzn8kK9Few==}
 
-  '@scure/bip39@1.6.0':
-    resolution: {integrity: sha512-+lF0BbLiJNwVlev4eKelw1WWLaiKXw7sSl8T6FvBlWkdX+94aGJ4o8XjUdlyhTCjd8c+B3KT3JfS8P0bLRNU6A==}
+  '@scure/bip39@2.4.0':
+    resolution: {integrity: sha512-82dxFbZUYboyOf0AXiydsQrFQ5Q4h9mX+O2UkE91ROYmsc0BKMGZLwDmy96Jpa2+vrtoxomjUhy1RPIgH/r2nA==}
 
   '@shikijs/engine-oniguruma@3.23.0':
     resolution: {integrity: sha512-1nWINwKXxKKLqPibT5f4pAFLej9oZzQTsby8942OTlsJzOBZ0MWKiwzMsd+jhzu8YPCHAswGnnN1YtQfirL35g==}
@@ -1158,9 +1158,9 @@ snapshots:
   '@esbuild/win32-x64@0.28.1':
     optional: true
 
-  '@exodus/bytes@1.15.1(@noble/hashes@2.2.0)':
+  '@exodus/bytes@1.15.1(@noble/hashes@2.4.0)':
     optionalDependencies:
-      '@noble/hashes': 2.2.0
+      '@noble/hashes': 2.4.0
 
   '@gerrit0/mini-shiki@3.23.0':
     dependencies:
@@ -1170,29 +1170,28 @@ snapshots:
       '@shikijs/types': 3.23.0
       '@shikijs/vscode-textmate': 10.0.2
 
-  '@icp-sdk/core@5.4.0':
+  '@icp-sdk/core@6.1.0':
     dependencies:
       '@dfinity/cbor': 0.2.3
-      '@noble/curves': 1.9.7
-      '@noble/hashes': 1.8.0
-      '@scure/bip32': 1.7.0
-      '@scure/bip39': 1.6.0
+      '@noble/curves': 2.4.0
+      '@noble/hashes': 2.2.0
+      '@scure/bip32': 2.4.0
+      '@scure/bip39': 2.4.0
       asn1js: 3.0.10
 
-  '@icp-sdk/signer@5.6.2(@icp-sdk/core@5.4.0)':
+  '@icp-sdk/signer@6.0.0(@icp-sdk/core@6.1.0)':
     dependencies:
-      '@icp-sdk/core': 5.4.0
+      '@icp-sdk/core': 6.1.0
 
   '@jridgewell/sourcemap-codec@1.5.5': {}
 
-  '@noble/curves@1.9.7':
+  '@noble/curves@2.4.0':
     dependencies:
-      '@noble/hashes': 1.8.0
+      '@noble/hashes': 2.4.0
 
-  '@noble/hashes@1.8.0': {}
+  '@noble/hashes@2.2.0': {}
 
-  '@noble/hashes@2.2.0':
-    optional: true
+  '@noble/hashes@2.4.0': {}
 
   '@publint/pack@0.1.6':
     dependencies:
@@ -1273,18 +1272,17 @@ snapshots:
   '@rollup/rollup-win32-x64-msvc@4.62.3':
     optional: true
 
-  '@scure/base@1.2.6': {}
+  '@scure/base@2.4.0': {}
 
-  '@scure/bip32@1.7.0':
+  '@scure/bip32@2.4.0':
     dependencies:
-      '@noble/curves': 1.9.7
-      '@noble/hashes': 1.8.0
-      '@scure/base': 1.2.6
+      '@noble/curves': 2.4.0
+      '@noble/hashes': 2.4.0
+      '@scure/base': 2.4.0
 
-  '@scure/bip39@1.6.0':
+  '@scure/bip39@2.4.0':
     dependencies:
-      '@noble/hashes': 1.8.0
-      '@scure/base': 1.2.6
+      '@noble/hashes': 2.4.0
 
   '@shikijs/engine-oniguruma@3.23.0':
     dependencies:
@@ -1466,9 +1464,9 @@ snapshots:
   fsevents@2.3.3:
     optional: true
 
-  html-encoding-sniffer@6.0.0(@noble/hashes@2.2.0):
+  html-encoding-sniffer@6.0.0(@noble/hashes@2.4.0):
     dependencies:
-      '@exodus/bytes': 1.15.1(@noble/hashes@2.2.0)
+      '@exodus/bytes': 1.15.1(@noble/hashes@2.4.0)
     transitivePeerDependencies:
       - '@noble/hashes'
 
@@ -1490,15 +1488,15 @@ snapshots:
 
   is-potential-custom-element-name@1.0.1: {}
 
-  jsdom@27.4.0(@noble/hashes@2.2.0):
+  jsdom@27.4.0(@noble/hashes@2.4.0):
     dependencies:
       '@acemir/cssom': 0.9.31
       '@asamuzakjp/dom-selector': 6.8.1
-      '@exodus/bytes': 1.15.1(@noble/hashes@2.2.0)
+      '@exodus/bytes': 1.15.1(@noble/hashes@2.4.0)
       cssstyle: 5.3.7
       data-urls: 6.0.1
       decimal.js: 10.6.0
-      html-encoding-sniffer: 6.0.0(@noble/hashes@2.2.0)
+      html-encoding-sniffer: 6.0.0(@noble/hashes@2.4.0)
       http-proxy-agent: 7.0.2
       https-proxy-agent: 7.0.6
       is-potential-custom-element-name: 1.0.1
@@ -1708,7 +1706,7 @@ snapshots:
       fsevents: 2.3.3
       yaml: 2.8.3
 
-  vitest@4.0.14(@types/node@24.5.2)(jsdom@27.4.0(@noble/hashes@2.2.0))(yaml@2.8.3):
+  vitest@4.0.14(@types/node@24.5.2)(jsdom@27.4.0(@noble/hashes@2.4.0))(yaml@2.8.3):
     dependencies:
       '@vitest/expect': 4.0.14
       '@vitest/mocker': 4.0.14(vite@7.3.6(@types/node@24.5.2)(yaml@2.8.3))
@@ -1732,7 +1730,7 @@ snapshots:
       why-is-node-running: 2.3.0
     optionalDependencies:
       '@types/node': 24.5.2
-      jsdom: 27.4.0(@noble/hashes@2.2.0)
+      jsdom: 27.4.0(@noble/hashes@2.4.0)
     transitivePeerDependencies:
       - jiti
       - less

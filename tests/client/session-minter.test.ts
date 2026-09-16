@@ -100,10 +100,17 @@ describe('appDelegationChain', () => {
     expect(chain.delegations[0].delegation.targets).toBeUndefined();
   });
 
-  it('refuses a read-only session rather than dropping its permissions', () => {
-    expect(() =>
-      appDelegationChain(accountKey.getPublicKey().toDer(), signed({ permissions: ['queries'] })),
-    ).toThrow(/read-only/);
+  it('leaves an app delegation without permissions', () => {
+    const chain = appDelegationChain(accountKey.getPublicKey().toDer(), signed());
+    expect(chain.delegations[0].delegation.permissions).toBeUndefined();
+  });
+
+  it('carries the permissions of a read-only session', () => {
+    const chain = appDelegationChain(
+      accountKey.getPublicKey().toDer(),
+      signed({ permissions: ['queries'] }),
+    );
+    expect(chain.delegations[0].delegation.permissions).toBe('queries');
   });
 });
 
