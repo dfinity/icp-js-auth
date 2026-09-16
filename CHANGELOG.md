@@ -1,3 +1,9 @@
+## Unreleased
+
+### Feat
+
+- require @icp-sdk/core v6, and act for read-only sessions (#192)
+
 ## 9.0.0 (2026-09-15)
 
 ### Feat
