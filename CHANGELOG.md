@@ -1,3 +1,9 @@
+## Unreleased
+
+### Fix
+
+- getIdentity() from a subscriber waits for the identity of the sign-in it was told about (#198)
+
 ## 10.0.0 (2026-09-16)
 
 ### Feat
