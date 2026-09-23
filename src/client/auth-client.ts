@@ -368,6 +368,9 @@ export class AuthClient {
   readonly #listeners = new Set<() => void>();
   // Set while a restore is running, so its own writes are not news.
   #restoring = false;
+  // Set while a ceremony writes the record and installs the identity that goes
+  // with it, so `getIdentity()` in between waits for the identity.
+  #committing: Promise<void> | null = null;
   #stateStorage: StateStorage;
   #signer: Signer;
   // Set only in redirect mode, so the redirect-specific paths (nonce/key
@@ -437,11 +440,10 @@ export class AuthClient {
     // stale.
     this.#status = this.#readStatus();
     this.#unwatchState = this.#stateStorage.subscribe(this.#slots.state, () => {
-      // The held answer first, then the listeners, then whatever this client has
-      // to do about it — so a listener asking who is signed in sees what it was
-      // told about, whether or not the guard below lets a restore run.
+      // The held answer first, then the restore, then the listeners — so a
+      // listener asking who is signed in sees what it was told about, and one
+      // asking for the identity waits for the restore that installs it.
       this.#status = this.#readStatus();
-      for (const listener of [...this.#listeners]) listener();
 
       // Only a change this client did not cause. A ceremony writes this record
       // itself and installs the identity that goes with it, and a restore writes
@@ -452,8 +454,11 @@ export class AuthClient {
       //
       // What this gives up is a peer's change arriving during our own restore,
       // which the next change reports.
-      if (this.#interactions > 0 || this.#restoring || this.#disposed) return;
-      this.#restoreAgain();
+      if (this.#interactions === 0 && !this.#restoring && !this.#disposed) {
+        this.#restoreAgain();
+      }
+
+      for (const listener of [...this.#listeners]) listener();
     });
     if (options.openIdProvider !== undefined && options.ssoDomain !== undefined) {
       throw new Error('openIdProvider and ssoDomain are mutually exclusive');
@@ -528,6 +533,9 @@ export class AuthClient {
    */
   async getIdentity(): Promise<Identity> {
     await this.#init();
+    // A ceremony that fails partway leaves the record without an identity, which
+    // the check below reports; its own error is `signIn()`'s to throw.
+    await this.#committing?.catch(() => undefined);
 
     // A record exists and this client holds nothing to act with. Handing back an
     // anonymous identity here is the dangerous answer: calls would go out
@@ -926,12 +934,20 @@ export class AuthClient {
       // The session and the state first, because the state is what makes this
       // account the one this origin answers for; promoting ahead of it would
       // publish a credential for a sign-in nothing has recorded yet.
-      await guarded(() => this.#persistSession(key, sessionChain, appChain.publicKey));
-      await guarded(() => this.#promoteAppCredential(appKey, appChain));
+      const committing = (async () => {
+        await guarded(() => this.#persistSession(key, sessionChain, appChain.publicKey));
+        await guarded(() => this.#promoteAppCredential(appKey, appChain));
 
-      await guarded(async () => {
-        this.#installIdentity(await this.#openSession(key, sessionChain, minter));
-      });
+        await guarded(async () => {
+          this.#installIdentity(await this.#openSession(key, sessionChain, minter));
+        });
+      })();
+      this.#committing = committing;
+      try {
+        await committing;
+      } finally {
+        if (this.#committing === committing) this.#committing = null;
+      }
 
       // Best-effort — the user is already signed in, so a cleanup failure must not
       // fail signIn(), and the next ceremony overwrites what is left behind.
