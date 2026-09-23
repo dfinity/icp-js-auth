@@ -1,4 +1,4 @@
-import type { PublicKey, SignIdentity } from '@icp-sdk/core/agent';
+import type { Identity, PublicKey, SignIdentity } from '@icp-sdk/core/agent';
 import {
   DelegationChain,
   type DelegationIdentity,
@@ -1852,6 +1852,41 @@ describe('AuthClient signIn', () => {
     handleSignIn(FakeTransport.last());
     await peer.signIn();
     expect(seen).toEqual([]);
+  });
+
+  it('hands a subscriber the identity of its own sign-in', async () => {
+    const client = track(new AuthClient({ credentialStorage: new MemoryCredentialStorage() }));
+    const answers: Promise<Identity>[] = [];
+    client.subscribe(() => {
+      if (client.getStatus().state === 'signed-in') answers.push(client.getIdentity());
+    });
+
+    handleSignIn(FakeTransport.last());
+    const identity = await client.signIn();
+
+    expect(answers.length).toBeGreaterThan(0);
+    for (const answer of answers) await expect(answer).resolves.toBe(identity);
+  });
+
+  it("hands a subscriber the identity of a peer's sign-in", async () => {
+    const credentialStorage = new MemoryCredentialStorage();
+    const stateStorage = new MemoryStateStorage();
+    const client = track(new AuthClient({ credentialStorage, stateStorage }));
+    await client.getIdentity();
+    const answers: Promise<Identity>[] = [];
+    client.subscribe(() => {
+      if (client.getStatus().state === 'signed-in') answers.push(client.getIdentity());
+    });
+
+    const peer = track(new AuthClient({ credentialStorage, stateStorage }));
+    handleSignIn(FakeTransport.last());
+    const signedIn = await peer.signIn();
+
+    expect(answers.length).toBeGreaterThan(0);
+    for (const answer of answers) {
+      const identity = await answer;
+      expect(identity.getPrincipal().toText()).toBe(signedIn.getPrincipal().toText());
+    }
   });
 
   it('mints once for a burst of activity, not once per event', async () => {
