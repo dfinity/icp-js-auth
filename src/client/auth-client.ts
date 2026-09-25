@@ -19,6 +19,7 @@ import { fromBase64, toBase64 } from './base64.js';
 import type { Credential, CredentialStorage } from './credential-storage.js';
 import { watchActivity, watchForeground } from './foreground-refresh.js';
 import { IdbCredentialStorage } from './idb-credential-storage.js';
+import { requestNotificationConsent as requestConsent } from './notification-consent.js';
 import { requestSessionDelegation } from './session-delegation.js';
 import { SessionIdentity } from './session-identity.js';
 import { SessionMinter } from './session-minter.js';
@@ -1116,6 +1117,52 @@ export class AuthClient {
       };
     } catch (cause) {
       throw new Error('Invalid response: data or signature is not valid base64', { cause });
+    }
+  }
+
+  /**
+   * Asks the identity provider whether this application may notify the user.
+   *
+   * Asked as its own request rather than alongside sign-in, so it can be put to
+   * the user once they have done something that makes notifications mean
+   * something. It reaches Internet Identity only over the modern transport: the
+   * legacy one emits a single `icrc34_delegation` request under a fixed id and
+   * rejects a response to any other.
+   *
+   * The user is signed in first if they are not already, so this may open the
+   * identity provider even when nothing else has. Granting also registers their
+   * browser to receive pushes. Nothing is sent as a result of this call.
+   *
+   * The answer is what Internet Identity stored rather than what its screen
+   * displayed, so an application that was already allowed is told so without the
+   * user being asked again.
+   *
+   * @returns Whether this application may notify the user.
+   * @throws {InteractionRequiredError} When the request asked not to render
+   *   anything. Consent is the user's answer rather than a cached artifact, so
+   *   there is nothing to hand back without asking.
+   * @throws When the identity provider returns any other error, or a response
+   *   that does not carry a boolean.
+   * @example
+   * try {
+   *   const granted = await authClient.requestNotificationConsent();
+   * } catch (error) {
+   *   if (error instanceof InteractionRequiredError) {
+   *     // ask again from a click
+   *   }
+   * }
+   */
+  async requestNotificationConsent(): Promise<boolean> {
+    // The channel lock and not the sign-in lock, for the same reason
+    // `requestAttributes` takes it: this opens the signer channel, which an
+    // origin has one of, and writes nothing anyone else reads.
+    this.#beginInteraction();
+    try {
+      return await requestConsent(this.#signer, {
+        derivationOrigin: this.#options.derivationOrigin?.toString(),
+      });
+    } finally {
+      this.#endInteraction();
     }
   }
 
