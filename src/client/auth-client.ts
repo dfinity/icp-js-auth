@@ -653,8 +653,8 @@ export class AuthClient {
    *
    * Synchronous, and the same object until the answer changes, like
    * {@link getStatus}; {@link subscribe} says when to read it again. A client
-   * built with `ssoDomain` starts checking as soon as it is built: after a short
-   * delay it asks Internet Identity to resolve the domain, then reads the result
+   * built with `ssoDomain` starts checking as soon as it is built: it asks
+   * Internet Identity to resolve the domain, then reads the result
    * until it is final, so `checking` lasts until Internet Identity answers.
    * Building the client also warms Internet Identity's cache for the domain, so
    * a sign-in that follows starts without waiting on the fetch.

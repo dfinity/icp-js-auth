@@ -68,9 +68,6 @@ export async function createSsoDomainService(options: {
   });
 }
 
-/** How long a new client waits before its first call, so one discarded while the user types never calls. */
-export const SSO_CHECK_DELAY_MS = 300;
-
 /** The first and the longest wait between two status reads. */
 export const SSO_POLL_MIN_MS = 500;
 export const SSO_POLL_MAX_MS = 2_000;
@@ -146,7 +143,7 @@ export class SsoStatusChecker {
     this.#createService = createService;
     this.#onChange = onChange;
     this.#status = domain === undefined ? INVALID : CHECKING;
-    if (domain !== undefined) this.#start(SSO_CHECK_DELAY_MS);
+    if (domain !== undefined) this.#start(0);
   }
 
   /** The current answer. The same object until it changes. */

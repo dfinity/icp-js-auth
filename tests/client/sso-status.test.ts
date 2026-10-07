@@ -1,6 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
-  SSO_CHECK_DELAY_MS,
   SSO_POLL_MAX_MS,
   SSO_POLL_MIN_MS,
   SSO_RECHECK_AFTER_MS,
@@ -46,15 +45,12 @@ afterEach(() => {
 });
 
 describe('SsoStatusChecker', () => {
-  it('waits before its first call, then checks once and reads the status', async () => {
+  it('checks once as soon as it is built, then reads the status', async () => {
     const service = fakeService({ Available: { name: ['DFINITY'] } });
     const { checker } = build(service);
 
     expect(checker.status).toEqual({ state: 'checking' });
-    await vi.advanceTimersByTimeAsync(SSO_CHECK_DELAY_MS - 1);
-    expect(service.app_sso_domain_check).not.toHaveBeenCalled();
-
-    await vi.advanceTimersByTimeAsync(1);
+    await vi.advanceTimersByTimeAsync(0);
     expect(service.app_sso_domain_check).toHaveBeenCalledExactlyOnceWith('dfinity.org');
     expect(service.app_sso_domain_status).toHaveBeenCalledExactlyOnceWith('dfinity.org');
     expect(checker.status).toEqual({ state: 'available', name: 'DFINITY' });
@@ -62,7 +58,7 @@ describe('SsoStatusChecker', () => {
 
   it('reports available without a name when the organization publishes none', async () => {
     const { checker } = build(fakeService({ Available: { name: [] } }));
-    await vi.advanceTimersByTimeAsync(SSO_CHECK_DELAY_MS);
+    await vi.advanceTimersByTimeAsync(0);
     expect(checker.status).toEqual({ state: 'available' });
   });
 
@@ -71,20 +67,20 @@ describe('SsoStatusChecker', () => {
     const { checker } = build(
       fakeService({ Unavailable: { retry_after: [BigInt(retryAt) * 1_000_000n] } }),
     );
-    await vi.advanceTimersByTimeAsync(SSO_CHECK_DELAY_MS);
+    await vi.advanceTimersByTimeAsync(0);
     expect(checker.status).toEqual({ state: 'unavailable', retryAfter: new Date(retryAt) });
   });
 
   it('reports unavailable without retryAfter when a retry cannot help', async () => {
     const { checker } = build(fakeService({ Unavailable: { retry_after: [] } }));
-    await vi.advanceTimersByTimeAsync(SSO_CHECK_DELAY_MS);
+    await vi.advanceTimersByTimeAsync(0);
     expect(checker.status).toEqual({ state: 'unavailable' });
   });
 
   it('polls the query with a backoff while the answer is pending, and checks only once', async () => {
     const service = fakeService();
     build(service);
-    await vi.advanceTimersByTimeAsync(SSO_CHECK_DELAY_MS);
+    await vi.advanceTimersByTimeAsync(0);
     expect(service.app_sso_domain_status).toHaveBeenCalledTimes(1);
 
     const waits = [SSO_POLL_MIN_MS, SSO_POLL_MIN_MS * 2, SSO_POLL_MAX_MS, SSO_POLL_MAX_MS];
@@ -100,7 +96,7 @@ describe('SsoStatusChecker', () => {
   it('stops polling on a final answer', async () => {
     const service = fakeService(PENDING, PENDING, { Available: { name: [] } });
     const { checker } = build(service);
-    await vi.advanceTimersByTimeAsync(SSO_CHECK_DELAY_MS + SSO_POLL_MIN_MS * 3);
+    await vi.advanceTimersByTimeAsync(SSO_POLL_MIN_MS * 3);
     expect(checker.status).toEqual({ state: 'available' });
 
     const reads = service.app_sso_domain_status.mock.calls.length;
@@ -111,7 +107,7 @@ describe('SsoStatusChecker', () => {
   it('checks again once the answer has been pending for the abandon window', async () => {
     const service = fakeService();
     build(service);
-    await vi.advanceTimersByTimeAsync(SSO_CHECK_DELAY_MS + SSO_RECHECK_AFTER_MS - 1);
+    await vi.advanceTimersByTimeAsync(SSO_RECHECK_AFTER_MS - 1);
     expect(service.app_sso_domain_check).toHaveBeenCalledTimes(1);
 
     // The first read past the window, then one more interval.
@@ -123,7 +119,7 @@ describe('SsoStatusChecker', () => {
     const service = fakeService();
     service.app_sso_domain_status.mockRejectedValueOnce(new Error('offline'));
     const { checker } = build(service);
-    await vi.advanceTimersByTimeAsync(SSO_CHECK_DELAY_MS);
+    await vi.advanceTimersByTimeAsync(0);
     expect(checker.status).toEqual({ state: 'checking' });
 
     service.answer({ Available: { name: [] } });
@@ -135,7 +131,7 @@ describe('SsoStatusChecker', () => {
     const service = fakeService({ Available: { name: [] } });
     service.app_sso_domain_check.mockRejectedValueOnce(new Error('rejected'));
     const { checker } = build(service);
-    await vi.advanceTimersByTimeAsync(SSO_CHECK_DELAY_MS);
+    await vi.advanceTimersByTimeAsync(0);
     expect(checker.status).toEqual({ state: 'available' });
   });
 
@@ -146,7 +142,7 @@ describe('SsoStatusChecker', () => {
       .mockRejectedValueOnce(new Error('no agent'))
       .mockResolvedValue(service);
     const checker = new SsoStatusChecker('dfinity.org', create, vi.fn());
-    await vi.advanceTimersByTimeAsync(SSO_CHECK_DELAY_MS + SSO_POLL_MIN_MS);
+    await vi.advanceTimersByTimeAsync(SSO_POLL_MIN_MS);
     expect(checker.status).toEqual({ state: 'available' });
     expect(create).toHaveBeenCalledTimes(2);
   });
@@ -155,7 +151,7 @@ describe('SsoStatusChecker', () => {
     const service = fakeService();
     const { checker, onChange } = build(service);
     const checking = checker.status;
-    await vi.advanceTimersByTimeAsync(SSO_CHECK_DELAY_MS + SSO_POLL_MIN_MS * 3);
+    await vi.advanceTimersByTimeAsync(SSO_POLL_MIN_MS * 3);
     expect(checker.status).toBe(checking);
     expect(onChange).not.toHaveBeenCalled();
 
@@ -183,7 +179,7 @@ describe('SsoStatusChecker', () => {
   it('checks again on refresh, through checking', async () => {
     const service = fakeService({ Unavailable: { retry_after: [] } });
     const { checker, onChange } = build(service);
-    await vi.advanceTimersByTimeAsync(SSO_CHECK_DELAY_MS);
+    await vi.advanceTimersByTimeAsync(0);
     expect(checker.status).toEqual({ state: 'unavailable' });
 
     service.answer({ Available: { name: [] } });
@@ -201,7 +197,7 @@ describe('SsoStatusChecker', () => {
       Unavailable: { retry_after: [BigInt(retryAt) * 1_000_000n] },
     });
     build(service);
-    await vi.advanceTimersByTimeAsync(SSO_CHECK_DELAY_MS);
+    await vi.advanceTimersByTimeAsync(0);
     await vi.advanceTimersByTimeAsync(10 * 60_000);
     expect(service.app_sso_domain_check).toHaveBeenCalledTimes(1);
     expect(service.app_sso_domain_status).toHaveBeenCalledTimes(1);
@@ -225,7 +221,7 @@ describe('SsoStatusChecker', () => {
         }),
     );
     const { checker, onChange } = build(service);
-    await vi.advanceTimersByTimeAsync(SSO_CHECK_DELAY_MS);
+    await vi.advanceTimersByTimeAsync(0);
 
     checker.dispose();
     release({ Available: { name: [] } });
