@@ -3,7 +3,7 @@ title: Quick Start
 description: Sign a user in with Internet Identity using the @icp-sdk/auth package.
 ---
 
-Sign a user in with [Internet Identity](https://docs.internetcomputer.org/guides/authentication/internet-identity/), render on who is signed in, call a canister as that user, and sign out.
+Sign a user in with [Internet Identity](https://docs.internetcomputer.org/guides/authentication/internet-identity/), render on who is signed in, create an agent that calls canisters as that user, and sign out.
 
 ```typescript
 import { AuthClient } from '@icp-sdk/auth/client';
