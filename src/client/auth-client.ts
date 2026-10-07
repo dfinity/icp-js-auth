@@ -24,6 +24,7 @@ import { SessionIdentity } from './session-identity.js';
 import { SessionMinter } from './session-minter.js';
 import { type Slots, slotsFor } from './slots.js';
 import { normalizeSsoDomain } from './sso.js';
+import { createSsoDomainService, type SsoStatus, SsoStatusChecker } from './sso-status.js';
 import { LocalStateStorage, type SessionState, type StateStorage } from './state-storage.js';
 
 /**
@@ -235,8 +236,15 @@ export type AuthClientCreateOptions = AuthClientBaseOptions &
          * When set, the identity provider URL includes an `sso` search param so
          * the user authenticates via that organization's own provider.
          *
-         * A value that is not a domain with an optional port throws. Use
-         * {@link isValidSsoDomain} to check a domain the user typed.
+         * The value is trimmed, lowercased and IDNA-encoded, and has to be a host
+         * with an optional port and nothing else: no scheme, path, query,
+         * fragment or userinfo. A bare hostname is accepted only for `localhost`
+         * and `127.0.0.1`.
+         *
+         * The client checks the domain with Internet Identity as soon as it is
+         * built, and {@link AuthClient.getSsoStatus} reports the answer. A value
+         * that is not a domain is reported as `invalid` rather than thrown, so a
+         * client can be built from whatever the user typed.
          */
         ssoDomain?: string;
       }
@@ -384,6 +392,8 @@ export class AuthClient {
   // interaction rather than two.
   #interactions = 0;
   #channelLock: HeldLock | undefined;
+  // Set only for a client built with `ssoDomain`.
+  readonly #sso: SsoStatusChecker | undefined;
 
   constructor(options: AuthClientCreateOptions = {}) {
     this.#options = options;
@@ -467,15 +477,31 @@ export class AuthClient {
       identityProviderUrl.searchParams.set('openid', OPENID_PROVIDER_URLS[options.openIdProvider]);
     }
     if (options.ssoDomain !== undefined) {
-      identityProviderUrl.searchParams.set('sso', normalizeSsoDomain(options.ssoDomain));
-      // The SSO ceremony starts before a delegation is requested, so the
-      // channel carries the derivation origin too late to resolve the client.
-      if (options.derivationOrigin !== undefined) {
-        identityProviderUrl.searchParams.set(
-          'derivationOrigin',
-          options.derivationOrigin.toString(),
-        );
+      let domain: string | undefined;
+      try {
+        domain = normalizeSsoDomain(options.ssoDomain);
+      } catch {
+        domain = undefined;
       }
+      if (domain !== undefined) {
+        identityProviderUrl.searchParams.set('sso', domain);
+        // The SSO ceremony starts before a delegation is requested, so the
+        // channel carries the derivation origin too late to resolve the client.
+        if (options.derivationOrigin !== undefined) {
+          identityProviderUrl.searchParams.set(
+            'derivationOrigin',
+            options.derivationOrigin.toString(),
+          );
+        }
+      }
+      const canisterId = this.#canisterId;
+      this.#sso = new SsoStatusChecker(
+        domain,
+        () => createSsoDomainService({ canisterId, agentOptions: options.agentOptions }),
+        () => {
+          for (const listener of [...this.#listeners]) listener();
+        },
+      );
     }
     // `prompt` and `hint` are Internet Identity extensions, so they ride on the
     // authorize URL rather than in the ICRC request. Baking them in here, as
@@ -621,6 +647,45 @@ export class AuthClient {
     return this.#status;
   }
 
+  /**
+   * Whether the organization domain this client was built with can be signed
+   * in with, or `undefined` for a client built without `ssoDomain`.
+   *
+   * Synchronous, and the same object until the answer changes, like
+   * {@link getStatus}; {@link subscribe} says when to read it again. A client
+   * built with `ssoDomain` starts checking as soon as it is built: after a short
+   * delay it asks Internet Identity to resolve the domain, then reads the result
+   * until it is final, so `checking` lasts until Internet Identity answers.
+   * Building the client also warms Internet Identity's cache for the domain, so
+   * a sign-in that follows starts without waiting on the fetch.
+   *
+   * {@link signIn} proceeds in every state but `invalid`: while `checking` or
+   * `unavailable`, Internet Identity resolves the domain itself during the
+   * sign-in and explains a failure on its own screen.
+   *
+   * @example
+   * const client = new AuthClient({ ssoDomain: input.value });
+   * client.subscribe(() => render(client.getSsoStatus()));
+   * render(client.getSsoStatus());
+   */
+  getSsoStatus(): SsoStatus | undefined {
+    return this.#sso?.status;
+  }
+
+  /**
+   * Checks the organization domain again, for a "Try again" button.
+   *
+   * The status goes back to `checking` and then to the new answer. Calling it
+   * while an `unavailable` answer's `retryAfter` is still in the future is
+   * harmless: Internet Identity does not fetch again before then, so the answer
+   * comes back the same at once. Nothing re-checks on its own once `retryAfter`
+   * passes. Does nothing for an `invalid` domain, which no retry can fix, or for
+   * a client built without `ssoDomain`.
+   */
+  refreshSsoStatus(): void {
+    this.#sso?.refresh();
+  }
+
   /** Reads the record and builds the answer `getStatus` hands out. */
   #readStatus(): SessionStatus {
     const record = this.#stateStorage.get(this.#slots.state);
@@ -637,22 +702,24 @@ export class AuthClient {
   }
 
   /**
-   * Watches who is signed in here, and returns a function that stops watching.
+   * Watches who is signed in here, and the SSO status of a client built with
+   * `ssoDomain`, and returns a function that stops watching.
    *
-   * `getStatus()` and the predicates beside it are snapshots, so an application
-   * rendering on them needs to be told when to read again. The record changes
-   * for reasons that are nothing to do with this client — another tab signing
-   * out, a sibling subdomain publishing a sign-in, a peer client on this page
-   * re-issuing silently — and this is how those arrive.
+   * `getStatus()`, `getSsoStatus()` and the predicates beside them are
+   * snapshots, so an application rendering on them needs to be told when to read
+   * again. The record changes for reasons that are nothing to do with this
+   * client: another tab signing out, a sibling subdomain publishing a sign-in,
+   * a peer client on this page re-issuing silently. The SSO status changes when
+   * Internet Identity answers. This is how both arrive.
    *
-   * Fired once the record is readable, so a listener asking who is signed in
-   * sees what it was told about. It says that something changed and not what: a
-   * listener reads the answer it wants, which for most is `getStatus()`.
+   * Fired once the new answer is readable, so a listener sees what it was told
+   * about. It says that something changed and not what: a listener reads the
+   * answer it wants, `getStatus()` or `getSsoStatus()`.
    *
    * What it does not cover is the identity being replaced under an application
    * that holds one — an app delegation rotating is deliberately invisible, and
    * nothing about who is signed in has changed when it does.
-   * @param listener - Called after the record changes.
+   * @param listener - Called after the record or the SSO status changes.
    * @returns A function that unregisters it.
    */
   subscribe(listener: () => void): () => void {
@@ -667,10 +734,12 @@ export class AuthClient {
 
   /**
    * Releases what this client hooked: the browser listeners, the state
-   * subscription, and the refresh the identity has scheduled. Call it when
-   * discarding a client, so nothing it registered outlives it.
+   * subscription, the refresh the identity has scheduled, and an SSO domain
+   * check still in progress. Call it when discarding a client, so nothing it
+   * registered outlives it.
    */
   dispose(): void {
+    this.#sso?.dispose();
     // Recorded, because the constructor starts the restore without awaiting it:
     // a client disposed while one is in flight would otherwise have an identity
     // installed afterwards, scheduling refreshes nobody can stop.
@@ -734,6 +803,17 @@ export class AuthClient {
     const previous = this.#identity;
     if (previous !== next && previous instanceof SessionIdentity) previous.dispose();
     this.#identity = next;
+  }
+
+  /**
+   * Refuses to open anything for an `ssoDomain` that is not a domain: the
+   * identity provider URL carries no `sso` param then, so a ceremony would be a
+   * plain sign-in rather than the organization's.
+   */
+  #assertSsoDomainUsable(): void {
+    if (this.#sso?.status.state === 'invalid') {
+      throw new Error('ssoDomain is not a domain with an optional port');
+    }
   }
 
   #beginInteraction(): void {
@@ -800,6 +880,7 @@ export class AuthClient {
   }
 
   async signIn(options?: AuthClientSignInOptions): Promise<Identity> {
+    this.#assertSsoDomainUsable();
     // Counted here and locked inside, once the window is open: a ceremony is
     // both things — the signer channel an origin has one of, and this
     // namespace's sign-in, which `signOut` moves too — but neither lock may be
@@ -1072,6 +1153,7 @@ export class AuthClient {
     keys: string[];
     nonce: () => Promise<Uint8Array>;
   }): Promise<SignedAttributes> {
+    this.#assertSsoDomainUsable();
     // The channel lock and not the sign-in lock: this opens the signer channel,
     // which an origin has one of, and writes nothing anyone else reads. Held
     // together with a `signIn` overlapping it, which shares the same channel.

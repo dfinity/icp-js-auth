@@ -78,6 +78,33 @@ vi.mock('../../src/client/session-minter.ts', async () => {
   };
 });
 
+// The SSO domain check calls Internet Identity, so its service is replaced and
+// the real checker runs against it. Its timing is covered in sso-status.test.ts.
+const ssoService = vi.hoisted(() => ({
+  created: [] as { canisterId?: unknown; agentOptions?: unknown }[],
+  answer: { Pending: null } as
+    | { Available: { name: [] | [string] } }
+    | { Pending: null }
+    | { Unavailable: { retry_after: [] | [bigint] } },
+  checks: [] as string[],
+}));
+
+vi.mock('../../src/client/sso-status.ts', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../../src/client/sso-status.ts')>();
+  return {
+    ...actual,
+    createSsoDomainService: async (options: { canisterId?: unknown; agentOptions?: unknown }) => {
+      ssoService.created.push(options);
+      return {
+        app_sso_domain_check: async (domain: string) => {
+          ssoService.checks.push(domain);
+        },
+        app_sso_domain_status: async () => ssoService.answer,
+      };
+    },
+  };
+});
+
 // Swap `PostMessageTransport` for `FakeTransport` so `AuthClient` uses the real
 // `Signer` over an in-memory transport — no window is opened and nothing about
 // the signer's JSON-RPC correlation is faked. `UrlTransport` is kept as the
@@ -222,6 +249,9 @@ beforeEach(() => {
   vi.useRealTimers();
   localStorage.clear();
   FakeTransport.reset();
+  ssoService.created = [];
+  ssoService.checks = [];
+  ssoService.answer = { Pending: null };
 });
 
 // A client hooks DOM listeners and a subscription to its state store, so one
@@ -845,7 +875,7 @@ describe('AuthClient', () => {
   });
 
   it('should pass a normalized sso search param to the transport', () => {
-    new AuthClient({ ssoDomain: ' DFINITY.org ' });
+    track(new AuthClient({ ssoDomain: ' DFINITY.org ' }));
     const url = new URL(FakeTransport.last().options.url ?? '');
     expect(url.searchParams.get('sso')).toBe('dfinity.org');
   });
@@ -856,10 +886,11 @@ describe('AuthClient', () => {
     expect(url.searchParams.has('sso')).toBe(false);
   });
 
-  it('should throw for an ssoDomain that is not a bare domain', () => {
-    expect(() => new AuthClient({ ssoDomain: 'https://dfinity.org' })).toThrow(
-      'ssoDomain must be a domain and optional port',
-    );
+  it('should report an ssoDomain that is not a bare domain as invalid rather than throw', () => {
+    const client = track(new AuthClient({ ssoDomain: 'https://dfinity.org' }));
+    expect(client.getSsoStatus()).toEqual({ state: 'invalid' });
+    const url = new URL(FakeTransport.last().options.url ?? '');
+    expect(url.searchParams.has('sso')).toBe(false);
   });
 
   it('should throw when both one-click entry points are set', () => {
@@ -874,7 +905,9 @@ describe('AuthClient', () => {
   });
 
   it('should pass derivationOrigin as a search param alongside sso', () => {
-    new AuthClient({ ssoDomain: 'dfinity.org', derivationOrigin: 'https://app.example.com' });
+    track(
+      new AuthClient({ ssoDomain: 'dfinity.org', derivationOrigin: 'https://app.example.com' }),
+    );
     const url = new URL(FakeTransport.last().options.url ?? '');
     expect(url.searchParams.get('derivationOrigin')).toBe('https://app.example.com');
   });
@@ -2531,5 +2564,129 @@ describe('scopedKeys', () => {
     expect(scopedKeys({ ssoDomain: 'zürich.example', keys: ['email'] })).toEqual([
       'sso:xn--zrich-kva.example:email',
     ]);
+  });
+});
+
+describe('AuthClient SSO domain status', () => {
+  const settle = async (ms = 1_000) => {
+    await vi.advanceTimersByTimeAsync(ms);
+  };
+
+  beforeEach(() => {
+    vi.useFakeTimers();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it('is undefined for a client built without ssoDomain, and makes no call', async () => {
+    const client = track(new AuthClient());
+    await settle();
+    expect(client.getSsoStatus()).toBeUndefined();
+    expect(ssoService.created).toEqual([]);
+  });
+
+  it('checks the normalized domain against the configured Internet Identity', async () => {
+    ssoService.answer = { Available: { name: ['DFINITY'] } };
+    const agentOptions = { host: 'http://localhost:8000' };
+    const client = track(
+      new AuthClient({
+        ssoDomain: ' DFINITY.org ',
+        identityProvider: {
+          authorizeUrl: 'http://id.ai.localhost:8000/authorize',
+          canisterId: II_CANISTER,
+        },
+        agentOptions,
+      }),
+    );
+    expect(client.getSsoStatus()).toEqual({ state: 'checking' });
+
+    await settle();
+    expect(client.getSsoStatus()).toEqual({ state: 'available', name: 'DFINITY' });
+    expect(ssoService.checks).toEqual(['dfinity.org']);
+    expect(ssoService.created).toHaveLength(1);
+    expect(String(ssoService.created[0]?.canisterId)).toBe(II_CANISTER.toText());
+    expect(ssoService.created[0]?.agentOptions).toBe(agentOptions);
+  });
+
+  it('never calls Internet Identity for an invalid domain', async () => {
+    const client = track(new AuthClient({ ssoDomain: 'not a domain' }));
+    await settle();
+    expect(client.getSsoStatus()).toEqual({ state: 'invalid' });
+    expect(ssoService.created).toEqual([]);
+  });
+
+  it('tells subscribers when the SSO status changes', async () => {
+    ssoService.answer = { Unavailable: { retry_after: [] } };
+    const client = track(new AuthClient({ ssoDomain: 'dfinity.org' }));
+    const listener = vi.fn();
+    client.subscribe(listener);
+
+    await settle();
+    expect(listener).toHaveBeenCalledOnce();
+    expect(client.getSsoStatus()).toEqual({ state: 'unavailable' });
+  });
+
+  it('returns the same object until the answer changes', async () => {
+    const client = track(new AuthClient({ ssoDomain: 'dfinity.org' }));
+    const checking = client.getSsoStatus();
+    await settle(5_000);
+    expect(client.getSsoStatus()).toBe(checking);
+  });
+
+  it('checks again on refreshSsoStatus', async () => {
+    ssoService.answer = { Unavailable: { retry_after: [] } };
+    const client = track(new AuthClient({ ssoDomain: 'dfinity.org' }));
+    await settle();
+
+    ssoService.answer = { Available: { name: [] } };
+    client.refreshSsoStatus();
+    expect(client.getSsoStatus()).toEqual({ state: 'checking' });
+    await settle();
+    expect(client.getSsoStatus()).toEqual({ state: 'available' });
+    expect(ssoService.checks).toEqual(['dfinity.org', 'dfinity.org']);
+  });
+
+  it('stops checking once disposed', async () => {
+    const client = new AuthClient({ ssoDomain: 'dfinity.org' });
+    client.dispose();
+    await settle(60_000);
+    expect(ssoService.checks).toEqual([]);
+  });
+
+  it('rejects signIn for an invalid domain without opening anything', async () => {
+    const client = track(new AuthClient({ ssoDomain: 'dfinity.org/sso' }));
+    const opened = vi.spyOn(FakeTransport.last(), 'establishChannel');
+    await expect(client.signIn()).rejects.toThrow('ssoDomain is not a domain');
+    expect(opened).not.toHaveBeenCalled();
+  });
+
+  it('rejects requestAttributes for an invalid domain without opening anything', async () => {
+    const client = track(new AuthClient({ ssoDomain: 'dfinity.org/sso' }));
+    const opened = vi.spyOn(FakeTransport.last(), 'establishChannel');
+    await expect(
+      client.requestAttributes({ keys: ['email'], nonce: async () => new Uint8Array([1]) }),
+    ).rejects.toThrow('ssoDomain is not a domain');
+    expect(opened).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ['checking', { Pending: null } as const, 0],
+    ['available', { Available: { name: [] as [] } }, 1_000],
+    ['unavailable', { Unavailable: { retry_after: [] as [] } }, 1_000],
+  ])('signs in normally while %s', async (state, answer, wait) => {
+    vi.useRealTimers();
+    ssoService.answer = answer;
+    const client = track(new AuthClient({ ssoDomain: 'dfinity.org' }));
+    if (wait > 0) await new Promise((r) => setTimeout(r, wait));
+    expect(client.getSsoStatus()?.state).toBe(state);
+
+    handleSignIn(FakeTransport.last());
+    const identity = await client.signIn();
+    expect(identity.getPrincipal().isAnonymous()).toBe(false);
+    expect(FakeTransport.last().requests.some((r) => r.method === 'ii_session_delegation')).toBe(
+      true,
+    );
   });
 });
