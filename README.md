@@ -22,8 +22,14 @@ import { AuthClient } from '@icp-sdk/auth/client';
 
 const authClient = new AuthClient();
 
-authClient.subscribe(() => render(authClient.getStatus()));
-render(authClient.getStatus());
+const render = () => {
+  const status = authClient.getStatus();
+  console.log(
+    status.state === 'signed-in' ? `Signed in as ${status.principal.toText()}` : status.state,
+  );
+};
+authClient.subscribe(render);
+render();
 
 try {
   const identity = await authClient.signIn();
