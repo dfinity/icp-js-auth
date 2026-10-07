@@ -35,6 +35,8 @@ async function signIn() {
 }
 
 async function createAgent() {
+  // With nobody signed in, getIdentity() returns the anonymous identity.
+  if (!authClient.isAuthenticated()) return undefined;
   const identity = await authClient.getIdentity();
   return await HttpAgent.create({ identity });
 }
