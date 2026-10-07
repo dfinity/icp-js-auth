@@ -1,65 +1,57 @@
 ---
 title: Quick Start
-description: A quick start guide to using the @icp-sdk/auth package.
-next:
-  label: One-Click Sign-In
+description: Sign a user in with Internet Identity using the @icp-sdk/auth package.
 ---
 
-This guide offers a simple example of how to use the `@icp-sdk/auth` package to authenticate a user with [Internet Identity](https://internetcomputer.org/docs/building-apps/authentication/overview) on an Internet Computer web app.
-
-In a web application, you can use the package in this way:
+Sign a user in with [Internet Identity](https://docs.internetcomputer.org/guides/authentication/internet-identity/), render on who is signed in, call a canister as that user, and sign out.
 
 ```typescript
 import { AuthClient } from '@icp-sdk/auth/client';
 import { HttpAgent } from '@icp-sdk/core/agent';
-import { AttributesIdentity } from '@icp-sdk/core/identity';
-import { Principal } from '@icp-sdk/core/principal';
 
-const authClient = new AuthClient({
-  identityProvider: {
-    authorizeUrl: process.env.II_AUTHORIZE_URL,
-    canisterId: process.env.II_CANISTER_ID,
-  },
-});
+// Mainnet Internet Identity unless `identityProvider` says otherwise.
+const authClient = new AuthClient();
 
-// Check for an existing session (synchronous)
-if (authClient.isAuthenticated()) {
-  const identity = await authClient.getIdentity();
-  console.log('Restored session:', identity.getPrincipal().toString());
+// `getStatus()` is synchronous; `subscribe()` says when to read it again,
+// including when another tab signs in or out.
+function render() {
+  const status = authClient.getStatus();
+  if (status.state === 'signed-in') {
+    showApp(status.principal);
+  } else {
+    showSignInButton();
+  }
+}
+authClient.subscribe(render);
+render();
+
+async function signIn() {
+  try {
+    await authClient.signIn();
+  } catch (error) {
+    // The user closed the window, or the sign-in failed.
+    console.error('Sign-in failed:', error);
+  }
 }
 
-// sign in and request attributes in parallel
-const signInPromise = authClient.signIn();
-const attributesPromise = authClient.requestAttributes({
-  keys: ['email', 'name'],
-  nonce: () => fetchNonceFromYourBackend(), // () => Promise<Uint8Array>
-});
+async function createAgent() {
+  const identity = await authClient.getIdentity();
+  return await HttpAgent.create({ identity });
+}
 
-await signInPromise;
-const { data, signature } = await attributesPromise;
+async function signOut() {
+  await authClient.signOut();
+}
 
-// wrap the identity with attributes so canister calls include sender_info
-const identity = await authClient.getIdentity();
-const identityWithAttributes = new AttributesIdentity({
-  inner: identity,
-  attributes: { data, signature },
-  signer: { canisterId: Principal.fromText(process.env.II_CANISTER_ID) },
-});
-
-const agent = await HttpAgent.create({ identity: identityWithAttributes });
-
-// this call will include the signed attributes
-await agent.call(appCanisterId, {
-  methodName: 'greet',
-  arg: IDL.encode([IDL.Text], ['world']),
-});
-
-// later in your app
-await authClient.signOut();
+// When the page or component that built the client goes away.
+function teardown() {
+  authClient.dispose();
+}
 ```
 
-## Next Steps
+`getStatus()` has four states: `signed-in`, `signed-out`, `expired` (the session ended, and the status still names whose it was), and `signed-in-elsewhere` (a sibling subdomain is signed in and this origin holds no credential yet). The [Client module](/auth/latest/api/client) documents every option and method.
 
-Check out the [Integrating Internet Identity](https://internetcomputer.org/docs/building-apps/authentication/integrate-internet-identity) guide for a more detailed guide on how to integrate Internet Identity into your web app.
+## Next steps
 
-For a full example, check out the [Who Am I](https://github.com/dfinity/examples/tree/master/motoko/who_am_i/src/internet_identity_app_frontend) example.
+- The [Internet Identity guides](https://docs.internetcomputer.org/guides/authentication/internet-identity/) cover project setup, identity attributes, one-click sign-in, enterprise SSO, and shared sessions across subdomains.
+- For a full example, see [Who Am I](https://github.com/dfinity/examples/tree/master/motoko/who_am_i).
