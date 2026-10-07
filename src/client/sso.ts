@@ -1,6 +1,14 @@
 // The identity provider's cap on the domain it will fetch.
 const MAX_AUTHORITY_LENGTH = 255;
 
+const DNS_LABEL = /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/;
+
+/** At least two labels, each a letter-digit-hyphen label of 1 to 63 characters. */
+function isDnsName(host: string): boolean {
+  const labels = host.split('.');
+  return labels.length >= 2 && labels.every((label) => DNS_LABEL.test(label));
+}
+
 /**
  * `localhost` / `127.0.0.1`, optionally followed by `:<port>`. IPv6 loopback
  * (`[::1]`, etc.) is intentionally not handled — the identity provider doesn't
@@ -48,14 +56,17 @@ export function normalizeSsoDomain(domain: string): string {
   if (new URL(`https://${authority}`).href !== url.href) {
     throw new Error(`ssoDomain must be a domain and nothing else: ${trimmed}`);
   }
-  if (url.port !== '' && !isLoopbackHost(authority)) {
+  if (isLoopbackHost(authority)) {
+    return authority;
+  }
+  // `URL` drops a default port such as `:443`, so look at the input itself.
+  if (/:[0-9]*$/.test(trimmed)) {
     throw new Error(`ssoDomain must be a domain and nothing else: ${trimmed}`);
   }
   if (authority.length > MAX_AUTHORITY_LENGTH) {
     throw new Error(`ssoDomain exceeds ${MAX_AUTHORITY_LENGTH} characters`);
   }
-  // A bare hostname is a half-typed domain, not something worth a request.
-  if (!authority.includes('.') && !isLoopbackHost(authority)) {
+  if (!isDnsName(authority)) {
     throw new Error(`ssoDomain is not a domain name: ${trimmed}`);
   }
   return authority;
