@@ -24,6 +24,8 @@ describe('normalizeSsoDomain', () => {
     ['a domain carrying a port', 'sso.dfinity.org:8443'],
     ['a domain carrying the default port', 'dfinity.org:443'],
     ['a domain carrying an empty port', 'dfinity.org:'],
+    ['a loopback host with an empty port', 'localhost:'],
+    ['a loopback host with the default port', 'localhost:443'],
     ['a domain starting with a dot', '.org'],
     ['a domain with an empty label', 'dfinity..org'],
     ['a label starting with a hyphen', '-dfinity.org'],

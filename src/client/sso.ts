@@ -56,12 +56,13 @@ export function normalizeSsoDomain(domain: string): string {
   if (new URL(`https://${authority}`).href !== url.href) {
     throw new Error(`ssoDomain must be a domain and nothing else: ${trimmed}`);
   }
+  // `URL` drops an empty or default port such as `:443`, so look at the input itself.
+  const port = /:([0-9]*)$/.exec(trimmed)?.[1];
+  if (port !== undefined && (port === '' || port !== url.port || !isLoopbackHost(authority))) {
+    throw new Error(`ssoDomain must be a domain and nothing else: ${trimmed}`);
+  }
   if (isLoopbackHost(authority)) {
     return authority;
-  }
-  // `URL` drops a default port such as `:443`, so look at the input itself.
-  if (/:[0-9]*$/.test(trimmed)) {
-    throw new Error(`ssoDomain must be a domain and nothing else: ${trimmed}`);
   }
   if (authority.length > MAX_AUTHORITY_LENGTH) {
     throw new Error(`ssoDomain exceeds ${MAX_AUTHORITY_LENGTH} characters`);
