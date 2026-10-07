@@ -12,15 +12,15 @@ import { HttpAgent } from '@icp-sdk/core/agent';
 // Mainnet Internet Identity unless `identityProvider` says otherwise.
 const authClient = new AuthClient();
 
+// A `<p id="status">` on the page.
+const statusText = document.getElementById('status')!;
+
 // `getStatus()` is synchronous; `subscribe()` says when to read it again,
 // including when another tab signs in or out.
 function render() {
   const status = authClient.getStatus();
-  if (status.state === 'signed-in') {
-    showApp(status.principal);
-  } else {
-    showSignInButton();
-  }
+  statusText.textContent =
+    status.state === 'signed-in' ? `Signed in as ${status.principal.toText()}` : 'Signed out';
 }
 authClient.subscribe(render);
 render();
