@@ -236,10 +236,10 @@ export type AuthClientCreateOptions = AuthClientBaseOptions &
          * When set, the identity provider URL includes an `sso` search param so
          * the user authenticates via that organization's own provider.
          *
-         * The value is trimmed, lowercased and IDNA-encoded, and has to be a host
-         * with an optional port and nothing else: no scheme, path, query,
-         * fragment or userinfo. A bare hostname is accepted only for `localhost`
-         * and `127.0.0.1`.
+         * The value is trimmed, lowercased and IDNA-encoded, and has to be a
+         * domain and nothing else: no scheme, port, path, query, fragment or
+         * userinfo. `localhost` and `127.0.0.1` are accepted too, with a port,
+         * for a local mock provider.
          *
          * The client checks the domain with Internet Identity as soon as it is
          * built, and {@link AuthClient.getSsoStatus} reports the answer. A value
@@ -812,7 +812,7 @@ export class AuthClient {
    */
   #assertSsoDomainUsable(): void {
     if (this.#sso?.status.state === 'invalid') {
-      throw new Error('ssoDomain is not a domain with an optional port');
+      throw new Error('ssoDomain is not a domain');
     }
   }
 

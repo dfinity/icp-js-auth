@@ -2544,7 +2544,7 @@ describe('scopedKeys', () => {
 
   it('should throw for an SSO domain that is not a bare domain', () => {
     expect(() => scopedKeys({ ssoDomain: 'dfinity.org/sso' })).toThrow(
-      'ssoDomain must be a domain and optional port',
+      'ssoDomain must be a domain and nothing else',
     );
   });
 

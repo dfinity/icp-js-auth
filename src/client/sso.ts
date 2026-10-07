@@ -24,11 +24,12 @@ function isLoopbackHost(host: string): boolean {
 
 /**
  * Normalizes an SSO domain to the authority the identity provider fetches the
- * discovery document from: lowercased, IDNA-encoded, host and optional port.
+ * discovery document from: lowercased and IDNA-encoded. A loopback host may
+ * carry a port, for a local mock provider; any other host may not.
  *
  * @param domain - The organization domain.
  * @returns The normalized authority.
- * @throws When `domain` is not a domain with an optional port.
+ * @throws When `domain` is not a domain.
  */
 export function normalizeSsoDomain(domain: string): string {
   const trimmed = domain.trim();
@@ -45,7 +46,10 @@ export function normalizeSsoDomain(domain: string): string {
   // Rebuilding from the host and port alone has to reproduce what was parsed,
   // so anything else the domain carried shows up as a difference.
   if (new URL(`https://${authority}`).href !== url.href) {
-    throw new Error(`ssoDomain must be a domain and optional port, nothing else: ${trimmed}`);
+    throw new Error(`ssoDomain must be a domain and nothing else: ${trimmed}`);
+  }
+  if (url.port !== '' && !isLoopbackHost(authority)) {
+    throw new Error(`ssoDomain must be a domain and nothing else: ${trimmed}`);
   }
   if (authority.length > MAX_AUTHORITY_LENGTH) {
     throw new Error(`ssoDomain exceeds ${MAX_AUTHORITY_LENGTH} characters`);

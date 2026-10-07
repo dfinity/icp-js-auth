@@ -8,7 +8,7 @@ import type { Principal } from '@icp-sdk/core/principal';
  * - `checking`: Internet Identity has not answered yet.
  * - `available`: the domain resolves to a usable SSO configuration. `name` is
  *   the label the organization publishes, for a "Continue with Acme" button.
- * - `invalid`: the value is not a domain with an optional port, so no check is
+ * - `invalid`: the value is not a domain, so no check is
  *   made and a retry cannot help. The user has to change what they typed.
  * - `unavailable`: the domain publishes no usable configuration, or fetching
  *   it is failing. While `retryAfter` is in the future Internet Identity will
