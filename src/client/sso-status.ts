@@ -1,4 +1,4 @@
-import { Actor, HttpAgent, type HttpAgentOptions } from '@icp-sdk/core/agent';
+import { Actor, AnonymousIdentity, HttpAgent, type HttpAgentOptions } from '@icp-sdk/core/agent';
 import type { IDL } from '@icp-sdk/core/candid';
 import type { Principal } from '@icp-sdk/core/principal';
 
@@ -57,7 +57,11 @@ export async function createSsoDomainService(options: {
   canisterId: Principal;
   agentOptions?: Omit<HttpAgentOptions, 'identity'>;
 }): Promise<SsoDomainService> {
-  const agent = await HttpAgent.create({ ...options.agentOptions });
+  const agent = await HttpAgent.create({
+    ...options.agentOptions,
+    // Last, so no agent option can make the check call as someone.
+    identity: new AnonymousIdentity(),
+  });
   return Actor.createActor<SsoDomainService>(idlFactory, {
     agent,
     canisterId: options.canisterId,
