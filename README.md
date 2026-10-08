@@ -22,23 +22,10 @@ import { AuthClient } from '@icp-sdk/auth/client';
 
 const authClient = new AuthClient();
 
-const render = () => {
-  const status = authClient.getStatus();
-  console.log(
-    status.state === 'signed-in' ? `Signed in as ${status.principal.toText()}` : status.state,
-  );
-};
-authClient.subscribe(render);
-render();
+await authClient.signIn();
+const identity = await authClient.getIdentity();
+console.log('Signed in as', identity.getPrincipal().toText());
 
-try {
-  const identity = await authClient.signIn();
-  console.log('Signed in as', identity.getPrincipal().toText());
-} catch (error) {
-  console.error('Sign-in failed:', error);
-}
-
-// later
 await authClient.signOut();
 ```
 
