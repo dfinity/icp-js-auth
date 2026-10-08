@@ -1,7 +1,34 @@
 // The identity provider's cap on the domain it will fetch.
 const MAX_AUTHORITY_LENGTH = 255;
 
-const WELL_KNOWN_PATH = '/.well-known/ii-openid-configuration';
+// The identity provider's own limits on a DNS name (idna's strict mode).
+const MAX_DNS_NAME_LENGTH = 253;
+
+// 1 to 63 letters, digits, or hyphens, with no hyphen at either end.
+const DNS_LABEL = /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/;
+
+function isDnsName(host: string): boolean {
+  const labels = host.split('.');
+  return (
+    host.length <= MAX_DNS_NAME_LENGTH &&
+    labels.length >= 2 &&
+    labels.every(
+      (label) =>
+        DNS_LABEL.test(label) &&
+        // `--` in the third and fourth places is reserved, except for punycode.
+        (label.slice(2, 4) !== '--' || label.startsWith('xn--')),
+    )
+  );
+}
+
+const MAX_QUOTED_LENGTH = 100;
+
+/** `value` for an error message: cut short, and quoted so control characters show escaped. */
+function quote(value: string): string {
+  return JSON.stringify(
+    value.length > MAX_QUOTED_LENGTH ? `${value.slice(0, MAX_QUOTED_LENGTH)}…` : value,
+  );
+}
 
 /**
  * `localhost` / `127.0.0.1`, optionally followed by `:<port>`. IPv6 loopback
@@ -26,11 +53,12 @@ function isLoopbackHost(host: string): boolean {
 
 /**
  * Normalizes an SSO domain to the authority the identity provider fetches the
- * discovery document from: lowercased, IDNA-encoded, host and optional port.
+ * discovery document from: lowercased and IDNA-encoded. A loopback host may
+ * carry a port, for a local mock provider; any other host may not.
  *
  * @param domain - The organization domain.
  * @returns The normalized authority.
- * @throws When `domain` is not a domain with an optional port.
+ * @throws When `domain` is not a domain.
  */
 export function normalizeSsoDomain(domain: string): string {
   const trimmed = domain.trim();
@@ -41,82 +69,33 @@ export function normalizeSsoDomain(domain: string): string {
   try {
     url = new URL(`https://${trimmed}`);
   } catch {
-    throw new Error(`ssoDomain is not a domain: ${trimmed}`);
+    throw new Error(`ssoDomain ${quote(trimmed)} is not a domain`);
   }
   const authority = url.host;
   // Rebuilding from the host and port alone has to reproduce what was parsed,
   // so anything else the domain carried shows up as a difference.
   if (new URL(`https://${authority}`).href !== url.href) {
-    throw new Error(`ssoDomain must be a domain and optional port, nothing else: ${trimmed}`);
+    throw new Error(
+      `ssoDomain ${quote(trimmed)} must be a domain and nothing else: no scheme, path, query, fragment, or userinfo`,
+    );
+  }
+  // `URL` drops an empty or default port such as `:443`, so look at the input itself.
+  const port = /:([0-9]*)$/.exec(trimmed)?.[1];
+  if (port !== undefined && (port === '' || port !== url.port || !isLoopbackHost(authority))) {
+    throw new Error(
+      `ssoDomain ${quote(trimmed)} has a port, which only localhost and 127.0.0.1 may carry`,
+    );
+  }
+  if (isLoopbackHost(authority)) {
+    return authority;
   }
   if (authority.length > MAX_AUTHORITY_LENGTH) {
-    throw new Error(`ssoDomain exceeds ${MAX_AUTHORITY_LENGTH} characters`);
+    throw new Error(`ssoDomain ${quote(trimmed)} exceeds ${MAX_AUTHORITY_LENGTH} characters`);
   }
-  // A bare hostname is a half-typed domain, not something worth a request.
-  if (!authority.includes('.') && !isLoopbackHost(authority)) {
-    throw new Error(`ssoDomain is not a domain name: ${trimmed}`);
+  if (!isDnsName(authority)) {
+    throw new Error(
+      `ssoDomain ${quote(trimmed)} is not a domain name: it needs at least two labels of 1 to 63 letters, digits, or hyphens, with no hyphen at either end and no "--" in the third and fourth places, and at most ${MAX_DNS_NAME_LENGTH} characters`,
+    );
   }
   return authority;
-}
-
-function publishesSsoConfiguration(value: unknown): boolean {
-  if (typeof value !== 'object' || value === null) {
-    return false;
-  }
-  const { client_id, openid_configuration } = value as Record<string, unknown>;
-  return typeof client_id === 'string' && typeof openid_configuration === 'string';
-}
-
-/**
- * Checks whether an organization domain can be used for SSO sign-in: it is a
- * domain name, and it publishes `/.well-known/ii-openid-configuration` with a
- * `client_id` and an `openid_configuration` URL.
- *
- * The document must be served with `Access-Control-Allow-Origin: *`.
- *
- * The check waits on a third-party server and has no deadline of its own, so
- * `signal` sets one. Pass `AbortSignal.timeout(...)` for a one-shot check, or a
- * controller you abort per keystroke when checking as the user types.
- *
- * @param domain - The organization domain.
- * @param signal - Bounds the check.
- * @returns Whether the domain is usable for SSO sign-in.
- * @throws When `signal` aborts — an abandoned check is not a verdict on the
- *   domain, so it must not be read as `false`.
- *
- * @example
- * if (await isValidSsoDomain(input.value, AbortSignal.timeout(5_000))) {
- *   const authClient = new AuthClient({ ssoDomain: input.value });
- *   await authClient.signIn();
- * }
- */
-export async function isValidSsoDomain(domain: string, signal: AbortSignal): Promise<boolean> {
-  signal.throwIfAborted();
-
-  let normalized: string;
-  try {
-    normalized = normalizeSsoDomain(domain);
-  } catch {
-    return false;
-  }
-
-  const scheme = isLoopbackHost(normalized) ? 'http' : 'https';
-  try {
-    const response = await fetch(`${scheme}://${normalized}${WELL_KNOWN_PATH}`, {
-      headers: { Accept: 'application/json' },
-      signal,
-    });
-    if (!response.ok) {
-      return false;
-    }
-    const valid = publishesSsoConfiguration(await response.json());
-    signal.throwIfAborted();
-    return valid;
-  } catch (error) {
-    if (signal.aborted) {
-      throw error;
-    }
-    // A DNS, TLS, CORS, or parse failure all leave the domain unusable.
-    return false;
-  }
 }
