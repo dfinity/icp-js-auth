@@ -886,11 +886,11 @@ describe('AuthClient', () => {
     expect(url.searchParams.has('sso')).toBe(false);
   });
 
-  it('should report an ssoDomain that is not a bare domain as invalid rather than throw', () => {
-    const client = track(new AuthClient({ ssoDomain: 'https://dfinity.org' }));
+  it('should report an ssoDomain that is not a bare domain as invalid, and pass it on as typed', () => {
+    const client = track(new AuthClient({ ssoDomain: ' https://dfinity.org ' }));
     expect(client.getSsoStatus()).toEqual({ state: 'invalid' });
     const url = new URL(FakeTransport.last().options.url ?? '');
-    expect(url.searchParams.has('sso')).toBe(false);
+    expect(url.searchParams.get('sso')).toBe('https://dfinity.org');
   });
 
   it('should throw when both one-click entry points are set', () => {
@@ -2544,7 +2544,7 @@ describe('scopedKeys', () => {
 
   it('should throw for an SSO domain that is not a bare domain', () => {
     expect(() => scopedKeys({ ssoDomain: 'dfinity.org/sso' })).toThrow(
-      'ssoDomain must be a domain and nothing else',
+      'ssoDomain "dfinity.org/sso" must be a domain and nothing else',
     );
   });
 
@@ -2655,30 +2655,15 @@ describe('AuthClient SSO domain status', () => {
     expect(ssoService.checks).toEqual([]);
   });
 
-  it('rejects signIn for an invalid domain without opening anything', async () => {
-    const client = track(new AuthClient({ ssoDomain: 'dfinity.org/sso' }));
-    const opened = vi.spyOn(FakeTransport.last(), 'establishChannel');
-    await expect(client.signIn()).rejects.toThrow('ssoDomain is not a domain');
-    expect(opened).not.toHaveBeenCalled();
-  });
-
-  it('rejects requestAttributes for an invalid domain without opening anything', async () => {
-    const client = track(new AuthClient({ ssoDomain: 'dfinity.org/sso' }));
-    const opened = vi.spyOn(FakeTransport.last(), 'establishChannel');
-    await expect(
-      client.requestAttributes({ keys: ['email'], nonce: async () => new Uint8Array([1]) }),
-    ).rejects.toThrow('ssoDomain is not a domain');
-    expect(opened).not.toHaveBeenCalled();
-  });
-
   it.each([
-    ['checking', { Pending: null } as const, 0],
-    ['available', { Available: { name: [] as [] } }, 1_000],
-    ['unavailable', { Unavailable: { retry_after: [] as [] } }, 1_000],
-  ])('signs in normally while %s', async (state, answer, wait) => {
+    ['invalid', 'dfinity.org/sso', { Pending: null } as const, 0],
+    ['checking', 'dfinity.org', { Pending: null } as const, 0],
+    ['available', 'dfinity.org', { Available: { name: [] as [] } }, 1_000],
+    ['unavailable', 'dfinity.org', { Unavailable: { retry_after: [] as [] } }, 1_000],
+  ])('signs in normally while %s', async (state, ssoDomain, answer, wait) => {
     vi.useRealTimers();
     ssoService.answer = answer;
-    const client = track(new AuthClient({ ssoDomain: 'dfinity.org' }));
+    const client = track(new AuthClient({ ssoDomain }));
     if (wait > 0) await new Promise((r) => setTimeout(r, wait));
     expect(client.getSsoStatus()?.state).toBe(state);
 

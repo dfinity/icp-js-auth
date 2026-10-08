@@ -244,7 +244,8 @@ export type AuthClientCreateOptions = AuthClientBaseOptions &
          * The client checks the domain with Internet Identity as soon as it is
          * built, and {@link AuthClient.getSsoStatus} reports the answer. A value
          * that is not a domain is reported as `invalid` rather than thrown, so a
-         * client can be built from whatever the user typed.
+         * client can be built from whatever the user typed; a sign-in with it
+         * opens Internet Identity, which explains the error on its own screen.
          */
         ssoDomain?: string;
       }
@@ -483,16 +484,16 @@ export class AuthClient {
       } catch {
         domain = undefined;
       }
-      if (domain !== undefined) {
-        identityProviderUrl.searchParams.set('sso', domain);
-        // The SSO ceremony starts before a delegation is requested, so the
-        // channel carries the derivation origin too late to resolve the client.
-        if (options.derivationOrigin !== undefined) {
-          identityProviderUrl.searchParams.set(
-            'derivationOrigin',
-            options.derivationOrigin.toString(),
-          );
-        }
+      // A value that is not a domain goes to Internet Identity as typed, which
+      // explains it on its own screen.
+      identityProviderUrl.searchParams.set('sso', domain ?? options.ssoDomain.trim());
+      // The SSO ceremony starts before a delegation is requested, so the
+      // channel carries the derivation origin too late to resolve the client.
+      if (options.derivationOrigin !== undefined) {
+        identityProviderUrl.searchParams.set(
+          'derivationOrigin',
+          options.derivationOrigin.toString(),
+        );
       }
       const canisterId = this.#canisterId;
       this.#sso = new SsoStatusChecker(
@@ -659,9 +660,9 @@ export class AuthClient {
    * Building the client also warms Internet Identity's cache for the domain, so
    * a sign-in that follows starts without waiting on the fetch.
    *
-   * {@link signIn} proceeds in every state but `invalid`: while `checking` or
-   * `unavailable`, Internet Identity resolves the domain itself during the
-   * sign-in and explains a failure on its own screen.
+   * {@link signIn} proceeds in every state: Internet Identity resolves the
+   * domain itself during the sign-in, and explains a failure, a value that is
+   * not a domain included, on its own screen.
    *
    * @example
    * const client = new AuthClient({ ssoDomain: input.value });
@@ -805,17 +806,6 @@ export class AuthClient {
     this.#identity = next;
   }
 
-  /**
-   * Refuses to open anything for an `ssoDomain` that is not a domain: the
-   * identity provider URL carries no `sso` param then, so a ceremony would be a
-   * plain sign-in rather than the organization's.
-   */
-  #assertSsoDomainUsable(): void {
-    if (this.#sso?.status.state === 'invalid') {
-      throw new Error('ssoDomain is not a domain');
-    }
-  }
-
   #beginInteraction(): void {
     this.#interactions += 1;
   }
@@ -880,7 +870,6 @@ export class AuthClient {
   }
 
   async signIn(options?: AuthClientSignInOptions): Promise<Identity> {
-    this.#assertSsoDomainUsable();
     // Counted here and locked inside, once the window is open: a ceremony is
     // both things — the signer channel an origin has one of, and this
     // namespace's sign-in, which `signOut` moves too — but neither lock may be
@@ -1153,7 +1142,6 @@ export class AuthClient {
     keys: string[];
     nonce: () => Promise<Uint8Array>;
   }): Promise<SignedAttributes> {
-    this.#assertSsoDomainUsable();
     // The channel lock and not the sign-in lock: this opens the signer channel,
     // which an origin has one of, and writes nothing anyone else reads. Held
     // together with a `signIn` overlapping it, which shares the same channel.

@@ -9,6 +9,8 @@ describe('normalizeSsoDomain', () => {
     ['a loopback host with a port', 'localhost:11107', 'localhost:11107'],
     ['a loopback address', '127.0.0.1', '127.0.0.1'],
     ['a domain with a hyphen and digits', 'sso-2.dfinity.org', 'sso-2.dfinity.org'],
+    ['a punycode domain', 'xn--zrich-kva.example', 'xn--zrich-kva.example'],
+    ['a 253-character name', `${'a.'.repeat(125)}org`, `${'a.'.repeat(125)}org`],
   ])('accepts %s', (_case, domain, expected) => {
     expect(normalizeSsoDomain(domain)).toBe(expected);
   });
@@ -32,9 +34,21 @@ describe('normalizeSsoDomain', () => {
     ['a label ending with a hyphen', 'dfinity-.org'],
     ['a label with an underscore', 'df_inity.org'],
     ['a label over 63 characters', `${'a'.repeat(64)}.org`],
+    ['a label with hyphens in the third and fourth places', 'ab--cd.org'],
+    ['a name over 253 characters', `aa.${'a.'.repeat(124)}org`],
     ['a domain carrying a space', 'dfinity .org'],
     ['an authority over 255 characters', `${'a'.repeat(252)}.org`],
   ])('rejects %s', (_case, domain) => {
     expect(() => normalizeSsoDomain(domain)).toThrow();
+  });
+
+  it('quotes the value in its error, cut to 100 characters', () => {
+    expect(() => normalizeSsoDomain('a\nb.org/x')).toThrow(
+      'ssoDomain "a\\nb.org/x" must be a domain',
+    );
+    const long = `${'a'.repeat(300)}/x`;
+    expect(() => normalizeSsoDomain(long)).toThrow(
+      `ssoDomain "${'a'.repeat(100)}…" must be a domain`,
+    );
   });
 });
