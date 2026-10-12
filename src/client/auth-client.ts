@@ -238,12 +238,13 @@ export type AuthClientCreateOptions = AuthClientBaseOptions &
          *
          * The value is trimmed, lowercased and IDNA-encoded, and has to be a
          * domain and nothing else: no scheme, port, path, query, fragment or
-         * userinfo. `localhost` and `127.0.0.1` are accepted too, with a port,
-         * for a local mock provider.
+         * userinfo. A loopback host (`localhost`, `127.0.0.1`, or a name under
+         * `.localhost`) is accepted too, with a port, for a local mock provider.
          *
          * The client checks the domain with Internet Identity as soon as it is
          * built, and {@link AuthClient.getSsoStatus} reports the answer. A value
-         * that is not a domain is reported as `invalid` rather than thrown, so a
+         * that is not a domain is reported as `invalid`, with the reason, rather
+         * than thrown, so a
          * client can be built from whatever the user typed; a sign-in with it
          * opens Internet Identity, which explains the error on its own screen.
          */
@@ -478,15 +479,18 @@ export class AuthClient {
       identityProviderUrl.searchParams.set('openid', OPENID_PROVIDER_URLS[options.openIdProvider]);
     }
     if (options.ssoDomain !== undefined) {
-      let domain: string | undefined;
+      let domain: string | { invalid: string };
       try {
         domain = normalizeSsoDomain(options.ssoDomain);
-      } catch {
-        domain = undefined;
+      } catch (error) {
+        domain = { invalid: error instanceof Error ? error.message : String(error) };
       }
       // A value that is not a domain goes to Internet Identity as typed, which
       // explains it on its own screen.
-      identityProviderUrl.searchParams.set('sso', domain ?? options.ssoDomain.trim());
+      identityProviderUrl.searchParams.set(
+        'sso',
+        typeof domain === 'string' ? domain : options.ssoDomain.trim(),
+      );
       // The SSO ceremony starts before a delegation is requested, so the
       // channel carries the derivation origin too late to resolve the client.
       if (options.derivationOrigin !== undefined) {

@@ -3,23 +3,7 @@ const MAX_AUTHORITY_LENGTH = 255;
 
 // The identity provider's own limits on a DNS name (idna's strict mode).
 const MAX_DNS_NAME_LENGTH = 253;
-
-// 1 to 63 letters, digits, or hyphens, with no hyphen at either end.
-const DNS_LABEL = /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/;
-
-function isDnsName(host: string): boolean {
-  const labels = host.split('.');
-  return (
-    host.length <= MAX_DNS_NAME_LENGTH &&
-    labels.length >= 2 &&
-    labels.every(
-      (label) =>
-        DNS_LABEL.test(label) &&
-        // `--` in the third and fourth places is reserved, except for punycode.
-        (label.slice(2, 4) !== '--' || label.startsWith('xn--')),
-    )
-  );
-}
+const MAX_DNS_LABEL_LENGTH = 63;
 
 const MAX_QUOTED_LENGTH = 100;
 
@@ -31,24 +15,41 @@ function quote(value: string): string {
 }
 
 /**
- * `localhost` / `127.0.0.1`, optionally followed by `:<port>`. IPv6 loopback
- * (`[::1]`, etc.) is intentionally not handled — the identity provider doesn't
- * recognise it either, and its e2e setup uses the hostname form.
+ * `localhost`, `127.0.0.1`, or a name under `.localhost` (RFC 6761 reserves the
+ * whole domain for loopback), like the identity provider's own check. IPv6
+ * loopback is not one, there either.
  */
-function isLoopbackHost(host: string): boolean {
-  let url: URL;
-  try {
-    // Parse as a URL authority so the optional `:<port>` is split off for us
-    // rather than by hand. Invalid input throws and is treated as non-loopback.
-    url = new URL(`http://${host}`);
-  } catch {
-    return false;
+function isLoopbackHost(hostname: string): boolean {
+  return hostname === 'localhost' || hostname === '127.0.0.1' || hostname.endsWith('.localhost');
+}
+
+/** What keeps `hostname` from being a DNS name, by the identity provider's rules. */
+function dnsNameProblems(hostname: string): string[] {
+  const labels = hostname.split('.');
+  const problems: string[] = [];
+  if (labels.length < 2) problems.push('a single label');
+  if (labels.some((label) => label.length === 0)) problems.push('an empty label');
+  if (labels.some((label) => label.length > MAX_DNS_LABEL_LENGTH)) {
+    problems.push(`a label longer than ${MAX_DNS_LABEL_LENGTH} characters`);
   }
-  // A bare `host[:port]` has no path/query/fragment; reject e.g. `localhost/x`.
-  if (url.pathname !== '/' || url.search !== '' || url.hash !== '') {
-    return false;
+  if (labels.some((label) => /[^a-z0-9-]/.test(label))) {
+    problems.push('a character other than a letter, digit, or hyphen');
   }
-  return url.hostname === 'localhost' || url.hostname === '127.0.0.1';
+  if (labels.some((label) => label.startsWith('-') || label.endsWith('-'))) {
+    problems.push('a label starting or ending with a hyphen');
+  }
+  // `--` in the third and fourth places is reserved, except for punycode.
+  if (labels.some((label) => label.slice(2, 4) === '--' && !label.startsWith('xn--'))) {
+    problems.push('a label with "--" in its third and fourth places');
+  }
+  if (hostname.length > MAX_DNS_NAME_LENGTH) {
+    problems.push(`a name longer than ${MAX_DNS_NAME_LENGTH} characters`);
+  }
+  return problems;
+}
+
+function listed(items: string[]): string {
+  return items.length < 2 ? items.join('') : `${items.slice(0, -1).join(', ')} and ${items.at(-1)}`;
 }
 
 /**
@@ -58,44 +59,49 @@ function isLoopbackHost(host: string): boolean {
  *
  * @param domain - The organization domain.
  * @returns The normalized authority.
- * @throws When `domain` is not a domain.
+ * @throws When `domain` is not a domain, naming every problem with it.
  */
 export function normalizeSsoDomain(domain: string): string {
   const trimmed = domain.trim();
   if (trimmed.length === 0) {
     throw new Error('ssoDomain cannot be empty');
   }
+  const scheme = /^[a-z][a-z0-9+.-]*:\/\//i.exec(trimmed)?.[0];
+  const rest = scheme === undefined ? trimmed : trimmed.slice(scheme.length);
   let url: URL;
   try {
-    url = new URL(`https://${trimmed}`);
+    url = new URL(`https://${rest}`);
   } catch {
     throw new Error(`ssoDomain ${quote(trimmed)} is not a domain`);
   }
-  const authority = url.host;
-  // Rebuilding from the host and port alone has to reproduce what was parsed,
-  // so anything else the domain carried shows up as a difference.
-  if (new URL(`https://${authority}`).href !== url.href) {
-    throw new Error(
-      `ssoDomain ${quote(trimmed)} must be a domain and nothing else: no scheme, path, query, fragment, or userinfo`,
-    );
+  const { username, password, pathname, hostname, port, host, href } = url;
+  // `URL` drops an empty or default port such as `:443`, so the typed one is read
+  // from the input itself.
+  const typedAuthority = rest.split(/[/?#]/)[0] ?? '';
+  const typedPort = /:([0-9]*)$/.exec(
+    typedAuthority.slice(typedAuthority.lastIndexOf('@') + 1),
+  )?.[1];
+  const [beforeFragment = ''] = href.split('#');
+
+  const problems: string[] = [];
+  if (scheme !== undefined) problems.push('a scheme');
+  if (username !== '' || password !== '') problems.push('userinfo');
+  if (pathname !== '/') problems.push('a path');
+  if (beforeFragment.includes('?')) problems.push('a query');
+  if (href.includes('#')) problems.push('a fragment');
+  const loopback = isLoopbackHost(hostname);
+  if (typedPort !== undefined && !loopback) {
+    problems.push('a port, which only loopback hosts may carry');
+  } else if (typedPort !== undefined && (typedPort === '' || typedPort !== port)) {
+    problems.push('an empty or default port');
   }
-  // `URL` drops an empty or default port such as `:443`, so look at the input itself.
-  const port = /:([0-9]*)$/.exec(trimmed)?.[1];
-  if (port !== undefined && (port === '' || port !== url.port || !isLoopbackHost(authority))) {
-    throw new Error(
-      `ssoDomain ${quote(trimmed)} has a port, which only localhost and 127.0.0.1 may carry`,
-    );
+  if (trimmed.length > MAX_AUTHORITY_LENGTH) {
+    problems.push(`more than ${MAX_AUTHORITY_LENGTH} characters`);
+  } else if (!loopback) {
+    problems.push(...dnsNameProblems(hostname));
   }
-  if (isLoopbackHost(authority)) {
-    return authority;
+  if (problems.length > 0) {
+    throw new Error(`ssoDomain ${quote(trimmed)} has ${listed(problems)}`);
   }
-  if (authority.length > MAX_AUTHORITY_LENGTH) {
-    throw new Error(`ssoDomain ${quote(trimmed)} exceeds ${MAX_AUTHORITY_LENGTH} characters`);
-  }
-  if (!isDnsName(authority)) {
-    throw new Error(
-      `ssoDomain ${quote(trimmed)} is not a domain name: it needs at least two labels of 1 to 63 letters, digits, or hyphens, with no hyphen at either end and no "--" in the third and fourth places, and at most ${MAX_DNS_NAME_LENGTH} characters`,
-    );
-  }
-  return authority;
+  return host;
 }

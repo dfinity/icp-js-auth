@@ -8,6 +8,7 @@ describe('normalizeSsoDomain', () => {
     ['an internationalized domain', 'zürich.example', 'xn--zrich-kva.example'],
     ['a loopback host with a port', 'localhost:11107', 'localhost:11107'],
     ['a loopback address', '127.0.0.1', '127.0.0.1'],
+    ['a name under .localhost with a port', 'app.localhost:8000', 'app.localhost:8000'],
     ['a domain with a hyphen and digits', 'sso-2.dfinity.org', 'sso-2.dfinity.org'],
     ['a punycode domain', 'xn--zrich-kva.example', 'xn--zrich-kva.example'],
     ['a 253-character name', `${'a.'.repeat(125)}org`, `${'a.'.repeat(125)}org`],
@@ -43,12 +44,19 @@ describe('normalizeSsoDomain', () => {
   });
 
   it('quotes the value in its error, cut to 100 characters', () => {
-    expect(() => normalizeSsoDomain('a\nb.org/x')).toThrow(
-      'ssoDomain "a\\nb.org/x" must be a domain',
-    );
+    expect(() => normalizeSsoDomain('a\nb.org/x')).toThrow('ssoDomain "a\\nb.org/x" has a path');
     const long = `${'a'.repeat(300)}/x`;
     expect(() => normalizeSsoDomain(long)).toThrow(
-      `ssoDomain "${'a'.repeat(100)}…" must be a domain`,
+      `ssoDomain "${'a'.repeat(100)}…" has a path and more than 255 characters`,
+    );
+  });
+
+  it('names every problem it finds', () => {
+    expect(() => normalizeSsoDomain('https://user@acme.com:8443/sso?x=1#y')).toThrow(
+      'ssoDomain "https://user@acme.com:8443/sso?x=1#y" has a scheme, userinfo, a path, a query, a fragment and a port, which only loopback hosts may carry',
+    );
+    expect(() => normalizeSsoDomain('-a--cd..org')).toThrow(
+      'ssoDomain "-a--cd..org" has an empty label, a label starting or ending with a hyphen and a label with "--" in its third and fourth places',
     );
   });
 });

@@ -85,7 +85,7 @@ const ssoService = vi.hoisted(() => ({
   answer: { Pending: null } as
     | { Available: { name: [] | [string] } }
     | { Pending: null }
-    | { Unavailable: { retry_after: [] | [bigint] } },
+    | { Unavailable: { retry_after: [] | [bigint]; reason: [] | [string] } },
   checks: [] as string[],
 }));
 
@@ -888,7 +888,10 @@ describe('AuthClient', () => {
 
   it('should report an ssoDomain that is not a bare domain as invalid, and pass it on as typed', () => {
     const client = track(new AuthClient({ ssoDomain: ' https://dfinity.org ' }));
-    expect(client.getSsoStatus()).toEqual({ state: 'invalid' });
+    expect(client.getSsoStatus()).toEqual({
+      state: 'invalid',
+      reason: 'ssoDomain "https://dfinity.org" has a scheme',
+    });
     const url = new URL(FakeTransport.last().options.url ?? '');
     expect(url.searchParams.get('sso')).toBe('https://dfinity.org');
   });
@@ -2544,7 +2547,7 @@ describe('scopedKeys', () => {
 
   it('should throw for an SSO domain that is not a bare domain', () => {
     expect(() => scopedKeys({ ssoDomain: 'dfinity.org/sso' })).toThrow(
-      'ssoDomain "dfinity.org/sso" must be a domain and nothing else',
+      'ssoDomain "dfinity.org/sso" has a path',
     );
   });
 
@@ -2613,12 +2616,15 @@ describe('AuthClient SSO domain status', () => {
   it('never calls Internet Identity for an invalid domain', async () => {
     const client = track(new AuthClient({ ssoDomain: 'not a domain' }));
     await settle();
-    expect(client.getSsoStatus()).toEqual({ state: 'invalid' });
+    expect(client.getSsoStatus()).toEqual({
+      state: 'invalid',
+      reason: 'ssoDomain "not a domain" is not a domain',
+    });
     expect(ssoService.created).toEqual([]);
   });
 
   it('tells subscribers when the SSO status changes', async () => {
-    ssoService.answer = { Unavailable: { retry_after: [] } };
+    ssoService.answer = { Unavailable: { retry_after: [], reason: [] } };
     const client = track(new AuthClient({ ssoDomain: 'dfinity.org' }));
     const listener = vi.fn();
     client.subscribe(listener);
@@ -2636,7 +2642,7 @@ describe('AuthClient SSO domain status', () => {
   });
 
   it('checks again on refreshSsoStatus', async () => {
-    ssoService.answer = { Unavailable: { retry_after: [] } };
+    ssoService.answer = { Unavailable: { retry_after: [], reason: [] } };
     const client = track(new AuthClient({ ssoDomain: 'dfinity.org' }));
     await settle();
 
@@ -2659,7 +2665,12 @@ describe('AuthClient SSO domain status', () => {
     ['invalid', 'dfinity.org/sso', { Pending: null } as const, 0],
     ['checking', 'dfinity.org', { Pending: null } as const, 0],
     ['available', 'dfinity.org', { Available: { name: [] as [] } }, 1_000],
-    ['unavailable', 'dfinity.org', { Unavailable: { retry_after: [] as [] } }, 1_000],
+    [
+      'unavailable',
+      'dfinity.org',
+      { Unavailable: { retry_after: [] as [], reason: [] as [] } },
+      1_000,
+    ],
   ])('signs in normally while %s', async (state, ssoDomain, answer, wait) => {
     vi.useRealTimers();
     ssoService.answer = answer;

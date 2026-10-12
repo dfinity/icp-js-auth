@@ -29,10 +29,12 @@ function fakeService(...answers: Answer[]) {
   return service;
 }
 
-/** `null` builds the checker for a value that is not a domain. */
-function build(service: ReturnType<typeof fakeService>, domain: string | null = 'dfinity.org') {
+function build(
+  service: ReturnType<typeof fakeService>,
+  domain: string | { invalid: string } = 'dfinity.org',
+) {
   const onChange = vi.fn();
-  const checker = new SsoStatusChecker(domain ?? undefined, async () => service, onChange);
+  const checker = new SsoStatusChecker(domain, async () => service, onChange);
   return { checker, onChange };
 }
 
@@ -65,14 +67,27 @@ describe('SsoStatusChecker', () => {
   it('reports unavailable with the time Internet Identity will fetch again', async () => {
     const retryAt = Date.UTC(2026, 9, 7, 12, 0, 0);
     const { checker } = build(
-      fakeService({ Unavailable: { retry_after: [BigInt(retryAt) * 1_000_000n] } }),
+      fakeService({ Unavailable: { retry_after: [BigInt(retryAt) * 1_000_000n], reason: [] } }),
     );
     await vi.advanceTimersByTimeAsync(0);
     expect(checker.status).toEqual({ state: 'unavailable', retryAfter: new Date(retryAt) });
   });
 
+  it('reports the reason Internet Identity gives for unavailable', async () => {
+    const { checker } = build(
+      fakeService({
+        Unavailable: { retry_after: [], reason: ['the discovery file is too large'] },
+      }),
+    );
+    await vi.advanceTimersByTimeAsync(0);
+    expect(checker.status).toEqual({
+      state: 'unavailable',
+      reason: 'the discovery file is too large',
+    });
+  });
+
   it('reports unavailable without retryAfter when a retry cannot help', async () => {
-    const { checker } = build(fakeService({ Unavailable: { retry_after: [] } }));
+    const { checker } = build(fakeService({ Unavailable: { retry_after: [], reason: [] } }));
     await vi.advanceTimersByTimeAsync(0);
     expect(checker.status).toEqual({ state: 'unavailable' });
   });
@@ -165,19 +180,19 @@ describe('SsoStatusChecker', () => {
 
   it('treats a value that is not a domain as invalid and never calls', async () => {
     const service = fakeService();
-    const { checker, onChange } = build(service, null);
-    expect(checker.status).toEqual({ state: 'invalid' });
+    const { checker, onChange } = build(service, { invalid: 'ssoDomain "x" has a path' });
+    expect(checker.status).toEqual({ state: 'invalid', reason: 'ssoDomain "x" has a path' });
 
     checker.refresh();
     await vi.advanceTimersByTimeAsync(60_000);
     expect(service.app_sso_domain_check).not.toHaveBeenCalled();
     expect(service.app_sso_domain_status).not.toHaveBeenCalled();
-    expect(checker.status).toEqual({ state: 'invalid' });
+    expect(checker.status).toEqual({ state: 'invalid', reason: 'ssoDomain "x" has a path' });
     expect(onChange).not.toHaveBeenCalled();
   });
 
   it('checks again on refresh, through checking', async () => {
-    const service = fakeService({ Unavailable: { retry_after: [] } });
+    const service = fakeService({ Unavailable: { retry_after: [], reason: [] } });
     const { checker, onChange } = build(service);
     await vi.advanceTimersByTimeAsync(0);
     expect(checker.status).toEqual({ state: 'unavailable' });
@@ -194,7 +209,7 @@ describe('SsoStatusChecker', () => {
   it('does not check again on its own once retryAfter passes', async () => {
     const retryAt = Date.now() + 60_000;
     const service = fakeService({
-      Unavailable: { retry_after: [BigInt(retryAt) * 1_000_000n] },
+      Unavailable: { retry_after: [BigInt(retryAt) * 1_000_000n], reason: [] },
     });
     build(service);
     await vi.advanceTimersByTimeAsync(0);

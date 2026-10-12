@@ -8,23 +8,25 @@ import type { Principal } from '@icp-sdk/core/principal';
  * - `checking`: Internet Identity has not answered yet.
  * - `available`: the domain resolves to a usable SSO configuration. `name` is
  *   the label the organization publishes, for a "Continue with Acme" button.
- * - `invalid`: the value is not a domain, so no check is
- *   made and a retry cannot help. The user has to change what they typed.
+ * - `invalid`: the value is not a domain, so no check is made and a retry
+ *   cannot help. The user has to change what they typed. `reason` names every
+ *   problem with it, to show as is.
  * - `unavailable`: the domain publishes no usable configuration, or fetching
  *   it is failing. While `retryAfter` is in the future Internet Identity will
  *   not fetch again, so a retry before then gets the same answer; without it,
- *   a retry cannot help.
+ *   a retry cannot help. `reason` is Internet Identity's explanation, when it
+ *   gives one, to show as is.
  */
 export type SsoStatus =
   | { state: 'checking' }
   | { state: 'available'; name?: string }
-  | { state: 'invalid' }
-  | { state: 'unavailable'; retryAfter?: Date };
+  | { state: 'invalid'; reason: string }
+  | { state: 'unavailable'; retryAfter?: Date; reason?: string };
 
 type CandidSsoDomainStatus =
   | { Available: { name: [] | [string] } }
   | { Pending: null }
-  | { Unavailable: { retry_after: [] | [bigint] } };
+  | { Unavailable: { retry_after: [] | [bigint]; reason: [] | [string] } };
 
 /** The two Internet Identity methods an SSO domain check calls. */
 export interface SsoDomainService {
@@ -41,7 +43,7 @@ const idlFactory: IDL.InterfaceFactory = ({ IDL }) => {
   const Status = IDL.Variant({
     Available: IDL.Record({ name: IDL.Opt(IDL.Text) }),
     Pending: IDL.Null,
-    Unavailable: IDL.Record({ retry_after: IDL.Opt(Timestamp) }),
+    Unavailable: IDL.Record({ retry_after: IDL.Opt(Timestamp), reason: IDL.Opt(IDL.Text) }),
   });
   return IDL.Service({
     app_sso_domain_check: IDL.Func([IDL.Text], [], []),
@@ -79,7 +81,6 @@ export const SSO_POLL_MAX_MS = 2_000;
 export const SSO_RECHECK_AFTER_MS = 120_000;
 
 const CHECKING: SsoStatus = Object.freeze({ state: 'checking' });
-const INVALID: SsoStatus = Object.freeze({ state: 'invalid' });
 
 const NANOS_PER_MILLI = 1_000_000n;
 
@@ -90,21 +91,34 @@ function fromCandid(status: CandidSsoDomainStatus): SsoStatus | undefined {
   }
   if ('Unavailable' in status) {
     const retryAfterNs = status.Unavailable.retry_after[0];
-    return retryAfterNs === undefined
-      ? { state: 'unavailable' }
-      : { state: 'unavailable', retryAfter: new Date(Number(retryAfterNs / NANOS_PER_MILLI)) };
+    const reason = status.Unavailable.reason[0];
+    return {
+      state: 'unavailable',
+      ...(retryAfterNs !== undefined && {
+        retryAfter: new Date(Number(retryAfterNs / NANOS_PER_MILLI)),
+      }),
+      ...(reason !== undefined && { reason }),
+    };
   }
   // Pending: the fetch is still running, which is what `checking` already says.
   return undefined;
 }
 
 function sameStatus(a: SsoStatus, b: SsoStatus): boolean {
-  if (a.state !== b.state) return false;
-  if (a.state === 'available' && b.state === 'available') return a.name === b.name;
-  if (a.state === 'unavailable' && b.state === 'unavailable') {
-    return a.retryAfter?.getTime() === b.retryAfter?.getTime();
+  switch (a.state) {
+    case 'checking':
+      return b.state === 'checking';
+    case 'available':
+      return b.state === 'available' && a.name === b.name;
+    case 'invalid':
+      return b.state === 'invalid' && a.reason === b.reason;
+    case 'unavailable':
+      return (
+        b.state === 'unavailable' &&
+        a.retryAfter?.getTime() === b.retryAfter?.getTime() &&
+        a.reason === b.reason
+      );
   }
-  return true;
 }
 
 /**
@@ -129,21 +143,24 @@ export class SsoStatusChecker {
   #disposed = false;
 
   /**
-   * @param domain - The normalized domain, or `undefined` for a value that is
-   *   not one, which is `invalid` from the start and never checked.
+   * @param domain - The normalized domain, or, for a value that is not one, why
+   *   not: `invalid` from the start and never checked.
    * @param createService - Builds the service on the first call.
    * @param onChange - Called after the status changes.
    */
   constructor(
-    domain: string | undefined,
+    domain: string | { invalid: string },
     createService: () => Promise<SsoDomainService>,
     onChange: () => void,
   ) {
-    this.#domain = domain;
+    this.#domain = typeof domain === 'string' ? domain : undefined;
     this.#createService = createService;
     this.#onChange = onChange;
-    this.#status = domain === undefined ? INVALID : CHECKING;
-    if (domain !== undefined) this.#start(0);
+    this.#status =
+      typeof domain === 'string'
+        ? CHECKING
+        : Object.freeze({ state: 'invalid', reason: domain.invalid });
+    if (typeof domain === 'string') this.#start(0);
   }
 
   /** The current answer. The same object until it changes. */
