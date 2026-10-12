@@ -1094,9 +1094,7 @@ export class AuthClient {
         params: { keys: params.keys, nonce: value },
       })),
     );
-    if (!this.#urlTransport) {
-      this.#takeChannelLock();
-    }
+    this.#takeChannelLock();
     const response = await responsePromise;
 
     if ('error' in response) {
