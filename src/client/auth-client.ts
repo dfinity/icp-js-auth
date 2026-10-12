@@ -741,19 +741,14 @@ export class AuthClient {
   }
 
   /**
-   * Opens the signer channel and takes the lock that makes this the only
-   * interaction on it.
+   * Takes the lock that makes this the only interaction on the signer channel.
    *
-   * One method because the order is the whole point. A popup may only be opened
-   * from the task the click started, so nothing may be asked of the browser
-   * before `openChannel` — two lock requests in front of it were enough for
-   * Chromium to refuse the window — and the lock has to be taken as soon as it
-   * is open. Two callers doing that by hand is one place too many for the order
-   * to come out backwards.
+   * Called right after a request is handed to the signer, which opens the
+   * channel within that call: a popup may only be opened from the task the
+   * click started, and lock requests in front of it were enough for Chromium to
+   * refuse the window, so the lock is asked for once the window exists.
    */
-  async #openSignerChannel(): Promise<void> {
-    await this.#signer.openChannel();
-
+  #takeChannelLock(): void {
     if (this.#channelLock === undefined) {
       const lock = stealLock(CHANNEL_LOCK);
       // Whoever took the channel has already renavigated the window this one was
@@ -851,7 +846,8 @@ export class AuthClient {
     void sessionKeyPromise.catch(() => undefined);
 
     // Opens the signer window within the call, which the browser allows only in
-    // the tick the click started.
+    // the tick the click started, so nothing before it may ask the browser for
+    // anything.
     const sessionChainPromise = requestSessionDelegation(
       this.#signer,
       sessionKeyPromise.then(({ key }) => ({
@@ -867,9 +863,7 @@ export class AuthClient {
     );
     void sessionChainPromise.catch(() => undefined);
 
-    // Must stay the first await: the window is open by now, and the lock below
-    // may only be asked for once it is.
-    await this.#openSignerChannel();
+    this.#takeChannelLock();
 
     // The other lock a ceremony needs, taken once the window is open for the
     // same reason. Stolen rather than queued for, so the newer intent wins and
@@ -1101,7 +1095,7 @@ export class AuthClient {
     );
     void responsePromise.catch(() => undefined);
     if (!this.#urlTransport) {
-      await this.#openSignerChannel();
+      this.#takeChannelLock();
     }
     const response = await responsePromise;
 
