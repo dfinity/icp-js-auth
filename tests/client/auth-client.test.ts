@@ -1375,23 +1375,31 @@ describe('AuthClient signIn', () => {
   });
 
   // A popup may only be opened from the task the click started, so `signIn` must
-  // ask the browser for nothing before `openChannel` — two lock requests in
-  // front of it were enough for Chromium to refuse the window, and the ceremony
-  // then failed with a message about the channel having been taken.
+  // ask the browser for nothing before the window is opened — two lock requests
+  // in front of it were enough for Chromium to refuse the window, and the
+  // ceremony then failed with a message about the channel having been taken.
   it('asks for no lock before the signer window is open', async () => {
-    const request = vi.fn(async (_name: string, _options: unknown, run: () => unknown) => run());
+    const opened = vi.spyOn(FakeTransport.prototype, 'establishChannel');
+    const openedFirst: boolean[] = [];
+    const request = vi.fn(async (_name: string, _options: unknown, run: () => unknown) => {
+      openedFirst.push(opened.mock.calls.length > 0);
+      return run();
+    });
     vi.stubGlobal('navigator', { locks: { request } });
     const client = new AuthClient({
       credentialStorage: new MemoryCredentialStorage(),
     });
 
-    // Not awaited: this is what runs in the click's own task, and nothing in it
-    // may reach for a lock.
+    // Not awaited: this is what runs in the click's own task. The window is
+    // opened in it, and every lock is asked for after that.
     const signingIn = client.signIn();
-    expect(request).not.toHaveBeenCalled();
+    expect(opened).toHaveBeenCalledOnce();
 
     handleSignIn(FakeTransport.last());
     await signingIn;
+    opened.mockRestore();
+
+    expect(openedFirst).not.toContain(false);
 
     // Taken once the ceremony was under way, so the exclusivity is not given up
     // for the sake of the ordering.
@@ -2446,7 +2454,7 @@ describe('AuthClient signIn + requestAttributes', () => {
     expect(Array.from(attributes.data)).toEqual(Array.from(new TextEncoder().encode('hello')));
   });
 
-  // Both reach `#openSignerChannel`, and a second lock request for the same name
+  // Both reach `#takeChannelLock`, and a second lock request for the same name
   // would steal the first — telling whichever ceremony lost that it had been
   // superseded, when all that happened was the app asking for two things at
   // once. One lock covers the pair, and the count is what keeps it held until

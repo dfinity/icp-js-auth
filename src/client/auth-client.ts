@@ -815,19 +815,14 @@ export class AuthClient {
   }
 
   /**
-   * Opens the signer channel and takes the lock that makes this the only
-   * interaction on it.
+   * Takes the lock that makes this the only interaction on the signer channel.
    *
-   * One method because the order is the whole point. A popup may only be opened
-   * from the task the click started, so nothing may be asked of the browser
-   * before `openChannel` — two lock requests in front of it were enough for
-   * Chromium to refuse the window — and the lock has to be taken as soon as it
-   * is open. Two callers doing that by hand is one place too many for the order
-   * to come out backwards.
+   * Called right after a request is handed to the signer, which opens the
+   * channel within that call: a popup may only be opened from the task the
+   * click started, and lock requests in front of it were enough for Chromium to
+   * refuse the window, so the lock is asked for once the window exists.
    */
-  async #openSignerChannel(): Promise<void> {
-    await this.#signer.openChannel();
-
+  #takeChannelLock(): void {
     if (this.#channelLock === undefined) {
       const lock = stealLock(CHANNEL_LOCK);
       // Whoever took the channel has already renavigated the window this one was
@@ -906,14 +901,11 @@ export class AuthClient {
     const returnTo =
       raw === undefined ? undefined : this.memoize(() => sameOriginTarget(raw)?.href ?? null);
 
-    // Start session-key acquisition BEFORE opening the channel, awaiting it only
-    // after. In the redirect flow the acquisition's first `transport.memoize`
-    // runs synchronously when invoked, so its in-flight bump lands in the same
-    // tick `signIn` is called — holding the transport's batch flush from the
-    // very start of the flow rather than only after the `openChannel` await.
-    // Under `Promise.all([signIn, requestAttributes])` this is what keeps a
-    // faster concurrent request from flushing before this flow's delegation
-    // request is buffered.
+    // Session-key acquisition starts on the call, and the delegation request
+    // that needs it is handed to the signer on the call too, as a promise of the
+    // request. The signer places it in call order there, so in the redirect
+    // flow it replays into the slot it was sent from whatever the key costs on
+    // either load, and a `requestAttributes` issued alongside keeps its own.
     const sessionKeyPromise: Promise<{
       key: SignIdentity | PartialIdentity;
       pending?: boolean;
@@ -927,9 +919,25 @@ export class AuthClient {
     // rejection and propagates it when reached.
     void sessionKeyPromise.catch(() => undefined);
 
-    // Must stay the first await: it opens the signer window, which the browser
-    // allows only in the tick the click started.
-    await this.#openSignerChannel();
+    // Opens the signer window within the call, which the browser allows only in
+    // the tick the click started, so nothing before it may ask the browser for
+    // anything.
+    const sessionChainPromise = requestSessionDelegation(
+      this.#signer,
+      sessionKeyPromise.then(({ key }) => ({
+        sessionPublicKey: key.getPublicKey().toDer(),
+        // Both bounds are sent only where the caller asked, so the provider's
+        // own defaults apply otherwise rather than numbers this library
+        // invented. How long a sign-in lasts is the provider's policy, narrowed
+        // by what the user chooses at consent and by an organization's cap.
+        maxTimeToLive: options?.maxTimeToLive,
+        maxTimeToIdle: options?.maxTimeToIdle,
+        derivationOrigin: this.#options.derivationOrigin?.toString(),
+      })),
+    );
+    void sessionChainPromise.catch(() => undefined);
+
+    this.#takeChannelLock();
 
     // The other lock a ceremony needs, taken once the window is open for the
     // same reason. Stolen rather than queued for, so the newer intent wins and
@@ -967,16 +975,7 @@ export class AuthClient {
         throw new Error('A session needs a key that can sign');
       }
 
-      const sessionChain = await requestSessionDelegation(this.#signer, {
-        sessionPublicKey: key.getPublicKey().toDer(),
-        // Both bounds are sent only where the caller asked, so the provider's
-        // own defaults apply otherwise rather than numbers this library
-        // invented. How long a sign-in lasts is the provider's policy, narrowed
-        // by what the user chooses at consent and by an organization's cap.
-        maxTimeToLive: options?.maxTimeToLive,
-        maxTimeToIdle: options?.maxTimeToIdle,
-        derivationOrigin: this.#options.derivationOrigin?.toString(),
-      });
+      const sessionChain = await sessionChainPromise;
 
       // The chain comes from the signer over a transport shared with others, so
       // the key it delegates to is checked here rather than assumed. A chain for
@@ -1076,21 +1075,10 @@ export class AuthClient {
       );
     }
 
-    // Acquire the key inside a `memoize` producer so the transport holds its
-    // batch flush across the (async) key read/create + storage write. The
-    // transport coalesces concurrently issued requests into one redirect by
-    // flushing on a macrotask once no memoize producer is in flight; without
-    // this hold, a faster concurrent request (e.g. the nonce path of
-    // `requestAttributes`) buffers first and trips that flush before this flow's
-    // delegation request — issued only once the key is ready — is buffered,
-    // splitting what should be one redirect into two.
-    //
-    // The key is captured in a closure, not read back after the producer: on the
-    // FIRST load the producer sets `acquired`, so the delegation request that
-    // follows is issued with no intervening storage read — a read there would
-    // re-open the very flush gap this closes. The producer is skipped on the
-    // replay load (its result is journaled), where the key is instead read from
-    // the pending slot.
+    // Acquired inside a `memoize` producer, so the first load journals which key
+    // this ceremony started with. The key is captured in a closure on the first
+    // load, where the producer runs; on the replay load the producer is skipped
+    // (its result is journaled) and the key is read from the pending slot.
     //
     // What is journaled is the key's *public* half: not a secret, it survives the
     // redirect as text, and on the return load it says whether the pending slot
@@ -1131,9 +1119,10 @@ export class AuthClient {
    *
    * In 'window' mode the callback lets the identity provider window open while the
    * nonce is still resolving, avoiding a perceived delay before the user sees
-   * the prompt; auto-close of the signer transport channel is temporarily
-   * disabled while awaiting so the window cannot be closed out from under the
-   * pending flow.
+   * the prompt; the signer keeps the channel open while the request waits for
+   * its nonce. In both modes the request takes its place with the signer when
+   * this method is called, so it can be issued alongside `signIn` in either
+   * order.
    *
    * @param params - Request parameters.
    * @param params.keys - Attribute keys to request (e.g. `['email', 'name']`).
@@ -1163,16 +1152,24 @@ export class AuthClient {
   }): Promise<SignedAttributes> {
     // In redirect mode the nonce is journaled (base64, since the journal is
     // JSON) so the replay on the return load signs against the same bytes.
-    const nonceBytes = this.#urlTransport
-      ? fromBase64(await this.#urlTransport.memoize(async () => toBase64(await params.nonce())))
-      : await this.#resolveNonce(params.nonce);
+    const nonce: Promise<string> = this.#urlTransport
+      ? this.#urlTransport.memoize(async () => toBase64(await params.nonce()))
+      : params.nonce().then(toBase64);
 
-    const response = await this.#signer.sendRequest({
-      jsonrpc: '2.0',
-      id: globalThis.crypto.randomUUID(),
-      method: 'ii-icrc3-attributes',
-      params: { keys: params.keys, nonce: toBase64(nonceBytes) },
-    });
+    // Handed to the signer on the call, as a promise of the request: the signer
+    // window opens within the call while the nonce is still on its way, and the
+    // request keeps its place in call order however long the nonce takes on
+    // either load of a redirect flow.
+    const responsePromise = this.#signer.sendRequest(
+      nonce.then((value) => ({
+        jsonrpc: '2.0' as const,
+        id: globalThis.crypto.randomUUID(),
+        method: 'ii-icrc3-attributes',
+        params: { keys: params.keys, nonce: value },
+      })),
+    );
+    this.#takeChannelLock();
+    const response = await responsePromise;
 
     if ('error' in response) {
       throw new Error(response.error.message);
@@ -1306,24 +1303,6 @@ export class AuthClient {
       if (target !== undefined) {
         window.location.assign(target.href);
       }
-    }
-  }
-
-  // Popup-mode nonce resolution. Start the fetch, then open the transport
-  // channel so the identity provider window is visible while we wait, and
-  // suspend auto-close so it can't fire mid-await (e.g. due to a close
-  // scheduled by a prior request on the same signer). The original auto-close
-  // setting is restored before sendRequest, so the next response resumes
-  // normal close behaviour.
-  async #resolveNonce(nonce: () => Promise<Uint8Array>): Promise<Uint8Array> {
-    const value = nonce();
-    await this.#openSignerChannel();
-    const previousAutoClose = this.#signer.autoCloseTransportChannel;
-    this.#signer.autoCloseTransportChannel = false;
-    try {
-      return await value;
-    } finally {
-      this.#signer.autoCloseTransportChannel = previousAutoClose;
     }
   }
 
