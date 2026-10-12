@@ -1,3 +1,21 @@
+## Unreleased
+
+### BREAKING CHANGE
+
+- `isValidSsoDomain` is removed; read `getSsoStatus()`
+instead. A malformed `ssoDomain` no longer throws from the constructor;
+the client reports `invalid`. A port is accepted only on a loopback host
+(`localhost`, `127.0.0.1`, or a name under `.localhost`), for a local
+mock provider; `acme.com:8443` now reports `invalid`, as do names that
+break the DNS rules above. The check needs an Internet Identity with
+`app_sso_domain_check` / `app_sso_domain_status`
+(dfinity/internet-identity#4421). The v11 upgrade guide covers the
+migration.
+
+### Feat
+
+- check an SSO domain with Internet Identity, as client state (#203)
+
 ## 10.0.1 (2026-09-23)
 
 ### Fix
