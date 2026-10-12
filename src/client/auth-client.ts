@@ -1094,7 +1094,6 @@ export class AuthClient {
         params: { keys: params.keys, nonce: value },
       })),
     );
-    void responsePromise.catch(() => undefined);
     if (!this.#urlTransport) {
       this.#takeChannelLock();
     }
