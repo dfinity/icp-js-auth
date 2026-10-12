@@ -1045,9 +1045,10 @@ export class AuthClient {
    *
    * In 'window' mode the callback lets the identity provider window open while the
    * nonce is still resolving, avoiding a perceived delay before the user sees
-   * the prompt; auto-close of the signer transport channel is temporarily
-   * disabled while awaiting so the window cannot be closed out from under the
-   * pending flow.
+   * the prompt; the signer keeps the channel open while the request waits for
+   * its nonce. In both modes the request takes its place with the signer when
+   * this method is called, so it can be issued alongside `signIn` in either
+   * order.
    *
    * @param params - Request parameters.
    * @param params.keys - Attribute keys to request (e.g. `['email', 'name']`).
