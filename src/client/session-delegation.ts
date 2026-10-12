@@ -68,6 +68,31 @@ const looksLikeResult = (value: unknown): value is SessionDelegationResult => {
   );
 };
 
+interface SessionDelegationParams {
+  sessionPublicKey: DerEncodedPublicKey;
+  maxTimeToLive?: bigint;
+  maxTimeToIdle?: bigint;
+  derivationOrigin?: string;
+}
+
+const sessionDelegationRequest = (params: SessionDelegationParams) => ({
+  jsonrpc: '2.0' as const,
+  id: globalThis.crypto.randomUUID(),
+  method: SESSION_DELEGATION_METHOD,
+  params: {
+    sessionPublicKey: toBase64(params.sessionPublicKey),
+    ...(params.maxTimeToLive === undefined
+      ? {}
+      : { maxTimeToLive: params.maxTimeToLive.toString() }),
+    ...(params.maxTimeToIdle === undefined
+      ? {}
+      : { maxTimeToIdle: params.maxTimeToIdle.toString() }),
+    ...(params.derivationOrigin === undefined
+      ? {}
+      : { icrc95DerivationOrigin: params.derivationOrigin }),
+  },
+});
+
 /**
  * Asks the identity provider for a session, and returns the chain it signed.
  *
@@ -77,30 +102,15 @@ const looksLikeResult = (value: unknown): value is SessionDelegationResult => {
  */
 export async function requestSessionDelegation(
   signer: Signer,
-  params: {
-    sessionPublicKey: DerEncodedPublicKey;
-    maxTimeToLive?: bigint;
-    maxTimeToIdle?: bigint;
-    derivationOrigin?: string;
-  },
+  params: SessionDelegationParams | Promise<SessionDelegationParams>,
 ): Promise<DelegationChain> {
-  const response = await signer.sendRequest({
-    jsonrpc: '2.0',
-    id: globalThis.crypto.randomUUID(),
-    method: SESSION_DELEGATION_METHOD,
-    params: {
-      sessionPublicKey: toBase64(params.sessionPublicKey),
-      ...(params.maxTimeToLive === undefined
-        ? {}
-        : { maxTimeToLive: params.maxTimeToLive.toString() }),
-      ...(params.maxTimeToIdle === undefined
-        ? {}
-        : { maxTimeToIdle: params.maxTimeToIdle.toString() }),
-      ...(params.derivationOrigin === undefined
-        ? {}
-        : { icrc95DerivationOrigin: params.derivationOrigin }),
-    },
-  });
+  // Sent on the call, before any await, so the request takes its place in call
+  // order with the signer even while its params are still on their way.
+  const response = await signer.sendRequest(
+    params instanceof Promise
+      ? params.then(sessionDelegationRequest)
+      : sessionDelegationRequest(params),
+  );
 
   if ('error' in response) {
     // The code carries the only thing a caller can act on, and dropping it left
