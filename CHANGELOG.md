@@ -1,3 +1,9 @@
+## 10.0.2 (2026-10-12)
+
+### Fix
+
+- send signIn and requestAttributes requests to the signer on the call (#206)
+
 ## 10.0.1 (2026-09-23)
 
 ### Fix
