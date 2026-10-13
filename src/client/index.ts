@@ -14,6 +14,7 @@ export { watchActivity, watchForeground } from './foreground-refresh.js';
 export { IdbCredentialStorage } from './idb-credential-storage.js';
 export { LocalCredentialStorage } from './local-credential-storage.js';
 export { MemoryCredentialStorage } from './memory-credential-storage.js';
+export { requestNotificationConsent } from './notification-consent.js';
 export { InteractionRequiredError, requestSessionDelegation } from './session-delegation.js';
 export { SessionIdentity, type SessionIdentityOptions } from './session-identity.js';
 export { SessionMinter, type SessionMinterOptions } from './session-minter.js';
