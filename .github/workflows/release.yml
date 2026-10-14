@@ -1,17 +1,14 @@
 name: release
 
 on:
-  push:
-    tags:
-      - '[0-9]+.[0-9]+.[0-9]+'
-      - '[0-9]+.[0-9]+.[0-9]-beta.[0-9]+'
+  workflow_dispatch:
 
 jobs:
   release:
     name: release
     runs-on: ubuntu-latest
     outputs:
-      is_beta: ${{ steps.is_beta.outputs.is_beta_tag }}
+      is_beta: ${{ steps.ver.outputs.is_beta }}
       major_minor_patch_version_tag: ${{ steps.ver.outputs.major_minor_patch_version_tag }}
     environment:
       name: release
@@ -32,12 +29,10 @@ jobs:
       - name: Setup PNPM
         uses: dfinity/ci-tools/actions/setup-pnpm@a98f5d0198719ad41ded2f02fa0f5e426102f369 # main
 
-      - name: Determine if Beta Release
-        id: is_beta
-        uses: dfinity/ci-tools/actions/is-beta-tag@a98f5d0198719ad41ded2f02fa0f5e426102f369 # main
-
       - uses: dfinity/ci-tools/actions/extract-version@a98f5d0198719ad41ded2f02fa0f5e426102f369 # main
         id: extract-version
+        with:
+          file: package.json
 
       - name: Prepare version
         id: ver
@@ -45,6 +40,17 @@ jobs:
           echo "major_minor_version=v${{ steps.extract-version.outputs.major }}.${{ steps.extract-version.outputs.minor }}" >> $GITHUB_OUTPUT
           echo "major_minor_patch_version=v${{ steps.extract-version.outputs.major }}.${{ steps.extract-version.outputs.minor }}.${{ steps.extract-version.outputs.patch }}" >> $GITHUB_OUTPUT
           echo "major_minor_patch_version_tag=${{ steps.extract-version.outputs.major }}.${{ steps.extract-version.outputs.minor }}.${{ steps.extract-version.outputs.patch }}" >> $GITHUB_OUTPUT
+          echo "version=${{ steps.extract-version.outputs.major }}.${{ steps.extract-version.outputs.minor }}.${{ steps.extract-version.outputs.patch }}${{ steps.extract-version.outputs.prerelease }}" >> $GITHUB_OUTPUT
+          echo "is_beta=${{ steps.extract-version.outputs.prerelease != '' }}" >> $GITHUB_OUTPUT
+
+      - name: Check the version is not released yet
+        env:
+          VERSION: ${{ steps.ver.outputs.version }}
+        run: |
+          if git ls-remote --exit-code --tags origin "refs/tags/$VERSION" > /dev/null; then
+            echo "::error::Tag $VERSION already exists"
+            exit 1
+          fi
 
       - name: Build NPM package
         run: pnpm build
@@ -57,23 +63,32 @@ jobs:
           pnpm pack
 
           release_cmd="pnpm publish --verbose --access public --no-git-checks"
-          if [ "${{ steps.is_beta.outputs.is_beta_tag }}" = 'true' ]; then
+          if [ "${{ steps.ver.outputs.is_beta }}" = 'true' ]; then
             release_cmd="$release_cmd --tag beta"
           fi
           $release_cmd
 
+      - name: Tag the release
+        env:
+          VERSION: ${{ steps.ver.outputs.version }}
+        run: |
+          git tag "$VERSION" "$GITHUB_SHA"
+          git push origin "refs/tags/$VERSION"
+
       - name: Generate release notes
         uses: dfinity/ci-tools/actions/generate-release-notes@a98f5d0198719ad41ded2f02fa0f5e426102f369 # main
+        with:
+          version: ${{ steps.ver.outputs.version }}
 
       - name: Create Github release
         uses: ncipollo/release-action@b7eabc95ff50cbeeedec83973935c8f306dfcd0b # v1.20.0
         with:
-          artifacts: 'icp-sdk-auth-${{ github.ref_name }}.tgz'
+          artifacts: 'icp-sdk-auth-${{ steps.ver.outputs.version }}.tgz'
           bodyFile: 'RELEASE_NOTES.md'
-          tag: '${{ github.ref_name }}'
-          commit: 'main'
-          prerelease: ${{ steps.is_beta.outputs.is_beta_tag == 'true' }}
-          makeLatest: ${{ steps.is_beta.outputs.is_beta_tag == 'false' }}
+          tag: '${{ steps.ver.outputs.version }}'
+          commit: '${{ github.sha }}'
+          prerelease: ${{ steps.ver.outputs.is_beta == 'true' }}
+          makeLatest: ${{ steps.ver.outputs.is_beta == 'false' }}
 
   publish-docs:
     needs: release
