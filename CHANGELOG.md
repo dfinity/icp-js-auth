@@ -1,4 +1,4 @@
-## Unreleased
+## 11.0.0 (2026-10-19)
 
 ### BREAKING CHANGE
 
