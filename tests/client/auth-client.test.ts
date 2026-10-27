@@ -244,6 +244,18 @@ function handleRequestAttributes(
   });
 }
 
+/** Registers an `ii_notification_consent` handler that returns the given body. */
+function handleNotificationConsent(
+  transport: FakeTransport,
+  body: JsonRpcBody = { result: { granted: true } },
+): void {
+  transport.onRequest((req) => {
+    if (req.method !== 'ii_notification_consent') return;
+    if (req.id === undefined || req.id === null) return;
+    return { jsonrpc: '2.0', id: req.id, ...body };
+  });
+}
+
 beforeEach(() => {
   vi.unstubAllGlobals();
   vi.useRealTimers();
@@ -2432,6 +2444,47 @@ describe('AuthClient requestAttributes', () => {
     await expect(
       client.requestAttributes({ keys: ['email'], nonce: () => Promise.reject(new Error('boom')) }),
     ).rejects.toThrow('boom');
+  });
+});
+
+describe('AuthClient notification consent', () => {
+  it('should ask the provider and report what the user allowed', async () => {
+    const client = track(new AuthClient());
+    const transport = FakeTransport.last();
+    handleNotificationConsent(transport);
+
+    await expect(client.requestNotificationConsent()).resolves.toEqual({ granted: true });
+    expect(transport.requests[0].method).toBe('ii_notification_consent');
+    expect(transport.requests[0].params).toEqual({});
+  });
+
+  it('should ask under the derivation origin it signs in under', async () => {
+    const client = track(new AuthClient({ derivationOrigin: 'https://app.example.com' }));
+    const transport = FakeTransport.last();
+    handleNotificationConsent(transport);
+
+    await client.requestNotificationConsent();
+
+    expect(transport.requests[0].params?.icrc95DerivationOrigin).toBe('https://app.example.com');
+  });
+
+  it('should report a refusal rather than throwing', async () => {
+    const client = track(new AuthClient());
+    handleNotificationConsent(FakeTransport.last(), { result: { granted: false } });
+
+    await expect(client.requestNotificationConsent()).resolves.toEqual({ granted: false });
+  });
+
+  it('should refuse to read a status without a session to read it for', async () => {
+    const client = track(new AuthClient());
+
+    await expect(client.getNotificationConsentStatus()).rejects.toThrow(SessionGoneError);
+  });
+
+  it('should refuse to withdraw without a session to withdraw for', async () => {
+    const client = track(new AuthClient());
+
+    await expect(client.revokeNotificationConsent()).rejects.toThrow(SessionGoneError);
   });
 });
 
