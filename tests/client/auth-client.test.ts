@@ -2486,6 +2486,27 @@ describe('AuthClient notification consent', () => {
 
     await expect(client.revokeNotificationConsent()).rejects.toThrow(SessionGoneError);
   });
+
+  it('should refuse a session that ran out while the page stayed open', async () => {
+    vi.setSystemTime(new Date('2020-01-01T00:00:00.000Z'));
+
+    const key = Ed25519KeyIdentity.generate();
+    const chain = await createTestDelegation(key, new Date('2020-01-01T01:00:00.000Z'));
+    const client = track(
+      new AuthClient({
+        credentialStorage: spyStorage({ identity: key, chain }),
+        stateStorage: stateFor(chain),
+      }),
+    );
+    // Held at construction, so what follows is a session going stale rather than
+    // one that was never there.
+    expect(await client.getIdentity()).toBeDefined();
+
+    vi.setSystemTime(new Date('2020-01-01T02:00:00.000Z'));
+
+    await expect(client.getNotificationConsentStatus()).rejects.toThrow(SessionGoneError);
+    await expect(client.revokeNotificationConsent()).rejects.toThrow(SessionGoneError);
+  });
 });
 
 describe('AuthClient signIn + requestAttributes', () => {

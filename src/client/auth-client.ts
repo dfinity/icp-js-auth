@@ -1276,8 +1276,13 @@ export class AuthClient {
     // credential these calls are made with where this can read it.
     await this.#init();
 
+    // The chain is checked and not just its presence: `#init()` resolves once, so a
+    // session that ran out while the page stayed open is still in the slot, and a
+    // call made with it would fail as a rejected signature rather than as what it is.
     const session = await this.#credentialStorage.get(this.#slots.session);
-    if (session === null || session.chain === undefined) throw new SessionGoneError();
+    if (session === null || session.chain === undefined || !isDelegationValid(session.chain)) {
+      throw new SessionGoneError();
+    }
 
     return NotificationConsent.create({
       sessionKey: session.identity,
