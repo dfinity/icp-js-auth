@@ -13,12 +13,23 @@ import {
 import { Principal } from '@icp-sdk/core/principal';
 import { Signer } from '@icp-sdk/signer';
 import { PostMessageTransport, UrlTransport } from '@icp-sdk/signer/web';
-import { AccountMismatchError, chainAuthorisesKey } from './app-delegation-source.js';
+import {
+  AccountMismatchError,
+  chainAuthorisesKey,
+  SessionGoneError,
+} from './app-delegation-source.js';
 import { type HeldLock, stealLock, stealMintLock } from './app-lock.js';
 import { fromBase64, toBase64 } from './base64.js';
 import type { Credential, CredentialStorage } from './credential-storage.js';
 import { watchActivity, watchForeground } from './foreground-refresh.js';
 import { IdbCredentialStorage } from './idb-credential-storage.js';
+import {
+  NotificationConsent,
+  type NotificationConsentStatus,
+  // Aliased: the method below is this library's name for the operation, and this
+  // is the request it sends.
+  requestNotificationConsent as sendConsentRequest,
+} from './notification-consent.js';
 import { requestSessionDelegation } from './session-delegation.js';
 import { SessionIdentity } from './session-identity.js';
 import { SessionMinter } from './session-minter.js';
@@ -1188,6 +1199,97 @@ export class AuthClient {
     } catch (cause) {
       throw new Error('Invalid response: data or signature is not valid base64', { cause });
     }
+  }
+
+  /**
+   * Asks the user whether this application may notify them.
+   *
+   * Opens the identity provider the way a sign-in does, because consent is the
+   * user's answer and nothing else can stand in for it. Where they agree, the
+   * browser they answered on is registered for delivery.
+   *
+   * A refusal is an answer rather than a failure: it returns `granted: false`,
+   * and an application renders that. Calling it again where consent is already
+   * held returns what is recorded without asking a second time.
+   *
+   * @returns Whether this application may notify the user.
+   * @throws {InteractionRequiredError} Where the client was built with
+   *   `prompt: 'none'`, which no consent ceremony can be run under.
+   * @throws {NotificationsUnsupportedError} Where this identity provider does
+   *   not send notifications at all.
+   * @example
+   * const { granted } = await authClient.requestNotificationConsent();
+   */
+  async requestNotificationConsent(): Promise<NotificationConsentStatus> {
+    // The channel lock and not the sign-in lock, for the reason `requestAttributes`
+    // takes it: this opens the signer channel, which an origin has one of, and
+    // writes nothing anyone else reads.
+    this.#beginInteraction();
+    try {
+      const response = sendConsentRequest(this.#signer, this.#options.derivationOrigin?.toString());
+      this.#takeChannelLock();
+      return await response;
+    } finally {
+      this.#endInteraction();
+    }
+  }
+
+  /**
+   * Withdraws this application's consent to notify the user.
+   *
+   * A canister call made as the session, so it needs no ceremony and opens
+   * nothing: the user already decided, and this records that they changed their
+   * mind. Idempotent — consent that is already withdrawn is not an error.
+   *
+   * @throws {SessionGoneError} Where this origin holds no live session.
+   */
+  async revokeNotificationConsent(): Promise<void> {
+    await (await this.#consent()).revoke();
+  }
+
+  /**
+   * Whether this application may notify the signed-in user.
+   *
+   * What a notifications control is painted from. A query, so the answer is
+   * uncertified, and it reports the consent alone: whether a notification would
+   * reach the user also depends on the device they hold, which this does not
+   * speak for.
+   *
+   * @returns Whether this application may notify the user.
+   * @throws {SessionGoneError} Where this origin holds no live session.
+   * @example
+   * const { granted } = await authClient.getNotificationConsentStatus();
+   */
+  async getNotificationConsentStatus(): Promise<NotificationConsentStatus> {
+    return (await this.#consent()).status();
+  }
+
+  /**
+   * Builds the consent calls from the session this origin holds.
+   *
+   * Read at the call rather than kept, so a session replaced since the last call
+   * is not the one spoken for, and a sign-out between them is reported as what it
+   * is instead of answered from a stale actor.
+   */
+  async #consent(): Promise<NotificationConsent> {
+    // Wait for the constructor's session restore, which is what puts the
+    // credential these calls are made with where this can read it.
+    await this.#init();
+
+    // The chain is checked and not just its presence: `#init()` resolves once, so a
+    // session that ran out while the page stayed open is still in the slot, and a
+    // call made with it would fail as a rejected signature rather than as what it is.
+    const session = await this.#credentialStorage.get(this.#slots.session);
+    if (session === null || session.chain === undefined || !isDelegationValid(session.chain)) {
+      throw new SessionGoneError();
+    }
+
+    return NotificationConsent.create({
+      sessionKey: session.identity,
+      sessionChain: session.chain,
+      canisterId: this.#canisterId,
+      agentOptions: this.#options.agentOptions,
+    });
   }
 
   /**
