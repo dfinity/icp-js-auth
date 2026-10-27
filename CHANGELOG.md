@@ -1,3 +1,9 @@
+## Unreleased
+
+### Feat
+
+- ask for, read and withdraw notification consent (#211)
+
 ## 11.0.0 (2026-10-19)
 
 ### BREAKING CHANGE
