@@ -6,8 +6,6 @@ import {
 } from '@icp-sdk/core/identity';
 import { Principal } from '@icp-sdk/core/principal';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { SessionGoneError } from '../../src/client/app-delegation-source.ts';
-import { stealLock } from '../../src/client/app-lock.ts';
 import {
   AuthClient,
   type AuthClientCreateOptions,
@@ -15,16 +13,21 @@ import {
   SupersededError,
   scopedKeys,
 } from '../../src/client/auth-client.ts';
-import { CookieStateStorage } from '../../src/client/cookie-state-storage.ts';
-import type { Credential, CredentialStorage } from '../../src/client/credential-storage.ts';
+import type {
+  Credential,
+  CredentialStorage,
+} from '../../src/client/credentials/credential-storage.ts';
+import { IdbCredentialStorage } from '../../src/client/credentials/idb-credential-storage.ts';
+import { MemoryCredentialStorage } from '../../src/client/credentials/memory-credential-storage.ts';
 import { IdbKeyVal } from '../../src/client/db.ts';
-import { IdbCredentialStorage } from '../../src/client/idb-credential-storage.ts';
-import { LocalStateStorage } from '../../src/client/local-state-storage.ts';
-import { MemoryCredentialStorage } from '../../src/client/memory-credential-storage.ts';
-import { MemoryStateStorage } from '../../src/client/memory-state-storage.ts';
-import { InteractionRequiredError } from '../../src/client/session-delegation.ts';
-import type { SessionIdentity } from '../../src/client/session-identity.ts';
+import { SessionGoneError } from '../../src/client/session/app-delegation-source.ts';
+import { stealLock } from '../../src/client/session/app-lock.ts';
+import { InteractionRequiredError } from '../../src/client/session/session-delegation.ts';
+import type { SessionIdentity } from '../../src/client/session/session-identity.ts';
 import { slotsFor } from '../../src/client/slots.ts';
+import { CookieStateStorage } from '../../src/client/state/cookie-state-storage.ts';
+import { LocalStateStorage } from '../../src/client/state/local-state-storage.ts';
+import { MemoryStateStorage } from '../../src/client/state/memory-state-storage.ts';
 import { FakeTransport } from './fake-transport.ts';
 
 /** The bare names, which is what a client with no namespace writes under. */
@@ -46,7 +49,7 @@ const minted = vi.hoisted(() => ({
   onMint: undefined as (() => Promise<void>) | undefined,
 }));
 
-vi.mock('../../src/client/session-minter.ts', async () => {
+vi.mock('../../src/client/session/session-minter.ts', async () => {
   const { DelegationChain: Chain, Ed25519KeyIdentity: Key } = await import(
     '@icp-sdk/core/identity'
   );
@@ -63,7 +66,9 @@ vi.mock('../../src/client/session-minter.ts', async () => {
           minted.count += 1;
           if (minted.onMint) await minted.onMint();
           if (minted.refuse) {
-            const { SessionGoneError } = await import('../../src/client/app-delegation-source.ts');
+            const { SessionGoneError } = await import(
+              '../../src/client/session/app-delegation-source.ts'
+            );
             throw new SessionGoneError();
           }
           return Chain.create(
@@ -82,7 +87,7 @@ vi.mock('../../src/client/session-minter.ts', async () => {
 });
 
 // The SSO domain check calls Internet Identity, so its service is replaced and
-// the real checker runs against it. Its timing is covered in sso-status.test.ts.
+// the real checker runs against it. Its timing is covered in sso.test.ts.
 const ssoService = vi.hoisted(() => ({
   created: [] as { canisterId?: unknown; agentOptions?: unknown }[],
   answer: { Pending: null } as
@@ -92,8 +97,8 @@ const ssoService = vi.hoisted(() => ({
   checks: [] as string[],
 }));
 
-vi.mock('../../src/client/sso-status.ts', async (importOriginal) => {
-  const actual = await importOriginal<typeof import('../../src/client/sso-status.ts')>();
+vi.mock('../../src/client/sso.ts', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../../src/client/sso.ts')>();
   return {
     ...actual,
     createSsoDomainService: async (options: { canisterId?: unknown; agentOptions?: unknown }) => {

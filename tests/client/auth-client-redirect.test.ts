@@ -8,16 +8,16 @@ import { slotsFor } from '../../src/client/slots.ts';
 const SLOTS = slotsFor();
 
 import { AuthClient } from '../../src/client/auth-client.ts';
-import type { CredentialStorage } from '../../src/client/credential-storage.ts';
-import { LocalCredentialStorage } from '../../src/client/local-credential-storage.ts';
-import { MemoryCredentialStorage } from '../../src/client/memory-credential-storage.ts';
-import { SharedMemoryCredentialStorage } from '../../src/client/shared-memory-credential-storage.ts';
+import type { CredentialStorage } from '../../src/client/credentials/credential-storage.ts';
+import { LocalCredentialStorage } from '../../src/client/credentials/local-credential-storage.ts';
+import { MemoryCredentialStorage } from '../../src/client/credentials/memory-credential-storage.ts';
+import { SharedMemoryCredentialStorage } from '../../src/client/credentials/shared-memory-credential-storage.ts';
 import { FakeUrlTransport } from './fake-url-transport.ts';
 
 const II_CANISTER = Principal.fromText('rdmx6-jaaaa-aaaaa-aaadq-cai');
 
 // Minting is a canister call; the source is replaced rather than the network.
-vi.mock('../../src/client/session-minter.ts', async () => {
+vi.mock('../../src/client/session/session-minter.ts', async () => {
   const { DelegationChain: Chain, Ed25519KeyIdentity: Key } = await import(
     '@icp-sdk/core/identity'
   );

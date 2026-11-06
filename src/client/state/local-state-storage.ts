@@ -1,5 +1,5 @@
 import { Principal } from '@icp-sdk/core/principal';
-import { IdbKeyVal } from './db.js';
+import { IdbKeyVal } from '../db.js';
 import type { SessionState, StateStorage } from './state-storage.js';
 
 /** Where tabs mirror their `localStorage` records for workers, which cannot read it. */

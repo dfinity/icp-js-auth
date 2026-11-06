@@ -3,9 +3,9 @@ import type { IDL } from '@icp-sdk/core/candid';
 import { type DelegationChain, DelegationIdentity } from '@icp-sdk/core/identity';
 import type { Principal } from '@icp-sdk/core/principal';
 import type { Signer } from '@icp-sdk/signer';
-import { SessionGoneError } from './app-delegation-source.js';
-import { InteractionRequiredError } from './session-delegation.js';
-import { assertChainReaches } from './session-minter.js';
+import { SessionGoneError } from './session/app-delegation-source.js';
+import { InteractionRequiredError } from './session/session-delegation.js';
+import { assertChainReaches } from './session/session-minter.js';
 
 /**
  * The method Internet Identity answers with the user's decision about being

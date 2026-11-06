@@ -1,8 +1,8 @@
 import { DelegationChain, Ed25519KeyIdentity } from '@icp-sdk/core/identity';
 import { beforeEach, describe, expect, it } from 'vitest';
-import { LocalCredentialStorage } from '../../src/client/local-credential-storage.ts';
-import { MemoryCredentialStorage } from '../../src/client/memory-credential-storage.ts';
-import { slotsFor } from '../../src/client/slots.ts';
+import { LocalCredentialStorage } from '../../../src/client/credentials/local-credential-storage.ts';
+import { MemoryCredentialStorage } from '../../../src/client/credentials/memory-credential-storage.ts';
+import { slotsFor } from '../../../src/client/slots.ts';
 
 /** The bare names, which is what a client with no namespace writes under. */
 const SLOTS = slotsFor();

@@ -1,8 +1,8 @@
 import { Principal } from '@icp-sdk/core/principal';
 import { describe, expect, it, vi } from 'vitest';
-import { MemoryStateStorage } from '../../src/client/memory-state-storage.ts';
-import { slotsFor } from '../../src/client/slots.ts';
-import type { SessionState } from '../../src/client/state-storage.ts';
+import { slotsFor } from '../../../src/client/slots.ts';
+import { MemoryStateStorage } from '../../../src/client/state/memory-state-storage.ts';
+import type { SessionState } from '../../../src/client/state/state-storage.ts';
 
 const STATE_KEY = slotsFor().state;
 

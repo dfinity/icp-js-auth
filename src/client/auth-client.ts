@@ -13,17 +13,10 @@ import {
 import { Principal } from '@icp-sdk/core/principal';
 import { Signer } from '@icp-sdk/signer';
 import { PostMessageTransport, UrlTransport } from '@icp-sdk/signer/web';
-import {
-  AccountMismatchError,
-  chainAuthorisesKey,
-  SessionGoneError,
-} from './app-delegation-source.js';
-import { type HeldLock, stealLock, stealMintLock } from './app-lock.js';
 import { fromBase64, toBase64 } from './base64.js';
-import type { Credential, CredentialStorage } from './credential-storage.js';
+import type { Credential, CredentialStorage } from './credentials/credential-storage.js';
+import { IdbCredentialStorage } from './credentials/idb-credential-storage.js';
 import { watchActivity, watchForeground } from './foreground-refresh.js';
-import { IdbCredentialStorage } from './idb-credential-storage.js';
-import { LocalStateStorage, readOnlyError } from './local-state-storage.js';
 import {
   NotificationConsent,
   type NotificationConsentStatus,
@@ -31,13 +24,24 @@ import {
   // is the request it sends.
   requestNotificationConsent as sendConsentRequest,
 } from './notification-consent.js';
-import { requestSessionDelegation } from './session-delegation.js';
-import { SessionIdentity } from './session-identity.js';
-import { SessionMinter } from './session-minter.js';
+import {
+  AccountMismatchError,
+  chainAuthorisesKey,
+  SessionGoneError,
+} from './session/app-delegation-source.js';
+import { type HeldLock, stealLock, stealMintLock } from './session/app-lock.js';
+import { requestSessionDelegation } from './session/session-delegation.js';
+import { SessionIdentity } from './session/session-identity.js';
+import { SessionMinter } from './session/session-minter.js';
 import { type Slots, slotsFor } from './slots.js';
-import { normalizeSsoDomain } from './sso.js';
-import { createSsoDomainService, type SsoStatus, SsoStatusChecker } from './sso-status.js';
-import type { SessionState, StateStorage } from './state-storage.js';
+import {
+  createSsoDomainService,
+  normalizeSsoDomain,
+  type SsoStatus,
+  SsoStatusChecker,
+} from './sso.js';
+import { LocalStateStorage, readOnlyError } from './state/local-state-storage.js';
+import type { SessionState, StateStorage } from './state/state-storage.js';
 
 /**
  * The lock one signer interaction at a time holds.

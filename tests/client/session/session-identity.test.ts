@@ -2,16 +2,15 @@ import type { SignIdentity } from '@icp-sdk/core/agent';
 import { DelegationChain, Ed25519KeyIdentity } from '@icp-sdk/core/identity';
 import { Principal } from '@icp-sdk/core/principal';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-
+import type { CredentialStorage } from '../../../src/client/credentials/credential-storage.ts';
+import { MemoryCredentialStorage } from '../../../src/client/credentials/memory-credential-storage.ts';
 import {
   AccountMismatchError,
   SessionGoneError,
   SessionUnsupportedError,
-} from '../../src/client/app-delegation-source.ts';
-import type { CredentialStorage } from '../../src/client/credential-storage.ts';
-import { MemoryCredentialStorage } from '../../src/client/memory-credential-storage.ts';
-import { SessionIdentity } from '../../src/client/session-identity.ts';
-import { slotsFor } from '../../src/client/slots.ts';
+} from '../../../src/client/session/app-delegation-source.ts';
+import { SessionIdentity } from '../../../src/client/session/session-identity.ts';
+import { slotsFor } from '../../../src/client/slots.ts';
 
 /** The bare names, which is what a client with no namespace writes under. */
 const SLOTS = slotsFor();
