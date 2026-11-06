@@ -282,6 +282,114 @@ describe('CookieStateStorage', () => {
   });
 });
 
+describe('CookieStateStorage in a worker', () => {
+  /** Lets channel deliveries and IndexedDB transactions run. */
+  const settle = async () => {
+    for (let turn = 0; turn < 50; turn++) await new Promise((resolve) => setTimeout(resolve, 0));
+  };
+
+  let stores: CookieStateStorage[] = [];
+  const openTab = () => {
+    const store = new CookieStateStorage({ domain: DOMAIN });
+    stores.push(store);
+    return store;
+  };
+  // A worker has neither `document` nor `localStorage`. Both are hidden only
+  // while the store is built, which is when it decides how to work.
+  const openWorker = () => {
+    vi.stubGlobal('document', undefined);
+    vi.stubGlobal('localStorage', undefined);
+    try {
+      const store = new CookieStateStorage({ domain: DOMAIN });
+      stores.push(store);
+      return store;
+    } finally {
+      vi.unstubAllGlobals();
+      vi.stubGlobal('location', { hostname: 'localhost', protocol: 'http:' });
+    }
+  };
+
+  afterEach(() => {
+    for (const store of stores) store.close();
+    stores = [];
+    localStorage.clear();
+  });
+
+  it('reads the sign-in a tab of its origin holds', async () => {
+    const written = state();
+    openTab().set(KEY, written);
+    await settle();
+
+    const worker = openWorker();
+    await worker.ready();
+
+    expect(worker.get(KEY)).toEqual({ ...written, held: true });
+  });
+
+  it('reads a sibling sign-in as not held where this origin has no claim', async () => {
+    const tab = openTab();
+    // A sibling subdomain signed in: the cookie is there, the claim is not.
+    // biome-ignore lint/suspicious/noDocumentCookie: as above.
+    document.cookie = `${KEY}=${encodeURIComponent(
+      `${state().principal.toText()}|${state().expiration}`,
+    )}; Path=/`;
+    tab.get(KEY);
+    await settle();
+
+    const worker = openWorker();
+    await worker.ready();
+
+    expect(worker.get(KEY)?.held).toBe(false);
+  });
+
+  it('hears a sibling sign-out once a tab of its origin reads the cookie', async () => {
+    const tab = openTab();
+    tab.set(KEY, state());
+    await settle();
+    const worker = openWorker();
+    await worker.ready();
+    const listener = vi.fn();
+    worker.subscribe(KEY, listener);
+
+    clearCookies();
+    globalThis.dispatchEvent(new Event('focus'));
+    tab.get(KEY);
+    await settle();
+
+    expect(worker.get(KEY)).toBeNull();
+    expect(listener).toHaveBeenCalled();
+  });
+
+  it('has an open tab remove the cookie when it signs out, so the siblings hear it', async () => {
+    const tab = openTab();
+    tab.set(KEY, state());
+    await settle();
+    const worker = openWorker();
+    await worker.ready();
+
+    worker.remove(KEY);
+    await settle();
+
+    expect(document.cookie).not.toContain(KEY);
+    expect(tab.get(KEY)).toBeNull();
+  });
+
+  it('drops only its own claim on discard, leaving the cookie for the siblings', async () => {
+    const tab = openTab();
+    tab.set(KEY, state());
+    await settle();
+    const worker = openWorker();
+    await worker.ready();
+
+    worker.discard(KEY);
+    await settle();
+
+    expect(worker.get(KEY)?.held).toBe(false);
+    expect(document.cookie).toContain(KEY);
+    expect(tab.get(KEY)?.held).toBe(false);
+  });
+});
+
 describe('resumable', () => {
   it('is the one store that says a sign-in may be brought back', () => {
     // Read as the client reads it: through the interface, where the property is

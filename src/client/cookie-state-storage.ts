@@ -1,5 +1,29 @@
 import { Principal } from '@icp-sdk/core/principal';
-import { LocalStateStorage, type SessionState, type StateStorage } from './state-storage.js';
+import { IdbStateStorage } from './idb-state-storage.js';
+import { formatState, parseState, type SessionState, type StateStorage } from './state-storage.js';
+
+/**
+ * The channel a worker asks this origin's tabs on to write the cookie, which a
+ * worker has no `document` to write itself.
+ */
+const COOKIE_CHANNEL = 'ic-session-cookie';
+
+/** A worker's request for the tabs to write the cookie: a record, or `null` to remove it. */
+interface CookieRequest {
+  key: string;
+  raw: string | null;
+}
+
+const isCookieRequest = (value: unknown): value is CookieRequest => {
+  if (typeof value !== 'object' || value === null) return false;
+  const request = value as { key?: unknown; raw?: unknown };
+  return (
+    typeof request.key === 'string' && (typeof request.raw === 'string' || request.raw === null)
+  );
+};
+
+/** Where this origin keeps its copy of the cookie, for its workers to read. */
+const cookieCopyKey = (key: string): string => `${key}#cookie`;
 
 /**
  * How long the browser keeps the record, which is not how long the sign-in
@@ -47,6 +71,14 @@ export interface CookieStateStorageOptions {
  * removing it is what tells a sibling the sign-in is over. It carries no chain
  * and no key, so a sibling acting on it asks the identity provider to re-issue
  * rather than treating it as proof.
+ *
+ * Workers share the sign-in too. Each origin keeps its claim, and a copy of the
+ * cookie, in an {@link IdbStateStorage}: tabs update the copy whenever they read
+ * the cookie, and workers, which cannot read cookies, read the copy. A worker's
+ * own sign-out is passed to this origin's open tabs, which write the cookie for
+ * it. A service worker running with no tab of its origin open sees a sibling's
+ * change once a tab of its origin next reads the cookie, and its own sign-out
+ * reaches the siblings only where the browser offers it the Cookie Store API.
  * @see implements {@link StateStorage}
  */
 export class CookieStateStorage implements StateStorage {
@@ -62,13 +94,17 @@ export class CookieStateStorage implements StateStorage {
   public readonly resumable = true;
 
   readonly #attributes: string;
+  readonly #domain: string | undefined;
   #subscribers = new Map<string, Set<() => void>>();
 
   // The cookie is the domain's and says who is signed in; this says whether it
   // was this origin that acquired a credential for them. A cookie cannot carry
-  // that — every sibling reads the same bytes — so it is kept per origin and
-  // composed in on read, under the same key the cookie uses.
-  readonly #local = new LocalStateStorage();
+  // that (every sibling reads the same bytes), so it is kept per origin and
+  // composed in on read, under the same key the cookie uses. The copy of the
+  // cookie that workers read is kept here too.
+  readonly #local = new IdbStateStorage();
+  readonly #hasDocument = typeof document !== 'undefined';
+  readonly #channel: BroadcastChannel | undefined;
 
   constructor(options: CookieStateStorageOptions) {
     // Both sides, because this decides whether to skip the check below and drop
@@ -95,6 +131,7 @@ export class CookieStateStorage implements StateStorage {
       );
     }
 
+    this.#domain = loopback ? undefined : options.domain;
     const secure = globalThis.location?.protocol === 'https:';
     this.#attributes = [
       // Host-only on loopback: browsers reject `Domain=localhost`, and a
@@ -112,7 +149,7 @@ export class CookieStateStorage implements StateStorage {
     // API exposes the list, so the only test that agrees with the browser is to
     // write one and read it back — which catches cookies being switched off at
     // the same time.
-    if (typeof document !== 'undefined') {
+    if (this.#hasDocument) {
       const probe = 'ic-cookie-probe';
       let accepted = false;
       try {
@@ -130,10 +167,49 @@ export class CookieStateStorage implements StateStorage {
         );
       }
     }
+
+    this.#channel =
+      typeof BroadcastChannel === 'undefined' ? undefined : new BroadcastChannel(COOKIE_CHANNEL);
+    if (this.#hasDocument) {
+      this.#channel?.addEventListener('message', (event) => this.#writeRequested(event.data));
+    }
   }
 
+  /**
+   * Resolves once this origin's claim and its copy of the cookie are loaded. The
+   * client waits for it before restoring a session.
+   */
+  public async ready(): Promise<void> {
+    await this.#local.ready();
+    if (this.#hasDocument) return;
+    // A worker cannot read `document.cookie`. Where the browser offers it the
+    // Cookie Store API, which service workers have in some browsers, it reads
+    // the cookie itself rather than trusting a copy no tab may have updated.
+    const cookieStore = (globalThis as { cookieStore?: CookieStore }).cookieStore;
+    if (cookieStore === undefined) return;
+    for (const key of this.#readKeys) {
+      try {
+        const cookie = await cookieStore.get(encodeURIComponent(key));
+        const value = cookie?.value;
+        this.#updateCopy(key, value === undefined ? null : decodeURIComponent(value));
+      } catch {
+        // The copy stands.
+      }
+    }
+  }
+
+  /** Stops listening for changes from other tabs and workers of this origin. */
+  public close(): void {
+    this.#channel?.close();
+    this.#local.close();
+  }
+
+  // Keys a worker has been asked for, which `ready()` refreshes from the Cookie
+  // Store API where there is one.
+  readonly #readKeys = new Set<string>();
+
   public get(key: string): SessionState | null {
-    const raw = readCookie(key);
+    const raw = this.#readRecord(key);
     if (raw === null) return null;
 
     const [principalText, expiration] = raw.split('|');
@@ -162,16 +238,15 @@ export class CookieStateStorage implements StateStorage {
   public set(key: string, state: Omit<SessionState, 'held'>): void {
     // The local record first, so nothing reads the cookie as held before it is.
     this.#local.set(key, state);
-    const payload = `${state.principal.toText()}|${state.expiration.toString()}`;
-    // biome-ignore lint/suspicious/noDocumentCookie: the Cookie Store API is async, and this record is read synchronously alongside isAuthenticated().
-    document.cookie = `${encodeURIComponent(key)}=${encodeURIComponent(payload)}; ${this.#attributes}; Max-Age=${RECORD_MAX_AGE_SECONDS}`;
+    this.#writeRecord(key, formatState(state));
     this.#fire(key);
   }
 
   public remove(key: string): void {
+    // The cookie first, the reverse of set(), so nothing reads the sign-in as
+    // standing but no longer held on the way to signed out.
+    this.#writeRecord(key, null);
     this.#local.remove(key);
-    // biome-ignore lint/suspicious/noDocumentCookie: same reason as set().
-    document.cookie = `${encodeURIComponent(key)}=; ${this.#attributes}; Max-Age=0`;
     this.#fire(key);
   }
 
@@ -218,17 +293,21 @@ export class CookieStateStorage implements StateStorage {
     listeners.add(check);
     this.#subscribers.set(key, listeners);
 
+    // The claim and the copy of the cookie: a change another tab or a worker of
+    // this origin makes to either reaches here through them.
+    const unwatchClaim = this.#local.subscribe(key, check);
+    const unwatchCopy = this.#local.subscribe(cookieCopyKey(key), check);
+    if (!this.#hasDocument) {
+      return () => {
+        listeners.delete(check);
+        unwatchClaim();
+        unwatchCopy();
+      };
+    }
+
     const onVisible = (): void => {
       if (document.visibilityState === 'visible') check();
     };
-    // The local half is in `localStorage`, which raises `storage` in every tab
-    // of this origin but the one that wrote. That is how a sibling tab hears
-    // that this origin dropped its claim, which no cookie event can carry.
-    const onStorage = (event: StorageEvent): void => {
-      // `key` is null when a tab cleared the whole store, which changes this too.
-      if (event.key === key || event.key === null) check();
-    };
-    globalThis.addEventListener('storage', onStorage);
     document.addEventListener('visibilitychange', onVisible);
     globalThis.addEventListener('pageshow', check);
     globalThis.addEventListener('focus', check);
@@ -238,7 +317,8 @@ export class CookieStateStorage implements StateStorage {
 
     return () => {
       listeners.delete(check);
-      globalThis.removeEventListener('storage', onStorage);
+      unwatchClaim();
+      unwatchCopy();
       document.removeEventListener('visibilitychange', onVisible);
       globalThis.removeEventListener('pageshow', check);
       globalThis.removeEventListener('focus', check);
@@ -248,6 +328,89 @@ export class CookieStateStorage implements StateStorage {
 
   #fire(key: string): void {
     for (const check of [...(this.#subscribers.get(key) ?? [])]) check();
+  }
+
+  /**
+   * The shared record: the cookie where there is a document, and otherwise this
+   * origin's copy of it. A tab updates the copy each time it reads the cookie.
+   */
+  #readRecord(key: string): string | null {
+    if (!this.#hasDocument) {
+      this.#readKeys.add(key);
+      const copy = this.#local.get(cookieCopyKey(key));
+      return copy === null ? null : formatState(copy);
+    }
+    const raw = readCookie(key);
+    this.#updateCopy(key, raw);
+    return raw;
+  }
+
+  /**
+   * Writes the shared record. A worker has no `document`, so it updates this
+   * origin's copy, asks the open tabs to write the cookie, and writes it itself
+   * where the Cookie Store API is available.
+   */
+  #writeRecord(key: string, raw: string | null): void {
+    if (this.#hasDocument) {
+      this.#writeCookie(key, raw);
+      this.#updateCopy(key, raw);
+      return;
+    }
+    this.#updateCopy(key, raw);
+    try {
+      this.#channel?.postMessage({ key, raw } satisfies CookieRequest);
+    } catch {
+      // A closed channel: no tab hears this worker any more.
+    }
+    this.#writeWithCookieStore(key, raw);
+  }
+
+  #writeCookie(key: string, raw: string | null): void {
+    // biome-ignore lint/suspicious/noDocumentCookie: the Cookie Store API is async, and this record is read synchronously alongside isAuthenticated().
+    document.cookie =
+      raw === null
+        ? `${encodeURIComponent(key)}=; ${this.#attributes}; Max-Age=0`
+        : `${encodeURIComponent(key)}=${encodeURIComponent(raw)}; ${this.#attributes}; Max-Age=${RECORD_MAX_AGE_SECONDS}`;
+  }
+
+  #writeWithCookieStore(key: string, raw: string | null): void {
+    const cookieStore = (globalThis as { cookieStore?: CookieStore }).cookieStore;
+    if (cookieStore === undefined) return;
+    const scope = { name: encodeURIComponent(key), path: '/', domain: this.#domain ?? null };
+    const written =
+      raw === null
+        ? cookieStore.delete(scope)
+        : cookieStore.set({
+            ...scope,
+            value: encodeURIComponent(raw),
+            sameSite: 'lax',
+            expires: Date.now() + RECORD_MAX_AGE_SECONDS * 1000,
+          });
+    void written.catch(() => {
+      // The tabs that heard the request have written it.
+    });
+  }
+
+  /** Keeps this origin's copy of the cookie equal to `raw`, for its workers. */
+  #updateCopy(key: string, raw: string | null): void {
+    const copyKey = cookieCopyKey(key);
+    const copy = this.#local.get(copyKey);
+    if ((copy === null ? null : formatState(copy)) === raw) return;
+    const state = parseState(raw);
+    if (state === null) {
+      this.#local.remove(copyKey);
+    } else {
+      this.#local.set(copyKey, state);
+    }
+  }
+
+  // A worker's write, carried out by a tab. Live only: a request no tab was
+  // open to hear is not replayed later over a sibling's newer write.
+  #writeRequested(data: unknown): void {
+    if (!isCookieRequest(data)) return;
+    this.#writeCookie(data.key, data.raw);
+    this.#updateCopy(data.key, data.raw);
+    this.#fire(data.key);
   }
 }
 
