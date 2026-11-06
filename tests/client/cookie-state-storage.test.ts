@@ -1,8 +1,8 @@
 import { Principal } from '@icp-sdk/core/principal';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { CookieStateStorage } from '../../src/client/cookie-state-storage.ts';
+import { LocalStateStorage } from '../../src/client/local-state-storage.ts';
 import {
-  LocalStateStorage,
   MemoryStateStorage,
   type SessionState,
   type StateStorage,

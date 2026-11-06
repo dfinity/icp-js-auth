@@ -19,7 +19,7 @@ import { CookieStateStorage } from '../../src/client/cookie-state-storage.ts';
 import type { Credential, CredentialStorage } from '../../src/client/credential-storage.ts';
 import { IdbKeyVal } from '../../src/client/db.ts';
 import { IdbCredentialStorage } from '../../src/client/idb-credential-storage.ts';
-import { IdbStateStorage } from '../../src/client/idb-state-storage.ts';
+import { LocalStateStorage } from '../../src/client/local-state-storage.ts';
 import { MemoryCredentialStorage } from '../../src/client/memory-credential-storage.ts';
 import { InteractionRequiredError } from '../../src/client/session-delegation.ts';
 import type { SessionIdentity } from '../../src/client/session-identity.ts';
@@ -2374,7 +2374,7 @@ describe('Session restoration', () => {
     const expiration = new Date('2020-01-03T00:00:00.000Z');
     const key = Ed25519KeyIdentity.fromJSON(JSON.stringify(testSecrets));
     const chain = await createTestDelegation(key, expiration);
-    const tab = new IdbStateStorage();
+    const tab = new LocalStateStorage();
     tab.set(slots.state, stateFor(chain).get(SLOTS.state)!);
     const db = await IdbKeyVal.create({ dbName: 'auth-client-state-db', storeName: 'ic-state' });
     await vi.waitFor(async () => expect(await db.get(slots.state)).not.toBeNull());
@@ -2397,7 +2397,7 @@ describe('Session restoration', () => {
     const expiration = new Date('2020-01-03T00:00:00.000Z');
     const key = Ed25519KeyIdentity.fromJSON(JSON.stringify(testSecrets));
     const chain = await createTestDelegation(key, expiration);
-    const tab = new IdbStateStorage();
+    const tab = new LocalStateStorage();
     tab.set(slots.state, stateFor(chain).get(SLOTS.state)!);
     const db = await IdbKeyVal.create({ dbName: 'auth-client-state-db', storeName: 'ic-state' });
     await vi.waitFor(async () => expect(await db.get(slots.state)).not.toBeNull());
@@ -2442,7 +2442,7 @@ describe('Session restoration', () => {
     const slots = slotsFor(namespace);
     const key = Ed25519KeyIdentity.fromJSON(JSON.stringify(testSecrets));
     const chain = await createTestDelegation(key, new Date('2020-01-03T00:00:00.000Z'));
-    const tab = new IdbStateStorage();
+    const tab = new LocalStateStorage();
     tab.set(slots.state, stateFor(chain).get(SLOTS.state)!);
     const db = await IdbKeyVal.create({ dbName: 'auth-client-state-db', storeName: 'ic-state' });
     await vi.waitFor(async () => expect(await db.get(slots.state)).not.toBeNull());

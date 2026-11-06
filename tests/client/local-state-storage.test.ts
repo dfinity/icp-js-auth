@@ -1,8 +1,8 @@
 import { Principal } from '@icp-sdk/core/principal';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { IdbKeyVal } from '../../src/client/db.ts';
-import { IdbStateStorage } from '../../src/client/idb-state-storage.ts';
-import { formatState, LocalStateStorage } from '../../src/client/state-storage.ts';
+import { LocalStateStorage } from '../../src/client/local-state-storage.ts';
+import { formatState } from '../../src/client/state-storage.ts';
 
 const alice = {
   principal: Principal.selfAuthenticating(new Uint8Array([1, 2, 3])),
@@ -33,24 +33,24 @@ const committed = async (key: string, state: Written) => {
   await vi.waitFor(async () => expect(await db.get(key)).toEqual({ raw }));
 };
 
-let stores: IdbStateStorage[] = [];
+let stores: LocalStateStorage[] = [];
 let listening: (() => void)[] = [];
 // A store follows other tabs and workers while it has a subscriber, as it does
 // under a client, so every store here gets one.
-const track = (store: IdbStateStorage) => {
+const track = (store: LocalStateStorage) => {
   stores.push(store);
   listening.push(store.subscribe('listening', () => {}));
   return store;
 };
 
 /** A store as a tab opens it: `localStorage` is there. */
-const openTab = () => track(new IdbStateStorage());
+const openTab = () => track(new LocalStateStorage());
 
 /** A store as a worker opens it: no `localStorage`. */
 const openWorker = () => {
   vi.stubGlobal('localStorage', undefined);
   try {
-    return track(new IdbStateStorage());
+    return track(new LocalStateStorage());
   } finally {
     vi.unstubAllGlobals();
   }
@@ -63,19 +63,19 @@ afterEach(() => {
   localStorage.clear();
 });
 
-describe('IdbStateStorage in a tab', () => {
-  it('reads a sign-in that LocalStateStorage wrote, so an upgrade keeps users signed in', () => {
+describe('LocalStateStorage in a tab', () => {
+  it('reads a sign-in an earlier version wrote, so an upgrade keeps users signed in', () => {
     const key = freshKey();
-    new LocalStateStorage().set(key, alice);
+    localStorage.setItem(key, formatState(alice));
 
     expect(openTab().get(key)).toEqual({ ...alice, held: true });
   });
 
-  it('writes what LocalStateStorage reads', () => {
+  it('writes what an earlier version reads', () => {
     const key = freshKey();
     openTab().set(key, alice);
 
-    expect(new LocalStateStorage().get(key)).toEqual({ ...alice, held: true });
+    expect(localStorage.getItem(key)).toBe(formatState(alice));
   });
 
   it('is ready straight away', async () => {
@@ -83,7 +83,7 @@ describe('IdbStateStorage in a tab', () => {
   });
 });
 
-describe('IdbStateStorage in a worker', () => {
+describe('LocalStateStorage in a worker', () => {
   it('loads what a tab wrote', async () => {
     const key = freshKey();
     openTab().set(key, alice);
@@ -148,7 +148,7 @@ describe('IdbStateStorage in a worker', () => {
     vi.stubGlobal('localStorage', undefined);
     vi.stubGlobal('indexedDB', undefined);
     try {
-      const worker = new IdbStateStorage();
+      const worker = new LocalStateStorage();
       worker.get(key);
       await worker.ready();
       expect(worker.get(key)).toBeNull();
@@ -158,10 +158,10 @@ describe('IdbStateStorage in a worker', () => {
   });
 });
 
-describe('IdbStateStorage after an upgrade from LocalStateStorage', () => {
+describe('LocalStateStorage after an upgrade from an earlier version', () => {
   it('copies the existing sign-in for workers the first time a tab reads it', async () => {
     const key = freshKey();
-    new LocalStateStorage().set(key, alice);
+    localStorage.setItem(key, formatState(alice));
 
     openTab().get(key);
     await committed(key, alice);
@@ -179,7 +179,7 @@ describe('IdbStateStorage after an upgrade from LocalStateStorage', () => {
 
     // A write that never reached the mirror: a page closed first, or a tab still
     // on the earlier version wrote only `localStorage`.
-    new LocalStateStorage().set(key, alice);
+    localStorage.setItem(key, formatState(alice));
     const tab = openTab();
 
     expect(tab.get(key)).toEqual({ ...alice, held: true });
@@ -192,7 +192,7 @@ describe('IdbStateStorage after an upgrade from LocalStateStorage', () => {
   });
 });
 
-describe('IdbStateStorage ordering', () => {
+describe('LocalStateStorage ordering', () => {
   it('lands a write a subscriber makes after the write that notified it', async () => {
     const key = freshKey();
     const tab = openTab();
@@ -268,13 +268,13 @@ describe('IdbStateStorage ordering', () => {
   });
 });
 
-describe('IdbStateStorage listening', () => {
+describe('LocalStateStorage listening', () => {
   it('stops following other contexts once its last subscriber leaves', async () => {
     const key = freshKey();
     const tab = openTab();
     // Not through openWorker(), which subscribes for the whole test.
     vi.stubGlobal('localStorage', undefined);
-    const worker = new IdbStateStorage();
+    const worker = new LocalStateStorage();
     vi.unstubAllGlobals();
     const stopOne = worker.subscribe(key, () => {});
     const stopTwo = worker.subscribe(key, () => {});
@@ -299,7 +299,7 @@ describe('IdbStateStorage listening', () => {
     tab.set(key, alice);
     await committed(key, alice);
     vi.stubGlobal('localStorage', undefined);
-    const worker = new IdbStateStorage();
+    const worker = new LocalStateStorage();
     vi.unstubAllGlobals();
     const stop = worker.subscribe(key, () => {});
     worker.get(key);

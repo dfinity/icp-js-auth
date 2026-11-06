@@ -1,7 +1,7 @@
 import { Principal } from '@icp-sdk/core/principal';
 import { IdbKeyVal } from './db.js';
-import { Doorbell, readOnlyError, STATE_DB, withLock } from './idb-state-storage.js';
-import { LocalStateStorage, type SessionState, type StateStorage } from './state-storage.js';
+import { Doorbell, readOnlyError, STATE_DB, withLock } from './local-state-storage.js';
+import { LocalStorageCopy, type SessionState, type StateStorage } from './state-storage.js';
 
 /** The channel a tab announces a new answer on, for the workers of its origin. */
 const ANSWER_CHANNEL = 'ic-session-answer';
@@ -96,7 +96,7 @@ export class CookieStateStorage implements StateStorage {
   // was this origin that acquired a credential for them. A cookie cannot carry
   // that (every sibling reads the same bytes), so it is kept per origin and
   // composed in on read, under the same key the cookie uses.
-  readonly #claim = new LocalStateStorage();
+  readonly #claim = new LocalStorageCopy();
 
   // Writes in progress. set() and remove() each change the claim and the cookie,
   // and a subscriber told between the two would see, and could act on, a state

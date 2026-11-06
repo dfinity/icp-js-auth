@@ -23,7 +23,7 @@ import { fromBase64, toBase64 } from './base64.js';
 import type { Credential, CredentialStorage } from './credential-storage.js';
 import { watchActivity, watchForeground } from './foreground-refresh.js';
 import { IdbCredentialStorage } from './idb-credential-storage.js';
-import { IdbStateStorage, readOnlyError } from './idb-state-storage.js';
+import { LocalStateStorage, readOnlyError } from './local-state-storage.js';
 import {
   NotificationConsent,
   type NotificationConsentStatus,
@@ -91,7 +91,7 @@ export interface AuthClientBaseOptions {
 
   /**
    * Where the state of the sign-in is kept: which account is signed in here,
-   * and until when. Defaults to one {@link IdbStateStorage} shared by every
+   * and until when. Defaults to one {@link LocalStateStorage} shared by every
    * client in this page or worker that sets none, and followed by the other
    * tabs and workers of this origin.
    */
@@ -360,9 +360,9 @@ export class SessionNotHeldError extends Error {
 // Every client in this page or worker that brings no store of its own shares
 // this one. They share the sign-in anyway, since it lives in one record, and one
 // store tells each of them about the others' writes as they happen.
-let sharedStateStorage: IdbStateStorage | undefined;
-const defaultStateStorage = (): IdbStateStorage => {
-  sharedStateStorage ??= new IdbStateStorage();
+let sharedStateStorage: LocalStateStorage | undefined;
+const defaultStateStorage = (): LocalStateStorage => {
+  sharedStateStorage ??= new LocalStateStorage();
   return sharedStateStorage;
 };
 

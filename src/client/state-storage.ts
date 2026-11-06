@@ -137,8 +137,8 @@ export function parseState(raw: string | null): Omit<SessionState, 'held'> | nul
 /**
  * State held for the lifetime of the instance and shared with nothing.
  *
- * For tests and for environments with no `localStorage`, where a client is
- * alone and a reload starts from nothing.
+ * For tests, and for a client that should share its sign-in with nothing: a
+ * reload starts from nothing.
  * @see implements {@link StateStorage}
  */
 export class MemoryStateStorage implements StateStorage {
@@ -198,7 +198,7 @@ export class MemoryStateStorage implements StateStorage {
     for (const check of [...(this.#subscribers.get(key) ?? [])]) check();
   }
 
-  // The same shape `LocalStateStorage` keeps, so "changed" means the same thing
+  // The same shape `LocalStorageCopy` keeps, so "changed" means the same thing
   // in both: a record is one string, and comparing strings needs no field walk.
   #raw(key: string): string | null {
     const state = this.#state.get(key);
@@ -207,11 +207,12 @@ export class MemoryStateStorage implements StateStorage {
 }
 
 /**
- * State in `localStorage`, so every tab of an origin agrees on it and it
- * survives a reload.
+ * State in `localStorage` and nowhere else: what `LocalStateStorage` keeps in a
+ * tab, and where `CookieStateStorage` keeps this origin's claim. Every tab of an
+ * origin agrees on it and it survives a reload.
  * @see implements {@link StateStorage}
  */
-export class LocalStateStorage implements StateStorage {
+export class LocalStorageCopy implements StateStorage {
   // Fired on a same-tab write: `storage` reaches the other tabs of an origin and
   // deliberately not the one that wrote. Per key, because one store answers for
   // whatever key it is handed.

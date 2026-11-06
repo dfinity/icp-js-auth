@@ -1,7 +1,7 @@
 import { type DBCreateOptions, IdbKeyVal } from './db.js';
 import {
   formatState,
-  LocalStateStorage,
+  LocalStorageCopy,
   MemoryStateStorage,
   parseState,
   type SessionState,
@@ -109,11 +109,11 @@ const hasLocalStorage = (): boolean => {
 };
 
 /**
- * State that the tabs and the workers of an origin share.
+ * State in `localStorage`, which the tabs and the workers of an origin share.
  *
- * A tab keeps the state in `localStorage`, exactly as {@link LocalStateStorage}
- * does (same key, same format, so a sign-in made by an earlier version reads as
- * it is), and that is what every tab agrees on. Workers cannot read
+ * A tab keeps the state in `localStorage` (same key and format as earlier
+ * versions, so a sign-in made by one reads as it is), and that is what every tab
+ * agrees on. Workers cannot read
  * `localStorage`, so tabs mirror it into IndexedDB and a worker reads the
  * mirror. A worker keeps its own copy in memory and changes nothing: signing in
  * and out happens in a page.
@@ -130,14 +130,14 @@ const hasLocalStorage = (): boolean => {
  * `AuthClient.ready()` before reading the client's status.
  * @see implements {@link StateStorage}
  */
-export class IdbStateStorage implements StateStorage {
+export class LocalStateStorage implements StateStorage {
   /**
    * True in a worker, which reads the state the tabs of its origin write and
    * changes nothing itself.
    */
   public readonly isReadOnly: boolean;
 
-  readonly #copy: LocalStateStorage | MemoryStateStorage;
+  readonly #copy: LocalStorageCopy | MemoryStateStorage;
   readonly #doorbell = new Doorbell(STATE_CHANNEL, (data) => this.#receive(data));
 
   // Each subscriber's check, per key. An announcement runs them in a tab: a
@@ -159,7 +159,7 @@ export class IdbStateStorage implements StateStorage {
 
   constructor() {
     this.isReadOnly = !hasLocalStorage();
-    this.#copy = this.isReadOnly ? new MemoryStateStorage() : new LocalStateStorage();
+    this.#copy = this.isReadOnly ? new MemoryStateStorage() : new LocalStorageCopy();
   }
 
   /**
