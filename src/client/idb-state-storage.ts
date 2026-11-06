@@ -139,6 +139,8 @@ export class IdbStateStorage implements StateStorage {
   // know them in advance.
   readonly #loadedKeys = new Set<string>();
 
+  #subscriberCount = 0;
+
   constructor() {
     this.#copy = hasLocalStorage() ? new LocalStateStorage() : new MemoryStateStorage();
   }
@@ -186,8 +188,17 @@ export class IdbStateStorage implements StateStorage {
    */
   public subscribe(key: string, listener: () => void): () => void {
     const unsubscribe = this.#copy.subscribe(key, listener);
+    // Nothing was followed while this store had no subscribers, so what it
+    // loaded before may have changed since. `ready()` waits for the reload.
+    if (this.#subscriberCount++ === 0) {
+      for (const loadedKey of this.#loadedKeys) this.#track(this.#load(loadedKey));
+    }
     const stopListening = this.#doorbell.listen();
+    let isSubscribed = true;
     return () => {
+      if (!isSubscribed) return;
+      isSubscribed = false;
+      this.#subscriberCount--;
       unsubscribe();
       stopListening();
     };

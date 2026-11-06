@@ -147,10 +147,15 @@ describe('IdbStateStorage in a worker', () => {
   });
 
   it('starts signed out where there is no IndexedDB', async () => {
+    const key = freshKey();
+    openTab().set(key, alice);
+    await committed(key, alice);
+
+    // Both hidden through the read, which is when the store opens IndexedDB.
+    vi.stubGlobal('localStorage', undefined);
     vi.stubGlobal('indexedDB', undefined);
     try {
-      const key = freshKey();
-      const worker = openWorker();
+      const worker = new IdbStateStorage();
       worker.get(key);
       await worker.ready();
       expect(worker.get(key)).toBeNull();
@@ -297,5 +302,31 @@ describe('IdbStateStorage listening', () => {
     await settle();
 
     expect(worker.get(key)).toEqual({ ...alice, held: true });
+  });
+
+  it('reloads what it holds when it is subscribed to again', async () => {
+    const key = freshKey();
+    const tab = openTab();
+    tab.set(key, alice);
+    await committed(key, alice);
+    vi.stubGlobal('localStorage', undefined);
+    const worker = new IdbStateStorage();
+    vi.unstubAllGlobals();
+    const stop = worker.subscribe(key, () => {});
+    worker.get(key);
+    await worker.ready();
+    expect(worker.get(key)).toEqual({ ...alice, held: true });
+
+    // Changed while nobody was subscribed, so nothing followed it.
+    stop();
+    tab.set(key, bob);
+    await committed(key, bob);
+    await settle();
+    expect(worker.get(key)).toEqual({ ...alice, held: true });
+
+    listening.push(worker.subscribe(key, () => {}));
+    await worker.ready();
+
+    expect(worker.get(key)).toEqual({ ...bob, held: true });
   });
 });
