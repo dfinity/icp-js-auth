@@ -90,6 +90,16 @@ export interface StateStorage {
    * changed under it goes on answering for a sign-in that is no longer there.
    */
   subscribe(key: string, listener: () => void): () => void;
+
+  /**
+   * Resolves once {@link get} answers with the stored state, for a store that
+   * loads it asynchronously. The client waits for it before restoring a session:
+   * a store still loading reads as signed out, and restoring from that would end
+   * the session.
+   *
+   * Absent means the store is ready from the start.
+   */
+  ready?(): Promise<void>;
 }
 
 /**

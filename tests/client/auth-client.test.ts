@@ -17,6 +17,7 @@ import {
 import { CookieStateStorage } from '../../src/client/cookie-state-storage.ts';
 import type { Credential, CredentialStorage } from '../../src/client/credential-storage.ts';
 import { IdbCredentialStorage } from '../../src/client/idb-credential-storage.ts';
+import { IdbStateStorage } from '../../src/client/idb-state-storage.ts';
 import { MemoryCredentialStorage } from '../../src/client/memory-credential-storage.ts';
 import { InteractionRequiredError } from '../../src/client/session-delegation.ts';
 import type { SessionIdentity } from '../../src/client/session-identity.ts';
@@ -2291,6 +2292,34 @@ describe('Session restoration', () => {
     );
     const identity = await client.getIdentity();
     expect(identity.getPrincipal().isAnonymous()).toBe(false);
+  });
+
+  // A worker's store starts empty and loads from IndexedDB. Restoring before the
+  // load finishes would read the session as ended and remove the credentials
+  // every tab shares.
+  it('restores in a worker once the state store has loaded', async () => {
+    vi.setSystemTime(new Date('2020-01-01T00:00:00.000Z'));
+
+    const expiration = new Date('2020-01-03T00:00:00.000Z');
+    const key = Ed25519KeyIdentity.fromJSON(JSON.stringify(testSecrets));
+    const chain = await createTestDelegation(key, expiration);
+    const tab = new IdbStateStorage();
+    tab.set(SLOTS.state, stateFor(chain).get(SLOTS.state)!);
+    for (let turn = 0; turn < 25; turn++) await new Promise((r) => setTimeout(r, 0));
+    tab.close();
+
+    const storage = spyStorage({ identity: key, chain });
+    vi.stubGlobal('localStorage', undefined);
+    let client: AuthClient;
+    try {
+      client = track(new AuthClient({ credentialStorage: storage }));
+    } finally {
+      vi.unstubAllGlobals();
+    }
+    const identity = await client.getIdentity();
+
+    expect(identity.getPrincipal().isAnonymous()).toBe(false);
+    expect(storage.remove).not.toHaveBeenCalledWith(SLOTS.session);
   });
 
   it('should remain anonymous with a key but no delegation', async () => {

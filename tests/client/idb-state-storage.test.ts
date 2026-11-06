@@ -164,13 +164,66 @@ describe('IdbStateStorage after an upgrade from LocalStateStorage', () => {
 
     // A tab still holding the record from before the sign-out reached it.
     new LocalStateStorage().set(key, alice);
-    openTab().get(key);
+    const tab = openTab();
+    tab.get(key);
     await settle();
+
+    // The tab takes the sign-out rather than keeping its stale record.
+    expect(tab.get(key)).toBeNull();
 
     const db = await IdbKeyVal.create({ dbName: 'auth-client-state-db', storeName: 'ic-state' });
     expect(await db.get(key)).toEqual({ raw: null });
     const later = openWorker();
     await later.ready();
     expect(later.get(key)).toBeNull();
+  });
+});
+
+describe('IdbStateStorage ordering', () => {
+  it('lands a write a subscriber makes after the write that notified it', async () => {
+    const key = freshKey();
+    const tab = openTab();
+    tab.subscribe(key, () => {
+      if (tab.get(key) !== null) tab.remove(key);
+    });
+
+    tab.set(key, alice);
+    await settle();
+
+    expect(tab.get(key)).toBeNull();
+    const worker = openWorker();
+    await worker.ready();
+    expect(worker.get(key)).toBeNull();
+  });
+
+  it('tells every store in a tab when a worker signs out', async () => {
+    const key = freshKey();
+    const one = openTab();
+    const two = openTab();
+    one.set(key, alice);
+    await settle();
+    const worker = openWorker();
+    await worker.ready();
+    const first = vi.fn();
+    const second = vi.fn();
+    one.subscribe(key, first);
+    two.subscribe(key, second);
+
+    worker.remove(key);
+    await settle();
+
+    expect(first).toHaveBeenCalledTimes(1);
+    expect(second).toHaveBeenCalledTimes(1);
+  });
+
+  it('resolves ready only after a write announced during the load', async () => {
+    const key = freshKey();
+    const tab = openTab();
+    tab.set(key, alice);
+    const worker = openWorker();
+
+    await worker.ready();
+
+    expect(worker.get(key)).toEqual({ ...alice, held: true });
   });
 });

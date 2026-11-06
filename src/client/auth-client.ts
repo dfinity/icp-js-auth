@@ -419,9 +419,9 @@ export class AuthClient {
     if (options.stateStorage !== undefined) {
       this.#stateStorage = options.stateStorage;
     } else {
-      const own = new IdbStateStorage();
-      this.#ownStateStorage = own;
-      this.#stateStorage = own;
+      const ownStore = new IdbStateStorage();
+      this.#ownStateStorage = ownStore;
+      this.#stateStorage = ownStore;
     }
 
     // A string or URL is what this option used to be, and a caller still passing
@@ -1648,6 +1648,7 @@ export class AuthClient {
   async #restore(): Promise<void> {
     this.#restoring = true;
     try {
+      await this.#stateStorage.ready?.();
       await this.#hydrate();
     } finally {
       this.#restoring = false;
