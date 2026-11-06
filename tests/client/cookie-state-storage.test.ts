@@ -302,9 +302,11 @@ describe('CookieStateStorage in a worker', () => {
   let listening: (() => void)[] = [];
   // A store follows other tabs and workers while it has a subscriber, as it
   // does under a client, so every store here gets one.
+  // Subscribed to the key under test, as a client is: that is when a tab mirrors
+  // it and a worker loads it.
   const track = (store: CookieStateStorage) => {
     stores.push(store);
-    listening.push(store.subscribe('listening', () => {}));
+    listening.push(store.subscribe(KEY, () => {}));
     return store;
   };
   const openTab = () => track(new CookieStateStorage({ domain: DOMAIN }));
@@ -371,7 +373,7 @@ describe('CookieStateStorage in a worker', () => {
     expect(listener).toHaveBeenCalled();
   });
 
-  it('loads the claim on its first read, so ready() covers it', async () => {
+  it('loads the claim when subscribed, so ready() covers it', async () => {
     const written = state();
     openTab().set(KEY, written);
     const probe = openWorker();

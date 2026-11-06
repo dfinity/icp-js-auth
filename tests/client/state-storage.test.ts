@@ -306,7 +306,7 @@ describe('LocalStateStorage across tabs and workers', () => {
       await committed(key, alice);
 
       const worker = openWorker();
-      worker.get(key);
+      listening.push(worker.subscribe(key, () => {}));
       await worker.ready();
 
       expect(worker.get(key)).toEqual({ ...alice, held: true });
@@ -316,7 +316,7 @@ describe('LocalStateStorage across tabs and workers', () => {
       const key = freshKey();
       const tab = openTab();
       const worker = openWorker();
-      worker.get(key);
+      listening.push(worker.subscribe(key, () => {}));
       await worker.ready();
       const listener = vi.fn();
       worker.subscribe(key, listener);
@@ -336,7 +336,7 @@ describe('LocalStateStorage across tabs and workers', () => {
       tab.set(key, alice);
       await committed(key, alice);
       const worker = openWorker();
-      worker.get(key);
+      listening.push(worker.subscribe(key, () => {}));
       await worker.ready();
 
       tab.set(key, bob);
@@ -365,7 +365,7 @@ describe('LocalStateStorage across tabs and workers', () => {
       vi.stubGlobal('indexedDB', undefined);
       try {
         const worker = new LocalStateStorage();
-        worker.get(key);
+        listening.push(worker.subscribe(key, () => {}));
         await worker.ready();
         expect(worker.get(key)).toBeNull();
       } finally {
@@ -375,15 +375,16 @@ describe('LocalStateStorage across tabs and workers', () => {
   });
 
   describe('LocalStateStorage after an upgrade from an earlier version', () => {
-    it('copies the existing sign-in for workers the first time a tab reads it', async () => {
+    it('copies the existing sign-in for workers once a tab subscribes', async () => {
       const key = freshKey();
       localStorage.setItem(key, format(alice));
 
-      openTab().get(key);
+      const tab = openTab();
+      listening.push(tab.subscribe(key, () => {}));
       await committed(key, alice);
 
       const worker = openWorker();
-      worker.get(key);
+      listening.push(worker.subscribe(key, () => {}));
       await worker.ready();
       expect(worker.get(key)).toEqual({ ...alice, held: true });
     });
@@ -397,12 +398,13 @@ describe('LocalStateStorage across tabs and workers', () => {
       // on the earlier version wrote only `localStorage`.
       localStorage.setItem(key, format(alice));
       const tab = openTab();
+      listening.push(tab.subscribe(key, () => {}));
 
       expect(tab.get(key)).toEqual({ ...alice, held: true });
       await committed(key, alice);
       expect(tab.get(key)).toEqual({ ...alice, held: true });
       const worker = openWorker();
-      worker.get(key);
+      listening.push(worker.subscribe(key, () => {}));
       await worker.ready();
       expect(worker.get(key)).toEqual({ ...alice, held: true });
     });
@@ -421,7 +423,7 @@ describe('LocalStateStorage across tabs and workers', () => {
 
       expect(tab.get(key)).toBeNull();
       const worker = openWorker();
-      worker.get(key);
+      listening.push(worker.subscribe(key, () => {}));
       await worker.ready();
       expect(worker.get(key)).toBeNull();
     });
@@ -446,7 +448,7 @@ describe('LocalStateStorage across tabs and workers', () => {
       await vi.waitFor(() => expect(first).toHaveBeenCalledTimes(1));
     });
 
-    it('resolves ready only once the keys read so far have loaded', async () => {
+    it('resolves ready only once the keys subscribed to have loaded', async () => {
       const key = freshKey();
       openTab().set(key, alice);
       await committed(key, alice);
@@ -466,6 +468,7 @@ describe('LocalStateStorage across tabs and workers', () => {
       });
       try {
         const worker = openWorker();
+        listening.push(worker.subscribe(key, () => {}));
         expect(worker.get(key)).toBeNull();
 
         let isReady = false;
@@ -494,7 +497,6 @@ describe('LocalStateStorage across tabs and workers', () => {
       vi.unstubAllGlobals();
       const stopOne = worker.subscribe(key, () => {});
       const stopTwo = worker.subscribe(key, () => {});
-      worker.get(key);
       await worker.ready();
 
       stopOne();
@@ -518,7 +520,6 @@ describe('LocalStateStorage across tabs and workers', () => {
       const worker = new LocalStateStorage();
       vi.unstubAllGlobals();
       const stop = worker.subscribe(key, () => {});
-      worker.get(key);
       await worker.ready();
       expect(worker.get(key)).toEqual({ ...alice, held: true });
 

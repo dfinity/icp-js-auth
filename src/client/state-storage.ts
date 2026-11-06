@@ -1,5 +1,5 @@
 import { Principal } from '@icp-sdk/core/principal';
-import { type DBCreateOptions, IdbKeyVal } from './db.js';
+import { IdbKeyVal } from './db.js';
 
 /**
  * What a client knows about its sign-in without holding a credential: which
@@ -186,90 +186,11 @@ export class MemoryStateStorage implements StateStorage {
   }
 }
 
-/** The database the state is kept in, apart from the credentials' database. */
-export const STATE_DB: DBCreateOptions = { dbName: 'auth-client-state-db', storeName: 'ic-keyval' };
+/** Where tabs mirror their `localStorage` records for workers, which cannot read it. */
+const MIRROR_DB = { dbName: 'auth-client-state-db', storeName: 'ic-keyval' };
 
-/** The channel a store announces on, and the prefix of the locks its writes take. */
-export const STATE_CHANNEL = 'ic-session-state';
-
-/** One mirrored record in IndexedDB: what `localStorage` holds, or `null` for none. */
-export interface StoredState {
-  raw: string | null;
-}
-
-/**
- * Announces that the record under `key` changed in IndexedDB. Carries no state:
- * every receiver reads IndexedDB again.
- */
-export interface Announcement {
-  key: string;
-}
-
-export const isAnnouncement = (value: unknown): value is Announcement =>
-  typeof value === 'object' &&
-  value !== null &&
-  typeof (value as { key?: unknown }).key === 'string';
-
-/**
- * A `BroadcastChannel` that is open only while something listens on it.
- *
- * Listening is tied to a store's subscribers, and a client unsubscribes in
- * `dispose()`, so a disposed client leaves nothing open. Ringing needs no
- * listener: with none, the message goes out on a channel opened for it alone.
- */
-export class Doorbell {
-  readonly #name: string;
-  readonly #onMessage: (data: unknown) => void;
-  #channel: BroadcastChannel | undefined;
-  #listenerCount = 0;
-
-  constructor(name: string, onMessage: (data: unknown) => void) {
-    this.#name = name;
-    this.#onMessage = onMessage;
-  }
-
-  /** Starts listening, and returns the function that stops. */
-  public listen(): () => void {
-    if (this.#listenerCount++ === 0 && typeof BroadcastChannel !== 'undefined') {
-      this.#channel = new BroadcastChannel(this.#name);
-      this.#channel.addEventListener('message', (event) => this.#onMessage(event.data));
-    }
-    let isListening = true;
-    return () => {
-      if (!isListening) return;
-      isListening = false;
-      if (--this.#listenerCount > 0) return;
-      this.#channel?.close();
-      this.#channel = undefined;
-    };
-  }
-
-  public ring(message: unknown): void {
-    try {
-      if (this.#channel !== undefined) {
-        this.#channel.postMessage(message);
-        return;
-      }
-      if (typeof BroadcastChannel === 'undefined') return;
-      const channel = new BroadcastChannel(this.#name);
-      channel.postMessage(message);
-      channel.close();
-    } catch {
-      // A payload this browser will not clone. Other contexts keep what they
-      // have until the next message reaches them.
-    }
-  }
-}
-
-/**
- * Runs `work` under a Web Lock, so writes from different tabs land in the order
- * they were made. Without Web Locks it runs straight away.
- */
-export function withLock<T>(name: string, work: () => Promise<T>): Promise<T> {
-  const locks = globalThis.navigator?.locks;
-  if (locks === undefined) return work();
-  return locks.request(name, work) as Promise<T>;
-}
+/** The channel a tab announces a mirrored record on, carrying only its key. */
+const MIRROR_CHANNEL = 'ic-session-state';
 
 /** What a store throws when asked to change the sign-in where it can only read it. */
 export const readOnlyError = (): Error =>
@@ -277,7 +198,7 @@ export const readOnlyError = (): Error =>
     'The sign-in state is read-only in a worker: sign in and sign out from a page of this origin.',
   );
 
-export const hasLocalStorage = (): boolean => {
+const hasLocalStorage = (): boolean => {
   try {
     return globalThis.localStorage !== undefined && globalThis.localStorage !== null;
   } catch {
@@ -290,14 +211,9 @@ export const hasLocalStorage = (): boolean => {
  * State in `localStorage`, so every tab of an origin agrees on it and it
  * survives a reload.
  *
- * Workers cannot read `localStorage`, so tabs mirror it into IndexedDB and a
- * worker reads the mirror into memory. A worker changes nothing: signing in and
- * out happens in a page. Each tab write is mirrored without the tab waiting, under
- * a Web Lock per key, from what `localStorage` holds when the lock is granted, so
- * the last write to land always mirrors the current state. A tab mirrors a key
- * again on its first read, which makes good a write lost to a closing page or
- * made by an earlier version. Once a write has committed, it is announced on a
- * `BroadcastChannel`, and workers read the mirror again.
+ * Workers cannot read `localStorage`, so a tab mirrors each record it writes or
+ * subscribes to into IndexedDB and announces it, and a worker loads the mirror
+ * into memory. A worker changes nothing: signing in and out happens in a page.
  *
  * The two fields are written as `<principal>|<expiration>` rather than JSON,
  * because an expiration is a `bigint` and JSON has no way to carry one.
@@ -309,40 +225,20 @@ export class LocalStateStorage implements StateStorage {
   // whatever key it is handed.
   #subscribers = new Map<string, Set<() => void>>();
 
-  /**
-   * True in a worker, which reads the state the tabs of its origin mirror and
-   * changes nothing itself.
-   */
+  /** True in a worker, which reads what its tabs mirror and changes nothing. */
   public readonly isReadOnly = !hasLocalStorage();
 
-  // In a worker: the mirrored records, and the number of the latest load of
-  // each. A load that finishes after the number moved on is older.
+  // In a worker: the mirrored records, and the loads that fill them, one after
+  // another so a later load always lands last.
   readonly #mirrored = new Map<string, string | null>();
-  readonly #versions = new Map<string, number>();
+  #loads: Promise<void> = Promise.resolve();
 
-  // Keys read so far, each mirrored (in a tab) or loaded (in a worker) on its
-  // first read: the client names its key, so this store cannot know them sooner.
-  readonly #seenKeys = new Set<string>();
-
-  // Mirrors and loads in progress, which `ready()` waits for.
-  readonly #pendingWork = new Set<Promise<void>>();
-  readonly #doorbell = new Doorbell(STATE_CHANNEL, (data) => this.#receive(data));
-  #subscriberCount = 0;
-
-  /**
-   * Resolves once every key read so far is loaded (in a worker) or mirrored (in
-   * a tab). Never rejects: where IndexedDB is unavailable, the copy is all there
-   * is.
-   */
-  public async ready(): Promise<void> {
-    while (this.#pendingWork.size > 0) await Promise.all([...this.#pendingWork]);
+  /** Resolves once a worker has loaded the keys subscribed to so far. */
+  public ready(): Promise<void> {
+    return this.#loads;
   }
 
   public get(key: string): SessionState | null {
-    if (!this.#seenKeys.has(key)) {
-      this.#seenKeys.add(key);
-      this.#track(this.isReadOnly ? this.#load(key) : this.#mirror(key));
-    }
     const raw = this.#raw(key);
     if (raw === null) return null;
 
@@ -365,14 +261,14 @@ export class LocalStateStorage implements StateStorage {
     if (this.isReadOnly) throw readOnlyError();
     this.#localStorage().setItem(key, `${state.principal.toText()}|${state.expiration.toString()}`);
     this.#fire(key);
-    this.#track(this.#mirror(key));
+    void this.#mirror(key);
   }
 
   public remove(key: string): void {
     if (this.isReadOnly) throw readOnlyError();
     this.#localStorage().removeItem(key);
     this.#fire(key);
-    this.#track(this.#mirror(key));
+    void this.#mirror(key);
   }
 
   /** The same as {@link remove}: this store publishes nothing beyond the origin. */
@@ -401,12 +297,25 @@ export class LocalStateStorage implements StateStorage {
     listeners.add(check);
     this.#subscribers.set(key, listeners);
 
-    // A worker followed nothing while it had no subscribers, so what it loaded
-    // before may have changed since. `ready()` waits for the reload.
-    if (this.#subscriberCount++ === 0 && this.isReadOnly) {
-      for (const seenKey of this.#seenKeys) this.#track(this.#load(seenKey));
+    // A tab mirrors what it holds now, which also repairs a mirror an earlier
+    // version or a closing page left behind; a worker loads it. Afterwards each
+    // announcement is a write in some tab: a worker loads it, and a tab re-checks,
+    // because a write by another store in this tab raises no `storage` event.
+    if (this.isReadOnly) {
+      this.#load(key);
+    } else {
+      void this.#mirror(key);
     }
-    const stopListening = this.#doorbell.listen();
+    const channel =
+      typeof BroadcastChannel === 'undefined' ? undefined : new BroadcastChannel(MIRROR_CHANNEL);
+    channel?.addEventListener('message', (event: MessageEvent<unknown>) => {
+      if (event.data !== key) return;
+      if (this.isReadOnly) {
+        this.#load(key);
+      } else {
+        check();
+      }
+    });
 
     const onStorage = (event: StorageEvent): void => {
       // `key` is null when a tab cleared the whole store, which changes this too.
@@ -428,13 +337,9 @@ export class LocalStateStorage implements StateStorage {
       globalThis.addEventListener('focus', check);
     }
 
-    let isSubscribed = true;
     return () => {
-      if (!isSubscribed) return;
-      isSubscribed = false;
-      this.#subscriberCount--;
-      stopListening();
       listeners.delete(check);
+      channel?.close();
       globalThis.removeEventListener('storage', onStorage);
       if (hooked) {
         document.removeEventListener('visibilitychange', onVisible);
@@ -453,59 +358,32 @@ export class LocalStateStorage implements StateStorage {
     return this.#localStorage().getItem(key);
   }
 
-  #track(work: Promise<void>): void {
-    const tracked = work.catch(() => undefined).finally(() => this.#pendingWork.delete(tracked));
-    this.#pendingWork.add(tracked);
-  }
-
-  /** Writes what `localStorage` holds now to the mirror, if the mirror differs. */
+  /** Writes what `localStorage` holds under `key` to the mirror, and announces it. */
   async #mirror(key: string): Promise<void> {
-    await withLock(`${STATE_CHANNEL}:${key}`, async () => {
-      const db = await this.#db;
-      const stored = await db.get<StoredState>(key);
-      // Read last, after every await, so a mirror that lands after another
-      // still writes what `localStorage` holds now, even without Web Locks.
-      const raw = this.#raw(key);
-      if (stored?.raw === raw) return;
-      await db.set<StoredState>(key, { raw });
-      this.#doorbell.ring({ key });
+    try {
+      const db = await IdbKeyVal.create(MIRROR_DB);
+      // Read after the await and right before the write: IndexedDB applies writes
+      // in the order they are made, so the last to land holds what is current.
+      await db.set(key, { raw: this.#raw(key) });
+      const channel = new BroadcastChannel(MIRROR_CHANNEL);
+      channel.postMessage(key);
+      channel.close();
+    } catch {
+      // No IndexedDB or no channel here: workers keep what they have until the
+      // next write reaches them.
+    }
+  }
+
+  #load(key: string): void {
+    this.#loads = this.#loads.then(async () => {
+      try {
+        const db = await IdbKeyVal.create(MIRROR_DB);
+        this.#mirrored.set(key, (await db.get<{ raw: string | null }>(key))?.raw ?? null);
+      } catch {
+        // No IndexedDB here: the worker reads as signed out.
+      }
+      this.#fire(key);
     });
-  }
-
-  // A worker reads the mirror again; a tab re-checks `localStorage`, because a
-  // write by another store in the same tab raises no `storage` event here.
-  #receive(data: unknown): void {
-    if (!isAnnouncement(data)) return;
-    if (this.isReadOnly) {
-      this.#track(this.#load(data.key));
-      return;
-    }
-    this.#fire(data.key);
-  }
-
-  async #load(key: string): Promise<void> {
-    const version = (this.#versions.get(key) ?? 0) + 1;
-    this.#versions.set(key, version);
-    const stored = await (await this.#db).get<StoredState>(key);
-    if (this.#versions.get(key) !== version) return;
-    this.#mirrored.set(key, stored?.raw ?? null);
-    this.#fire(key);
-  }
-
-  // Opened on first use, and forgotten again if opening failed, so a later call
-  // retries rather than reusing a rejected promise.
-  #dbPromise: Promise<IdbKeyVal> | null = null;
-  get #db(): Promise<IdbKeyVal> {
-    if (this.#dbPromise === null) {
-      const promise = IdbKeyVal.create(STATE_DB).catch((error) => {
-        if (this.#dbPromise === promise) {
-          this.#dbPromise = null;
-        }
-        throw error;
-      });
-      this.#dbPromise = promise;
-    }
-    return this.#dbPromise;
   }
 
   #localStorage(): Storage {
