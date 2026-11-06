@@ -91,8 +91,9 @@ export interface AuthClientBaseOptions {
 
   /**
    * Where the state of the sign-in is kept: which account is signed in here,
-   * and until when. Defaults to {@link IdbStateStorage}, which tabs and workers
-   * of this origin share.
+   * and until when. Defaults to one {@link IdbStateStorage} shared by every
+   * client in this page or worker that sets none, and followed by the other
+   * tabs and workers of this origin.
    */
   stateStorage?: StateStorage;
 
@@ -356,6 +357,15 @@ export class SessionNotHeldError extends Error {
  *   ? await authClient.getIdentity()
  *   : await authClient.signIn();
  */
+// Every client in this page or worker that brings no store of its own shares
+// this one. They share the sign-in anyway, since it lives in one record, and one
+// store tells each of them about the others' writes as they happen.
+let sharedStateStorage: IdbStateStorage | undefined;
+const defaultStateStorage = (): IdbStateStorage => {
+  sharedStateStorage ??= new IdbStateStorage();
+  return sharedStateStorage;
+};
+
 /**
  * Thrown when a later sign-in or sign-out took over from this one.
  *
@@ -414,7 +424,7 @@ export class AuthClient {
     this.#options = options;
     this.#credentialStorage = options.credentialStorage ?? new IdbCredentialStorage();
     this.#slots = slotsFor(options.namespace);
-    this.#stateStorage = options.stateStorage ?? new IdbStateStorage();
+    this.#stateStorage = options.stateStorage ?? defaultStateStorage();
 
     // A string or URL is what this option used to be, and a caller still passing
     // one would otherwise be silently ignored — both halves falling back to

@@ -10,6 +10,7 @@ import { SessionGoneError } from '../../src/client/app-delegation-source.ts';
 import { stealLock } from '../../src/client/app-lock.ts';
 import {
   AuthClient,
+  type AuthClientCreateOptions,
   SessionNotHeldError,
   SupersededError,
   scopedKeys,
@@ -409,9 +410,11 @@ describe('AuthClient', () => {
       ['expired', -1000n],
     ] as const) {
       const expiration = (BigInt(Date.now()) + ms) * 1_000_000n;
-      const status = new AuthClient({
-        stateStorage: store(held === 'signed-in', expiration),
-      }).getStatus();
+      const status = track(
+        new AuthClient({
+          stateStorage: store(held === 'signed-in', expiration),
+        }),
+      ).getStatus();
 
       expect(status.state).toBe(held);
       expect(status.state === 'signed-out' ? undefined : status.expiresAtMs).toBe(
@@ -420,15 +423,17 @@ describe('AuthClient', () => {
     }
 
     // Nothing to carry where nothing is signed in.
-    const signedOut = new AuthClient({
-      stateStorage: {
-        get: () => null,
-        set: vi.fn(),
-        remove: vi.fn(),
-        discard: vi.fn(),
-        subscribe: () => () => {},
-      },
-    }).getStatus();
+    const signedOut = track(
+      new AuthClient({
+        stateStorage: {
+          get: () => null,
+          set: vi.fn(),
+          remove: vi.fn(),
+          discard: vi.fn(),
+          subscribe: () => () => {},
+        },
+      }),
+    ).getStatus();
     expect(signedOut).toEqual({ state: 'signed-out' });
   });
 
@@ -522,10 +527,12 @@ describe('AuthClient', () => {
   });
 
   it('reports a denied silent request as one needing a ceremony', async () => {
-    const client = new AuthClient({
-      credentialStorage: new MemoryCredentialStorage(),
-      prompt: 'none',
-    });
+    const client = track(
+      new AuthClient({
+        credentialStorage: new MemoryCredentialStorage(),
+        prompt: 'none',
+      }),
+    );
     FakeTransport.last().onRequest((request) => ({
       jsonrpc: '2.0',
       id: request.id ?? null,
@@ -541,9 +548,11 @@ describe('AuthClient', () => {
   });
 
   it('leaves any other denial an ordinary error', async () => {
-    const client = new AuthClient({
-      credentialStorage: new MemoryCredentialStorage(),
-    });
+    const client = track(
+      new AuthClient({
+        credentialStorage: new MemoryCredentialStorage(),
+      }),
+    );
     FakeTransport.last().onRequest((request) => ({
       jsonrpc: '2.0',
       id: request.id ?? null,
@@ -559,19 +568,21 @@ describe('AuthClient', () => {
   });
 
   it('refuses half of an identity provider, which would mint against mainnet', () => {
-    expect(
-      () =>
+    expect(() =>
+      track(
         new AuthClient({
           // @ts-expect-error the URL and the canister are named together
           identityProvider: { authorizeUrl: 'https://id.ai/authorize' },
         }),
+      ),
     ).toThrow('together, or neither');
-    expect(
-      () =>
+    expect(() =>
+      track(
         new AuthClient({
           // @ts-expect-error the URL and the canister are named together
           identityProvider: { canisterId: 'rdmx6-jaaaa-aaaaa-aaadq-cai' },
         }),
+      ),
     ).toThrow('together, or neither');
   });
 
@@ -619,7 +630,7 @@ describe('AuthClient', () => {
   });
 
   it('releases the identity it replaces, so a discarded one stops minting', async () => {
-    const client = new AuthClient({ credentialStorage: new MemoryCredentialStorage() });
+    const client = track(new AuthClient({ credentialStorage: new MemoryCredentialStorage() }));
     handleSignIn(FakeTransport.last());
     const first = (await client.signIn()) as SessionIdentity;
     const released = vi.spyOn(first, 'dispose');
@@ -635,7 +646,7 @@ describe('AuthClient', () => {
   });
 
   it('names no session bounds of its own', async () => {
-    const client = new AuthClient();
+    const client = track(new AuthClient());
     const transport = FakeTransport.last();
     handleSignIn(transport);
 
@@ -814,27 +825,27 @@ describe('AuthClient', () => {
   it.each(['none', 'login'] as const)(
     'should pass prompt=%s search param to the transport',
     (prompt) => {
-      new AuthClient({ prompt });
+      track(new AuthClient({ prompt }));
       const url = new URL(FakeTransport.last().options.url ?? '');
       expect(url.searchParams.get('prompt')).toBe(prompt);
     },
   );
 
   it('should pass the hint principal as text in the search param', () => {
-    new AuthClient({ hint: Principal.fromText('2vxsx-fae') });
+    track(new AuthClient({ hint: Principal.fromText('2vxsx-fae') }));
     const url = new URL(FakeTransport.last().options.url ?? '');
     expect(url.searchParams.get('hint')).toBe('2vxsx-fae');
   });
 
   it('asks for the sign-in to be kept where the store is one siblings read', () => {
-    new AuthClient({ stateStorage: new CookieStateStorage({ domain: 'localhost' }) });
+    track(new AuthClient({ stateStorage: new CookieStateStorage({ domain: 'localhost' }) }));
 
     const url = new URL(FakeTransport.last().options.url ?? '');
     expect(url.searchParams.get('resumable')).toBe('true');
   });
 
   it('asks for nothing to be kept for a store only this origin reads', () => {
-    new AuthClient({ stateStorage: new MemoryStateStorage() });
+    track(new AuthClient({ stateStorage: new MemoryStateStorage() }));
 
     const url = new URL(FakeTransport.last().options.url ?? '');
     expect(url.searchParams.has('resumable')).toBe(false);
@@ -846,19 +857,21 @@ describe('AuthClient', () => {
   ] as const)('lets the option turn it %s over the store', (_name, resumable, expected) => {
     // A cross-origin arrangement that is not sibling subdomains opts in by hand;
     // siblings that should each sign in properly force it off.
-    new AuthClient({
-      resumable,
-      stateStorage: resumable
-        ? new MemoryStateStorage()
-        : new CookieStateStorage({ domain: 'localhost' }),
-    });
+    track(
+      new AuthClient({
+        resumable,
+        stateStorage: resumable
+          ? new MemoryStateStorage()
+          : new CookieStateStorage({ domain: 'localhost' }),
+      }),
+    );
 
     const url = new URL(FakeTransport.last().options.url ?? '');
     expect(url.searchParams.get('resumable')).toBe(expected);
   });
 
   it('should include neither prompt nor hint when they are not set', () => {
-    new AuthClient();
+    track(new AuthClient());
     const url = new URL(FakeTransport.last().options.url ?? '');
     expect(url.searchParams.has('prompt')).toBe(false);
     expect(url.searchParams.has('hint')).toBe(false);
@@ -868,17 +881,19 @@ describe('AuthClient', () => {
     // What a sibling subdomain's sign-in leaves for this origin: a shared state
     // naming an account, and no credentials of its own.
     const stateStorage = new MemoryStateStorage();
-    const signedIn = new AuthClient({ stateStorage });
+    const signedIn = track(new AuthClient({ stateStorage }));
     handleSignIn(FakeTransport.last());
     await signedIn.signIn();
     const account = stateStorage.get(SLOTS.state)?.principal;
 
-    const sibling = new AuthClient({
-      stateStorage,
-      credentialStorage: new MemoryCredentialStorage(),
-      prompt: 'none',
-      hint: account,
-    });
+    const sibling = track(
+      new AuthClient({
+        stateStorage,
+        credentialStorage: new MemoryCredentialStorage(),
+        prompt: 'none',
+        hint: account,
+      }),
+    );
     handleSignIn(FakeTransport.last());
     const identity = await sibling.signIn();
 
@@ -895,7 +910,7 @@ describe('AuthClient', () => {
   });
 
   it('should not include sso search param when ssoDomain is not set', () => {
-    new AuthClient();
+    track(new AuthClient());
     const url = new URL(FakeTransport.last().options.url ?? '');
     expect(url.searchParams.has('sso')).toBe(false);
   });
@@ -911,13 +926,14 @@ describe('AuthClient', () => {
   });
 
   it('should throw when both one-click entry points are set', () => {
-    expect(
-      () =>
+    expect(() =>
+      track(
         new AuthClient({
           openIdProvider: 'google',
           // @ts-expect-error the two entry points are mutually exclusive
           ssoDomain: 'dfinity.org',
         }),
+      ),
     ).toThrow('mutually exclusive');
   });
 
@@ -930,7 +946,7 @@ describe('AuthClient', () => {
   });
 
   it('should not pass derivationOrigin as a search param without sso', () => {
-    new AuthClient({ derivationOrigin: 'https://app.example.com' });
+    track(new AuthClient({ derivationOrigin: 'https://app.example.com' }));
     const url = new URL(FakeTransport.last().options.url ?? '');
     expect(url.searchParams.has('derivationOrigin')).toBe(false);
   });
@@ -1075,6 +1091,22 @@ describe('AuthClient signIn', () => {
     expect(client.isAuthenticated()).toBe(false);
     await client.signIn();
     expect(client.isAuthenticated()).toBe(true);
+  });
+
+  // Clients that bring no state store share one, so another client in the page
+  // is told of a sign-in as it happens rather than when a message arrives.
+  it('reports a sign-in to another default client in the page at once', async () => {
+    const credentialStorage = new MemoryCredentialStorage();
+    const client = track(new AuthClient({ credentialStorage }));
+    handleSignIn(FakeTransport.last());
+    const other = track(new AuthClient({ credentialStorage }));
+    const told = vi.fn();
+    other.subscribe(told);
+
+    await client.signIn();
+
+    expect(other.isAuthenticated()).toBe(true);
+    expect(told).toHaveBeenCalled();
   });
 
   it('should report the user as not authenticated after sign-out', async () => {
@@ -1232,10 +1264,12 @@ describe('AuthClient signIn', () => {
   it('drops a session the state no longer names, as a sibling signing in elsewhere leaves it', async () => {
     const credentialStorage = new MemoryCredentialStorage();
     const stateStorage = new MemoryStateStorage();
-    const first = new AuthClient({
-      credentialStorage,
-      stateStorage,
-    });
+    const first = track(
+      new AuthClient({
+        credentialStorage,
+        stateStorage,
+      }),
+    );
     handleSignIn(FakeTransport.last());
     await first.signIn();
 
@@ -1247,10 +1281,12 @@ describe('AuthClient signIn', () => {
       expiration: other?.expiration ?? 0n,
     });
 
-    const second = new AuthClient({
-      credentialStorage,
-      stateStorage,
-    });
+    const second = track(
+      new AuthClient({
+        credentialStorage,
+        stateStorage,
+      }),
+    );
     const identity = await second.getIdentity();
 
     expect(identity.getPrincipal().isAnonymous()).toBe(true);
@@ -1400,9 +1436,11 @@ describe('AuthClient signIn', () => {
       return run();
     });
     vi.stubGlobal('navigator', { locks: { request } });
-    const client = new AuthClient({
-      credentialStorage: new MemoryCredentialStorage(),
-    });
+    const client = track(
+      new AuthClient({
+        credentialStorage: new MemoryCredentialStorage(),
+      }),
+    );
 
     // Not awaited: this is what runs in the click's own task. The window is
     // opened in it, and every lock is asked for after that.
@@ -1532,10 +1570,12 @@ describe('AuthClient signIn', () => {
     stubLocks();
     const credentialStorage = new MemoryCredentialStorage();
     const stateStorage = new MemoryStateStorage();
-    const client = new AuthClient({
-      credentialStorage,
-      stateStorage,
-    });
+    const client = track(
+      new AuthClient({
+        credentialStorage,
+        stateStorage,
+      }),
+    );
 
     // Hold the ceremony open at its last call, so the sign-out lands while the
     // writes are still ahead of it.
@@ -1575,7 +1615,7 @@ describe('AuthClient signIn', () => {
     stubLocks();
     const credentialStorage = new MemoryCredentialStorage();
     const stateStorage = new MemoryStateStorage();
-    const client = new AuthClient({ credentialStorage, stateStorage });
+    const client = track(new AuthClient({ credentialStorage, stateStorage }));
 
     let releaseMint: () => void = () => {};
     const mintReached = new Promise<void>((reached) => {
@@ -1610,7 +1650,7 @@ describe('AuthClient signIn', () => {
     const held = stealLock('ic-auth-signer-channel');
     await Promise.resolve();
 
-    const client = new AuthClient({ credentialStorage: new MemoryCredentialStorage() });
+    const client = track(new AuthClient({ credentialStorage: new MemoryCredentialStorage() }));
     client.dispose();
     await Promise.resolve();
     await Promise.resolve();
@@ -1673,7 +1713,7 @@ describe('AuthClient signIn', () => {
 
     let earlier: Promise<unknown> = Promise.resolve();
     try {
-      const first = new AuthClient(shared);
+      const first = track(new AuthClient(shared));
       handleSignIn(FakeTransport.last());
       earlier = first.signIn();
       await mintReached;
@@ -1683,7 +1723,7 @@ describe('AuthClient signIn', () => {
     }
 
     // The second press is the one the user means.
-    const second = new AuthClient(shared);
+    const second = track(new AuthClient(shared));
     handleSignIn(FakeTransport.last());
     await second.signIn();
     releaseMint();
@@ -2048,10 +2088,12 @@ describe('AuthClient signIn', () => {
       // holding nothing while the record says someone is signed in.
       subscribe: () => () => {},
     };
-    const client = new AuthClient({
-      stateStorage,
-      credentialStorage: new MemoryCredentialStorage(),
-    });
+    const client = track(
+      new AuthClient({
+        stateStorage,
+        credentialStorage: new MemoryCredentialStorage(),
+      }),
+    );
 
     await expect(client.getIdentity()).rejects.toBeInstanceOf(SessionNotHeldError);
     // The two answers still agree about there being a sign-in; what the client
@@ -2111,7 +2153,7 @@ describe('AuthClient signIn', () => {
   it('publishes the sign-in as ended when a refused mint finds the record naming it', async () => {
     const credentialStorage = new MemoryCredentialStorage();
     const stateStorage = new CookieStateStorage({ domain: 'localhost' });
-    const client = new AuthClient({ credentialStorage, stateStorage });
+    const client = track(new AuthClient({ credentialStorage, stateStorage }));
     handleSignIn(FakeTransport.last());
     const identity = (await client.signIn()) as SessionIdentity;
     const account = client.getPrincipal();
@@ -2168,7 +2210,7 @@ describe('AuthClient signIn', () => {
     const credentialStorage = new MemoryCredentialStorage();
     // The distinction only exists for a record that reaches past this origin.
     const stateStorage = new CookieStateStorage({ domain: 'localhost' });
-    const client = new AuthClient({ credentialStorage, stateStorage });
+    const client = track(new AuthClient({ credentialStorage, stateStorage }));
     handleSignIn(FakeTransport.last());
     const identity = (await client.signIn()) as SessionIdentity;
 
@@ -2199,10 +2241,12 @@ describe('AuthClient signIn', () => {
   it('drops the app credential too when the state names another account', async () => {
     const credentialStorage = new MemoryCredentialStorage();
     const stateStorage = new MemoryStateStorage();
-    const first = new AuthClient({
-      credentialStorage,
-      stateStorage,
-    });
+    const first = track(
+      new AuthClient({
+        credentialStorage,
+        stateStorage,
+      }),
+    );
     handleSignIn(FakeTransport.last());
     await first.signIn();
 
@@ -2211,10 +2255,12 @@ describe('AuthClient signIn', () => {
       expiration: (BigInt(Date.now()) + 3_600_000n) * 1_000_000n,
     });
 
-    const second = new AuthClient({
-      credentialStorage,
-      stateStorage,
-    });
+    const second = track(
+      new AuthClient({
+        credentialStorage,
+        stateStorage,
+      }),
+    );
     await second.getIdentity();
 
     // Restoring reads the app slot and may mint into it, so a credential rooted
@@ -2227,16 +2273,18 @@ describe('AuthClient signIn', () => {
     // What a sibling subdomain has on its first load: the shared record, and no
     // credential of its own.
     const stateStorage = new CookieStateStorage({ domain: 'localhost' });
-    const signedIn = new AuthClient({ stateStorage });
+    const signedIn = track(new AuthClient({ stateStorage }));
     handleSignIn(FakeTransport.last());
     await signedIn.signIn();
     signedIn.dispose();
 
     localStorage.clear(); // the sibling has no local record; the cookie stands
-    const sibling = new AuthClient({
-      stateStorage,
-      credentialStorage: new MemoryCredentialStorage(),
-    });
+    const sibling = track(
+      new AuthClient({
+        stateStorage,
+        credentialStorage: new MemoryCredentialStorage(),
+      }),
+    );
 
     expect(stateStorage.get(SLOTS.state)).not.toBeNull();
     expect(sibling.isAuthenticated()).toBe(false);
@@ -2271,6 +2319,24 @@ describe('IdbCredentialStorage', () => {
     expect(stored?.chain?.toJSON()).toEqual(chain.toJSON());
   });
 });
+
+/**
+ * A client as a worker builds it.
+ *
+ * A worker loads this library itself, so the default state store it shares is
+ * made where there is no `localStorage`. A fresh copy of the module, loaded and
+ * used with `localStorage` hidden, starts the same way.
+ */
+async function openWorkerClient(options: AuthClientCreateOptions): Promise<AuthClient> {
+  vi.resetModules();
+  vi.stubGlobal('localStorage', undefined);
+  try {
+    const { AuthClient: WorkerAuthClient } = await import('../../src/client/auth-client.ts');
+    return track(new WorkerAuthClient(options));
+  } finally {
+    vi.unstubAllGlobals();
+  }
+}
 
 describe('Session restoration', () => {
   const testSecrets = [
@@ -2315,13 +2381,7 @@ describe('Session restoration', () => {
 
     const storage = spyStorage();
     await storage.set(slots.session, { identity: key, chain });
-    vi.stubGlobal('localStorage', undefined);
-    let client: AuthClient;
-    try {
-      client = track(new AuthClient({ credentialStorage: storage, namespace }));
-    } finally {
-      vi.unstubAllGlobals();
-    }
+    const client = await openWorkerClient({ credentialStorage: storage, namespace });
     const identity = await client.getIdentity();
 
     expect(identity.getPrincipal().isAnonymous()).toBe(false);
@@ -2344,13 +2404,7 @@ describe('Session restoration', () => {
 
     const storage = spyStorage();
     await storage.set(slots.session, { identity: key, chain });
-    vi.stubGlobal('localStorage', undefined);
-    let client: AuthClient;
-    try {
-      client = track(new AuthClient({ credentialStorage: storage, namespace }));
-    } finally {
-      vi.unstubAllGlobals();
-    }
+    const client = await openWorkerClient({ credentialStorage: storage, namespace });
     // Nothing loaded yet: the worker's copy of the state starts empty.
     expect(client.isAuthenticated()).toBe(false);
 
@@ -2603,7 +2657,7 @@ describe('AuthClient signIn + requestAttributes', () => {
     const request = vi.fn(async (_name: string, _options: unknown, run: () => unknown) => run());
     vi.stubGlobal('navigator', { locks: { request } });
 
-    const client = new AuthClient({ credentialStorage: new MemoryCredentialStorage() });
+    const client = track(new AuthClient({ credentialStorage: new MemoryCredentialStorage() }));
     const transport = FakeTransport.last();
     handleSignIn(transport);
     handleRequestAttributes(transport);
@@ -2803,7 +2857,7 @@ describe('AuthClient SSO domain status', () => {
   });
 
   it('stops checking once disposed', async () => {
-    const client = new AuthClient({ ssoDomain: 'dfinity.org' });
+    const client = track(new AuthClient({ ssoDomain: 'dfinity.org' }));
     client.dispose();
     await settle(60_000);
     expect(ssoService.checks).toEqual([]);
