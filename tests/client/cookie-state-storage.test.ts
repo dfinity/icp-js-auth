@@ -341,40 +341,37 @@ describe('CookieStateStorage in a worker', () => {
     await vi.waitFor(() => expect(worker.get(KEY)).toEqual({ ...written, held: true }));
   });
 
-  it('reads a sibling sign-in as not held where this origin has no claim', async () => {
+  // A worker acts only with this origin's credentials, so a sign-in this origin
+  // holds none for is one it cannot act on.
+  it('reads a sibling sign-in this origin holds no credentials for as signed out', async () => {
     const tab = openTab();
-    // Subscribed, as a client is: that is how a tab notices the cookie changed.
-    listening.push(tab.subscribe(KEY, () => {}));
-    // A sibling subdomain signed in: the cookie is there, the claim is not.
     // biome-ignore lint/suspicious/noDocumentCookie: as above.
     document.cookie = `${KEY}=${encodeURIComponent(
       `${state().principal.toText()}|${state().expiration}`,
     )}; Path=/`;
-    globalThis.dispatchEvent(new Event('focus'));
+    expect(tab.get(KEY)?.held).toBe(false);
     const worker = openWorker();
+    worker.get(KEY);
     await worker.ready();
 
-    await vi.waitFor(() => expect(worker.get(KEY)?.held).toBe(false));
+    expect(worker.get(KEY)).toBeNull();
   });
 
-  it('hears a sibling sign-out once a tab of its origin reads the cookie', async () => {
+  it('hears a tab of its origin sign out', async () => {
     const tab = openTab();
-    listening.push(tab.subscribe(KEY, () => {}));
     tab.set(KEY, state());
     const worker = openWorker();
-    await worker.ready();
     await vi.waitFor(() => expect(worker.get(KEY)).not.toBeNull());
     const listener = vi.fn();
     worker.subscribe(KEY, listener);
 
-    clearCookies();
-    globalThis.dispatchEvent(new Event('focus'));
+    tab.remove(KEY);
 
     await vi.waitFor(() => expect(worker.get(KEY)).toBeNull());
     expect(listener).toHaveBeenCalled();
   });
 
-  it('loads the answer on its first read, so ready() covers it', async () => {
+  it('loads the claim on its first read, so ready() covers it', async () => {
     const written = state();
     openTab().set(KEY, written);
     const probe = openWorker();
@@ -396,7 +393,7 @@ describe('CookieStateStorage in a worker', () => {
     expect(() => worker.discard(KEY)).toThrow(/read-only/);
   });
 
-  it('hears a tab drop this origin claim, cookie untouched', async () => {
+  it('reads a claim a tab dropped as signed out, cookie untouched', async () => {
     const tab = openTab();
     tab.set(KEY, state());
     const worker = openWorker();
@@ -404,8 +401,8 @@ describe('CookieStateStorage in a worker', () => {
 
     tab.discard(KEY);
 
-    await vi.waitFor(() => expect(worker.get(KEY)?.held).toBe(false));
-    expect(worker.get(KEY)).not.toBeNull();
+    await vi.waitFor(() => expect(worker.get(KEY)).toBeNull());
+    expect(tab.get(KEY)?.held).toBe(false);
   });
 });
 
