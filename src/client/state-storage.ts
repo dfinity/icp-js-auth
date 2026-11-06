@@ -461,9 +461,12 @@ export class LocalStateStorage implements StateStorage {
   /** Writes what `localStorage` holds now to the mirror, if the mirror differs. */
   async #mirror(key: string): Promise<void> {
     await withLock(`${STATE_CHANNEL}:${key}`, async () => {
-      const raw = this.#raw(key);
       const db = await this.#db;
-      if ((await db.get<StoredState>(key))?.raw === raw) return;
+      const stored = await db.get<StoredState>(key);
+      // Read last, after every await, so a mirror that lands after another
+      // still writes what `localStorage` holds now, even without Web Locks.
+      const raw = this.#raw(key);
+      if (stored?.raw === raw) return;
       await db.set<StoredState>(key, { raw });
       this.#doorbell.ring({ key });
     });

@@ -298,10 +298,12 @@ describe('CookieStateStorage', () => {
 });
 
 describe('CookieStateStorage in a worker', () => {
+  let stores: CookieStateStorage[] = [];
   let listening: (() => void)[] = [];
   // A store follows other tabs and workers while it has a subscriber, as it
   // does under a client, so every store here gets one.
   const track = (store: CookieStateStorage) => {
+    stores.push(store);
     listening.push(store.subscribe('listening', () => {}));
     return store;
   };
@@ -320,9 +322,13 @@ describe('CookieStateStorage in a worker', () => {
     }
   };
 
-  afterEach(() => {
+  afterEach(async () => {
     for (const stop of listening) stop();
     listening = [];
+    // A mirror still queued would otherwise land after the clear below and
+    // write "none" into the next test's database.
+    await Promise.all(stores.map((store) => store.ready()));
+    stores = [];
     localStorage.clear();
   });
 
@@ -400,27 +406,6 @@ describe('CookieStateStorage in a worker', () => {
 
     await vi.waitFor(() => expect(worker.get(KEY)?.held).toBe(false));
     expect(worker.get(KEY)).not.toBeNull();
-  });
-
-  // The answer is one record, so the claim and the cookie change together.
-  it('never sees half of an account switch', async () => {
-    const tab = openTab();
-    tab.set(KEY, state());
-    const worker = openWorker();
-    await vi.waitFor(() => expect(worker.get(KEY)?.held).toBe(true));
-    const seen: (SessionState | null)[] = [];
-    listening.push(worker.subscribe(KEY, () => seen.push(worker.get(KEY))));
-
-    const bob = {
-      principal: Principal.selfAuthenticating(new Uint8Array([4, 5, 6])),
-      expiration: state().expiration,
-    };
-    tab.set(KEY, bob);
-
-    await vi.waitFor(() =>
-      expect(worker.get(KEY)?.principal.toText()).toBe(bob.principal.toText()),
-    );
-    expect(seen.every((answer) => answer?.held === true)).toBe(true);
   });
 });
 
