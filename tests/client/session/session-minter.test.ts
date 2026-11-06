@@ -2,13 +2,13 @@ import { Delegation, DelegationChain, Ed25519KeyIdentity } from '@icp-sdk/core/i
 import { Principal } from '@icp-sdk/core/principal';
 import { describe, expect, it, vi } from 'vitest';
 
-import { SessionGoneError } from '../../src/client/app-delegation-source.ts';
+import { SessionGoneError } from '../../../src/client/session/app-delegation-source.ts';
 import {
   appDelegationChain,
   assertChainReaches,
   SessionMinter,
   unwrapSessionResult,
-} from '../../src/client/session-minter.ts';
+} from '../../../src/client/session/session-minter.ts';
 
 const II = Principal.fromText('rdmx6-jaaaa-aaaaa-aaadq-cai');
 const OTHER = Principal.fromText('rrkah-fqaaa-aaaaa-aaaaq-cai');

@@ -1,5 +1,6 @@
 import { Principal } from '@icp-sdk/core/principal';
-import { LocalStateStorage, type SessionState, type StateStorage } from './state-storage.js';
+import { LocalStateStorage } from './local-state-storage.js';
+import type { SessionState, StateStorage } from './state-storage.js';
 
 /**
  * How long the browser keeps the record, which is not how long the sign-in
@@ -47,6 +48,12 @@ export interface CookieStateStorageOptions {
  * removing it is what tells a sibling the sign-in is over. It carries no chain
  * and no key, so a sibling acting on it asks the identity provider to re-issue
  * rather than treating it as proof.
+ *
+ * Workers cannot read cookies, and only ever act with this origin's own
+ * credentials, so a worker reads this origin's claim, which the
+ * {@link LocalStateStorage} below mirrors to it. A sign-in this origin holds no
+ * credentials for reads as signed out there. A worker only reads: signing in and
+ * out happens in a page.
  * @see implements {@link StateStorage}
  */
 export class CookieStateStorage implements StateStorage {
@@ -69,6 +76,16 @@ export class CookieStateStorage implements StateStorage {
   // that — every sibling reads the same bytes — so it is kept per origin and
   // composed in on read, under the same key the cookie uses.
   readonly #local = new LocalStateStorage();
+
+  /** True in a worker, which reads this origin's claim and changes nothing. */
+  public get isReadOnly(): boolean {
+    return this.#local.isReadOnly;
+  }
+
+  /** Resolves once a worker has loaded this origin's claim. */
+  public ready(): Promise<void> {
+    return this.#local.ready();
+  }
 
   constructor(options: CookieStateStorageOptions) {
     // Both sides, because this decides whether to skip the check below and drop
@@ -133,6 +150,7 @@ export class CookieStateStorage implements StateStorage {
   }
 
   public get(key: string): SessionState | null {
+    if (this.isReadOnly) return this.#local.get(key);
     const raw = readCookie(key);
     if (raw === null) return null;
 
@@ -217,6 +235,15 @@ export class CookieStateStorage implements StateStorage {
     const listeners = this.#subscribers.get(key) ?? new Set();
     listeners.add(check);
     this.#subscribers.set(key, listeners);
+
+    // A worker hears of a change through this origin's claim.
+    if (this.isReadOnly) {
+      const unwatchClaim = this.#local.subscribe(key, check);
+      return () => {
+        listeners.delete(check);
+        unwatchClaim();
+      };
+    }
 
     const onVisible = (): void => {
       if (document.visibilityState === 'visible') check();

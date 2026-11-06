@@ -2,7 +2,7 @@ import type { DerEncodedPublicKey } from '@icp-sdk/core/agent';
 import { Delegation, DelegationChain } from '@icp-sdk/core/identity';
 import { Principal } from '@icp-sdk/core/principal';
 import type { Signer } from '@icp-sdk/signer';
-import { fromBase64, toBase64 } from './base64.js';
+import { fromBase64, toBase64 } from '../base64.js';
 
 /**
  * The method Internet Identity answers with a session rather than a long-lived

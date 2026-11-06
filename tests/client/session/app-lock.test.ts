@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { stealLock, stealMintLock, withMintLock } from '../../src/client/app-lock.ts';
+import { stealLock, stealMintLock, withMintLock } from '../../../src/client/session/app-lock.ts';
 
 /**
  * jsdom has no Web Locks, so stand one in: a queue keyed by name, plus stealing.

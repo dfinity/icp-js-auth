@@ -3,14 +3,14 @@ import { DelegationChain, Ed25519KeyIdentity } from '@icp-sdk/core/identity';
 import { Principal } from '@icp-sdk/core/principal';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { AuthClient } from '../../src/client/auth-client.ts';
-import { LocalCredentialStorage } from '../../src/client/local-credential-storage.ts';
+import { LocalCredentialStorage } from '../../src/client/credentials/local-credential-storage.ts';
 
 // Against the real `UrlTransport`, whose journal replays requests by the slot
 // they were sent from: the fake used elsewhere does not model slots.
 
 const II_CANISTER = Principal.fromText('rdmx6-jaaaa-aaaaa-aaadq-cai');
 
-vi.mock('../../src/client/session-minter.ts', async () => {
+vi.mock('../../src/client/session/session-minter.ts', async () => {
   const { DelegationChain: Chain, Ed25519KeyIdentity: Key } = await import(
     '@icp-sdk/core/identity'
   );

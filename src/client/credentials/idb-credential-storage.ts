@@ -1,6 +1,6 @@
 import { DelegationChain, ECDSAKeyIdentity } from '@icp-sdk/core/identity';
+import { type DBCreateOptions, IdbKeyVal } from '../db.js';
 import type { Credential, CredentialStorage } from './credential-storage.js';
-import { type DBCreateOptions, IdbKeyVal } from './db.js';
 
 /** What one slot holds in the database: a key handle, and the chain as JSON. */
 interface StoredCredential {
