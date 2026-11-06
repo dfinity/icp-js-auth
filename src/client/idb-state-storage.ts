@@ -37,6 +37,57 @@ const isAnnouncement = (value: unknown): value is Announcement =>
   value !== null &&
   typeof (value as { key?: unknown }).key === 'string';
 
+/**
+ * A `BroadcastChannel` that is open only while something listens on it.
+ *
+ * Listening is tied to a store's subscribers, and a client unsubscribes in
+ * `dispose()`, so a disposed client leaves nothing open. Ringing needs no
+ * listener: with none, the message goes out on a channel opened for it alone.
+ */
+export class Doorbell {
+  readonly #name: string;
+  readonly #onMessage: (data: unknown) => void;
+  #channel: BroadcastChannel | undefined;
+  #listenerCount = 0;
+
+  constructor(name: string, onMessage: (data: unknown) => void) {
+    this.#name = name;
+    this.#onMessage = onMessage;
+  }
+
+  /** Starts listening, and returns the function that stops. */
+  public listen(): () => void {
+    if (this.#listenerCount++ === 0 && typeof BroadcastChannel !== 'undefined') {
+      this.#channel = new BroadcastChannel(this.#name);
+      this.#channel.addEventListener('message', (event) => this.#onMessage(event.data));
+    }
+    let isListening = true;
+    return () => {
+      if (!isListening) return;
+      isListening = false;
+      if (--this.#listenerCount > 0) return;
+      this.#channel?.close();
+      this.#channel = undefined;
+    };
+  }
+
+  public ring(message: unknown): void {
+    try {
+      if (this.#channel !== undefined) {
+        this.#channel.postMessage(message);
+        return;
+      }
+      if (typeof BroadcastChannel === 'undefined') return;
+      const channel = new BroadcastChannel(this.#name);
+      channel.postMessage(message);
+      channel.close();
+    } catch {
+      // A payload this browser will not clone. Other contexts keep what they
+      // have until the next message reaches them.
+    }
+  }
+}
+
 const hasLocalStorage = (): boolean => {
   try {
     return globalThis.localStorage !== undefined && globalThis.localStorage !== null;
@@ -70,7 +121,7 @@ const hasLocalStorage = (): boolean => {
  */
 export class IdbStateStorage implements StateStorage {
   readonly #copy: LocalStateStorage | MemoryStateStorage;
-  readonly #channel: BroadcastChannel | undefined;
+  readonly #doorbell = new Doorbell(STATE_CHANNEL, (data) => this.#receive(data));
 
   // Bumped by every write and every read of IndexedDB, per key. A read that
   // finishes after the number moved on is older than what the copy holds.
@@ -90,10 +141,6 @@ export class IdbStateStorage implements StateStorage {
 
   constructor() {
     this.#copy = hasLocalStorage() ? new LocalStateStorage() : new MemoryStateStorage();
-    this.#channel =
-      typeof BroadcastChannel === 'undefined' ? undefined : new BroadcastChannel(STATE_CHANNEL);
-    // Listening before the first read, so a write that commits during it is not missed.
-    this.#channel?.addEventListener('message', (event) => this.#receive(event.data));
   }
 
   /**
@@ -103,15 +150,6 @@ export class IdbStateStorage implements StateStorage {
    */
   public async ready(): Promise<void> {
     while (this.#pendingReads.size > 0) await Promise.all([...this.#pendingReads]);
-  }
-
-  /**
-   * Stops listening for changes from other contexts.
-   *
-   * Only needed when replacing a store while the page or worker lives on.
-   */
-  public close(): void {
-    this.#channel?.close();
   }
 
   public get(key: string): SessionState | null {
@@ -139,8 +177,20 @@ export class IdbStateStorage implements StateStorage {
     this.remove(key);
   }
 
+  /**
+   * Fires when the state under `key` changes, here or in another tab or worker
+   * of this origin.
+   *
+   * Changes from other contexts are followed only while this store has a
+   * subscriber, which a client has from construction until `dispose()`.
+   */
   public subscribe(key: string, listener: () => void): () => void {
-    return this.#copy.subscribe(key, listener);
+    const unsubscribe = this.#copy.subscribe(key, listener);
+    const stopListening = this.#doorbell.listen();
+    return () => {
+      unsubscribe();
+      stopListening();
+    };
   }
 
   #bump(key: string): number {
@@ -166,11 +216,7 @@ export class IdbStateStorage implements StateStorage {
   }
 
   #announce(key: string): void {
-    try {
-      this.#channel?.postMessage({ key } satisfies Announcement);
-    } catch {
-      // A closed channel: nobody here is listening any more.
-    }
+    this.#doorbell.ring({ key } satisfies Announcement);
   }
 
   #receive(data: unknown): void {

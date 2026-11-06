@@ -2312,7 +2312,6 @@ describe('Session restoration', () => {
     tab.set(slots.state, stateFor(chain).get(SLOTS.state)!);
     const db = await IdbKeyVal.create({ dbName: 'auth-client-state-db', storeName: 'ic-state' });
     await vi.waitFor(async () => expect(await db.get(slots.state)).not.toBeNull());
-    tab.close();
 
     const storage = spyStorage();
     await storage.set(slots.session, { identity: key, chain });
@@ -2342,7 +2341,6 @@ describe('Session restoration', () => {
     tab.set(slots.state, stateFor(chain).get(SLOTS.state)!);
     const db = await IdbKeyVal.create({ dbName: 'auth-client-state-db', storeName: 'ic-state' });
     await vi.waitFor(async () => expect(await db.get(slots.state)).not.toBeNull());
-    tab.close();
 
     const storage = spyStorage();
     await storage.set(slots.session, { identity: key, chain });

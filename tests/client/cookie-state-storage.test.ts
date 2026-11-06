@@ -298,21 +298,22 @@ describe('CookieStateStorage', () => {
 });
 
 describe('CookieStateStorage in a worker', () => {
-  let stores: CookieStateStorage[] = [];
-  const openTab = () => {
-    const store = new CookieStateStorage({ domain: DOMAIN });
-    stores.push(store);
+  let listening: (() => void)[] = [];
+  // A store follows other tabs and workers while it has a subscriber, as it
+  // does under a client, so every store here gets one.
+  const track = (store: CookieStateStorage) => {
+    listening.push(store.subscribe('listening', () => {}));
     return store;
   };
+  const openTab = () => track(new CookieStateStorage({ domain: DOMAIN }));
   // A worker has neither `document` nor `localStorage`. Both are hidden only
   // while the store is built, which is when it decides how to work.
-  const openWorker = () => {
+  const openWorker = () => track(buildWorker());
+  const buildWorker = () => {
     vi.stubGlobal('document', undefined);
     vi.stubGlobal('localStorage', undefined);
     try {
-      const store = new CookieStateStorage({ domain: DOMAIN });
-      stores.push(store);
-      return store;
+      return new CookieStateStorage({ domain: DOMAIN });
     } finally {
       vi.unstubAllGlobals();
       vi.stubGlobal('location', { hostname: 'localhost', protocol: 'http:' });
@@ -320,8 +321,8 @@ describe('CookieStateStorage in a worker', () => {
   };
 
   afterEach(() => {
-    for (const store of stores) store.close();
-    stores = [];
+    for (const stop of listening) stop();
+    listening = [];
     localStorage.clear();
   });
 

@@ -1,5 +1,5 @@
 import { Principal } from '@icp-sdk/core/principal';
-import { IdbStateStorage } from './idb-state-storage.js';
+import { Doorbell, IdbStateStorage } from './idb-state-storage.js';
 import { formatState, parseState, type SessionState, type StateStorage } from './state-storage.js';
 
 /**
@@ -119,7 +119,7 @@ export class CookieStateStorage implements StateStorage {
   // cookie that workers read is kept here too.
   readonly #local = new IdbStateStorage();
   readonly #hasDocument = typeof document !== 'undefined';
-  readonly #channel: BroadcastChannel | undefined;
+  readonly #doorbell = new Doorbell(COOKIE_CHANNEL, (data) => this.#writeRequested(data));
 
   // Writes in progress. set() and remove() each change two records, and a
   // subscriber told between the two would see, and could act on, a state that
@@ -187,12 +187,6 @@ export class CookieStateStorage implements StateStorage {
         );
       }
     }
-
-    this.#channel =
-      typeof BroadcastChannel === 'undefined' ? undefined : new BroadcastChannel(COOKIE_CHANNEL);
-    if (this.#hasDocument) {
-      this.#channel?.addEventListener('message', (event) => this.#writeRequested(event.data));
-    }
   }
 
   /**
@@ -216,12 +210,6 @@ export class CookieStateStorage implements StateStorage {
         // The copy stands.
       }
     }
-  }
-
-  /** Stops listening for changes from other tabs and workers of this origin. */
-  public close(): void {
-    this.#channel?.close();
-    this.#local.close();
   }
 
   // Keys a worker has been asked for, which `ready()` refreshes from the Cookie
@@ -327,6 +315,9 @@ export class CookieStateStorage implements StateStorage {
       };
     }
 
+    // A tab writes the cookie for its origin's workers while it has subscribers.
+    const stopListening = this.#doorbell.listen();
+
     const onVisible = (): void => {
       if (document.visibilityState === 'visible') check();
     };
@@ -341,6 +332,7 @@ export class CookieStateStorage implements StateStorage {
       listeners.delete(check);
       unwatchClaim();
       unwatchCopy();
+      stopListening();
       document.removeEventListener('visibilitychange', onVisible);
       globalThis.removeEventListener('pageshow', check);
       globalThis.removeEventListener('focus', check);
@@ -391,16 +383,12 @@ export class CookieStateStorage implements StateStorage {
     const copy = this.#local.get(cookieCopyKey(key));
     const previous = copy === null ? null : formatState(copy);
     this.#updateCopy(key, raw);
-    try {
-      this.#channel?.postMessage({
-        key,
-        previous,
-        next: raw,
-        attributes: this.#attributes,
-      } satisfies CookieRequest);
-    } catch {
-      // A closed channel: no tab hears this worker any more.
-    }
+    this.#doorbell.ring({
+      key,
+      previous,
+      next: raw,
+      attributes: this.#attributes,
+    } satisfies CookieRequest);
     this.#writeWithCookieStore(key, raw);
   }
 

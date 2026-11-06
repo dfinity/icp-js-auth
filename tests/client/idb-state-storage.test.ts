@@ -34,8 +34,12 @@ const committed = async (key: string, state: Written) => {
 };
 
 let stores: IdbStateStorage[] = [];
+let listening: (() => void)[] = [];
+// A store follows other tabs and workers while it has a subscriber, as it does
+// under a client, so every store here gets one.
 const track = (store: IdbStateStorage) => {
   stores.push(store);
+  listening.push(store.subscribe('listening', () => {}));
   return store;
 };
 
@@ -53,7 +57,8 @@ const openWorker = () => {
 };
 
 afterEach(() => {
-  for (const store of stores) store.close();
+  for (const stop of listening) stop();
+  listening = [];
   stores = [];
   localStorage.clear();
 });
@@ -266,5 +271,31 @@ describe('IdbStateStorage ordering', () => {
     } finally {
       getSpy.mockRestore();
     }
+  });
+});
+
+describe('IdbStateStorage listening', () => {
+  it('stops following other contexts once its last subscriber leaves', async () => {
+    const key = freshKey();
+    const tab = openTab();
+    // Not through openWorker(), which subscribes for the whole test.
+    vi.stubGlobal('localStorage', undefined);
+    const worker = new IdbStateStorage();
+    vi.unstubAllGlobals();
+    const stopOne = worker.subscribe(key, () => {});
+    const stopTwo = worker.subscribe(key, () => {});
+    worker.get(key);
+    await worker.ready();
+
+    stopOne();
+    tab.set(key, alice);
+    await vi.waitFor(() => expect(worker.get(key)).toEqual({ ...alice, held: true }));
+
+    stopTwo();
+    tab.set(key, bob);
+    await committed(key, bob);
+    await settle();
+
+    expect(worker.get(key)).toEqual({ ...alice, held: true });
   });
 });
