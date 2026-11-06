@@ -1608,7 +1608,7 @@ export class AuthClient {
    * @param principal - The account whose session ended.
    */
   async #expireSession(principal: Principal): Promise<void> {
-    if (this.#isReadOnly) return this.#stopActing();
+    if (this.#isReadOnly) return;
     this.#stateStorage.set(this.#slots.state, {
       principal,
       expiration: BigInt(Date.now()) * 1_000_000n,
@@ -1708,6 +1708,9 @@ export class AuthClient {
     // signed in removes nothing.
     if (this.#stateStorage.get(this.#slots.state) === null) {
       await this.#endSession();
+      // Installed here too: on a restore after the record changed, an identity
+      // from the sign-in that just ended is still in place.
+      this.#installIdentity(new AnonymousIdentity());
       return;
     }
 
@@ -1807,7 +1810,7 @@ export class AuthClient {
    * origin, because a sibling reading a shared record must stop seeing one.
    */
   async #endSession(): Promise<void> {
-    if (this.#isReadOnly) return this.#stopActing();
+    if (this.#isReadOnly) return;
     this.#stateStorage.remove(this.#slots.state);
     await this.#clearCredentials();
   }
@@ -1822,7 +1825,7 @@ export class AuthClient {
    * obtained is gone.
    */
   async #dropSession(): Promise<void> {
-    if (this.#isReadOnly) return this.#stopActing();
+    if (this.#isReadOnly) return;
     this.#stateStorage.discard(this.#slots.state);
     await this.#clearCredentials();
   }
@@ -1834,12 +1837,6 @@ export class AuthClient {
    */
   get #isReadOnly(): boolean {
     return this.#stateStorage.isReadOnly === true;
-  }
-
-  // What a read-only client does where a page would end the session: it stops
-  // acting with it, and leaves the shared state and credentials to the page.
-  #stopActing(): void {
-    this.#installIdentity(new AnonymousIdentity());
   }
 
   // Every slot a completed sign-in writes. Not the ceremony's pending slot: a

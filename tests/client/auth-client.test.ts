@@ -2462,6 +2462,26 @@ describe('Session restoration', () => {
     expect(storage.remove).not.toHaveBeenCalled();
   });
 
+  // What a sibling subdomain signing out looks like here: the record goes, and
+  // this origin's credentials are still valid.
+  it('stops acting with a restored session once its record is removed', async () => {
+    vi.setSystemTime(new Date('2020-01-01T00:00:00.000Z'));
+
+    const key = Ed25519KeyIdentity.fromJSON(JSON.stringify(testSecrets));
+    const chain = await createTestDelegation(key, new Date('2020-01-03T00:00:00.000Z'));
+    const stateStorage = stateFor(chain);
+    const client = track(
+      new AuthClient({ credentialStorage: spyStorage({ identity: key, chain }), stateStorage }),
+    );
+    expect((await client.getIdentity()).getPrincipal().isAnonymous()).toBe(false);
+
+    stateStorage.remove(SLOTS.state);
+
+    await vi.waitFor(async () =>
+      expect((await client.getIdentity()).getPrincipal().isAnonymous()).toBe(true),
+    );
+  });
+
   it('should remain anonymous with a key but no delegation', async () => {
     vi.setSystemTime(new Date('2020-01-01T00:00:00.000Z'));
 
