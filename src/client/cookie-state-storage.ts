@@ -74,9 +74,6 @@ export class CookieStateStorage implements StateStorage {
   // composed in on read, under the same key the cookie uses.
   readonly #local = new LocalStateStorage();
 
-  // The cookie's record, copied for this origin's workers.
-  readonly #cookie = new LocalStateStorage();
-
   /** True in a worker, which reads the copy of the cookie its tabs keep. */
   public get isReadOnly(): boolean {
     return this.#local.isReadOnly;
@@ -84,7 +81,7 @@ export class CookieStateStorage implements StateStorage {
 
   /** Resolves once a worker has loaded the claim and the copy of the cookie. */
   public async ready(): Promise<void> {
-    await Promise.all([this.#local.ready(), this.#cookie.ready()]);
+    await this.#local.ready();
   }
 
   constructor(options: CookieStateStorageOptions) {
@@ -182,7 +179,7 @@ export class CookieStateStorage implements StateStorage {
     const payload = `${state.principal.toText()}|${state.expiration.toString()}`;
     // biome-ignore lint/suspicious/noDocumentCookie: the Cookie Store API is async, and this record is read synchronously alongside isAuthenticated().
     document.cookie = `${encodeURIComponent(key)}=${encodeURIComponent(payload)}; ${this.#attributes}; Max-Age=${RECORD_MAX_AGE_SECONDS}`;
-    this.#cookie.set(cookieKey(key), state);
+    this.#local.set(cookieKey(key), state);
     this.#fire(key);
   }
 
@@ -190,7 +187,7 @@ export class CookieStateStorage implements StateStorage {
     this.#local.remove(key);
     // biome-ignore lint/suspicious/noDocumentCookie: same reason as set().
     document.cookie = `${encodeURIComponent(key)}=; ${this.#attributes}; Max-Age=0`;
-    this.#cookie.remove(cookieKey(key));
+    this.#local.remove(cookieKey(key));
     this.#fire(key);
   }
 
@@ -240,11 +237,11 @@ export class CookieStateStorage implements StateStorage {
     // A worker hears of a change through the claim and the copy of the cookie.
     if (this.isReadOnly) {
       const unwatchClaim = this.#local.subscribe(key, check);
-      const unwatchCookie = this.#cookie.subscribe(cookieKey(key), check);
+      const unwatchCopy = this.#local.subscribe(cookieKey(key), check);
       return () => {
         listeners.delete(check);
         unwatchClaim();
-        unwatchCookie();
+        unwatchCopy();
       };
     }
 
@@ -285,7 +282,7 @@ export class CookieStateStorage implements StateStorage {
    * cookie, with the copy brought up to date when a sibling changed it.
    */
   #record(key: string): string | null {
-    const copy = this.#cookie.get(cookieKey(key));
+    const copy = this.#local.get(cookieKey(key));
     const copied = copy === null ? null : `${copy.principal.toText()}|${copy.expiration}`;
     if (this.isReadOnly) {
       // Read now, so the claim loads alongside the copy and `ready()` covers both.
@@ -297,12 +294,12 @@ export class CookieStateStorage implements StateStorage {
     const [principalText, expiration] = raw?.split('|') ?? [];
     try {
       if (principalText === undefined || expiration === undefined) throw new Error();
-      this.#cookie.set(cookieKey(key), {
+      this.#local.set(cookieKey(key), {
         principal: Principal.fromText(principalText),
         expiration: BigInt(expiration),
       });
     } catch {
-      this.#cookie.remove(cookieKey(key));
+      this.#local.remove(cookieKey(key));
     }
     return raw;
   }
