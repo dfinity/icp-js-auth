@@ -407,8 +407,6 @@ export class AuthClient {
   // interaction rather than two.
   #interactions = 0;
   #channelLock: HeldLock | undefined;
-  // The default state store, which this client created and so closes.
-  readonly #ownStateStorage: IdbStateStorage | undefined;
   // Set only for a client built with `ssoDomain`.
   readonly #sso: SsoStatusChecker | undefined;
 
@@ -416,13 +414,7 @@ export class AuthClient {
     this.#options = options;
     this.#credentialStorage = options.credentialStorage ?? new IdbCredentialStorage();
     this.#slots = slotsFor(options.namespace);
-    if (options.stateStorage !== undefined) {
-      this.#stateStorage = options.stateStorage;
-    } else {
-      const ownStore = new IdbStateStorage();
-      this.#ownStateStorage = ownStore;
-      this.#stateStorage = ownStore;
-    }
+    this.#stateStorage = options.stateStorage ?? new IdbStateStorage();
 
     // A string or URL is what this option used to be, and a caller still passing
     // one would otherwise be silently ignored — both halves falling back to
@@ -789,8 +781,6 @@ export class AuthClient {
     this.#unwatchActivity = undefined;
     this.#unwatchState?.();
     this.#unwatchState = undefined;
-    // Only a store this client created: one passed in may be shared with others.
-    this.#ownStateStorage?.close();
   }
 
   /**
