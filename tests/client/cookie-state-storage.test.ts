@@ -1,8 +1,8 @@
 import { Principal } from '@icp-sdk/core/principal';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { CookieStateStorage } from '../../src/client/cookie-state-storage.ts';
-import { LocalStateStorage } from '../../src/client/local-state-storage.ts';
 import {
+  LocalStateStorage,
   MemoryStateStorage,
   type SessionState,
   type StateStorage,
@@ -337,12 +337,14 @@ describe('CookieStateStorage in a worker', () => {
 
   it('reads a sibling sign-in as not held where this origin has no claim', async () => {
     const tab = openTab();
+    // Subscribed, as a client is: that is how a tab notices the cookie changed.
+    listening.push(tab.subscribe(KEY, () => {}));
     // A sibling subdomain signed in: the cookie is there, the claim is not.
     // biome-ignore lint/suspicious/noDocumentCookie: as above.
     document.cookie = `${KEY}=${encodeURIComponent(
       `${state().principal.toText()}|${state().expiration}`,
     )}; Path=/`;
-    tab.get(KEY);
+    globalThis.dispatchEvent(new Event('focus'));
     const worker = openWorker();
     await worker.ready();
 
@@ -351,6 +353,7 @@ describe('CookieStateStorage in a worker', () => {
 
   it('hears a sibling sign-out once a tab of its origin reads the cookie', async () => {
     const tab = openTab();
+    listening.push(tab.subscribe(KEY, () => {}));
     tab.set(KEY, state());
     const worker = openWorker();
     await worker.ready();
@@ -360,7 +363,6 @@ describe('CookieStateStorage in a worker', () => {
 
     clearCookies();
     globalThis.dispatchEvent(new Event('focus'));
-    tab.get(KEY);
 
     await vi.waitFor(() => expect(worker.get(KEY)).toBeNull());
     expect(listener).toHaveBeenCalled();

@@ -23,7 +23,6 @@ import { fromBase64, toBase64 } from './base64.js';
 import type { Credential, CredentialStorage } from './credential-storage.js';
 import { watchActivity, watchForeground } from './foreground-refresh.js';
 import { IdbCredentialStorage } from './idb-credential-storage.js';
-import { LocalStateStorage, readOnlyError } from './local-state-storage.js';
 import {
   NotificationConsent,
   type NotificationConsentStatus,
@@ -37,7 +36,12 @@ import { SessionMinter } from './session-minter.js';
 import { type Slots, slotsFor } from './slots.js';
 import { normalizeSsoDomain } from './sso.js';
 import { createSsoDomainService, type SsoStatus, SsoStatusChecker } from './sso-status.js';
-import type { SessionState, StateStorage } from './state-storage.js';
+import {
+  LocalStateStorage,
+  readOnlyError,
+  type SessionState,
+  type StateStorage,
+} from './state-storage.js';
 
 /**
  * The lock one signer interaction at a time holds.

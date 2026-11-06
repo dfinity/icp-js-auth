@@ -1,7 +1,14 @@
 import { Principal } from '@icp-sdk/core/principal';
 import { IdbKeyVal } from './db.js';
-import { Doorbell, readOnlyError, STATE_DB, withLock } from './local-state-storage.js';
-import { LocalStorageCopy, type SessionState, type StateStorage } from './state-storage.js';
+import {
+  Doorbell,
+  LocalStateStorage,
+  readOnlyError,
+  type SessionState,
+  STATE_DB,
+  type StateStorage,
+  withLock,
+} from './state-storage.js';
 
 /** The channel a tab announces a new answer on, for the workers of its origin. */
 const ANSWER_CHANNEL = 'ic-session-answer';
@@ -94,9 +101,9 @@ export class CookieStateStorage implements StateStorage {
 
   // The cookie is the domain's and says who is signed in; this says whether it
   // was this origin that acquired a credential for them. A cookie cannot carry
-  // that (every sibling reads the same bytes), so it is kept per origin and
+  // that — every sibling reads the same bytes — so it is kept per origin and
   // composed in on read, under the same key the cookie uses.
-  readonly #claim = new LocalStorageCopy();
+  readonly #local = new LocalStateStorage();
 
   // In a tab: the answer last published for each key.
   readonly #published = new Map<string, string>();
@@ -151,7 +158,7 @@ export class CookieStateStorage implements StateStorage {
     // API exposes the list, so the only test that agrees with the browser is to
     // write one and read it back — which catches cookies being switched off at
     // the same time.
-    if (!this.isReadOnly) {
+    if (typeof document !== 'undefined') {
       const probe = 'ic-cookie-probe';
       let accepted = false;
       try {
@@ -187,26 +194,50 @@ export class CookieStateStorage implements StateStorage {
       }
       return this.#answers.get(key) ?? null;
     }
-    const state = this.#answer(key);
-    this.#publish(key, state);
-    return state;
+    const raw = readCookie(key);
+    if (raw === null) return null;
+
+    const [principalText, expiration] = raw.split('|');
+    if (principalText === undefined || expiration === undefined) return null;
+    try {
+      const principal = Principal.fromText(principalText);
+      // Compared, not merely counted: a record can outlive the sign-in it was
+      // written for — an expired one is kept on purpose, so an application can
+      // say the session ended — and a sibling signing in as someone else then
+      // publishes a cookie this origin has no credential for. Asking only whether
+      // some local record exists would read that as held.
+      // The record's own fields are the shared truth, read as written. `held` is
+      // the only thing derived here, because it is the one fact a record every
+      // sibling reads cannot carry.
+      const local = this.#local.get(key);
+      return {
+        principal,
+        expiration: BigInt(expiration),
+        held: local !== null && local.principal.compareTo(principal) === 'eq',
+      };
+    } catch {
+      return null;
+    }
   }
 
   public set(key: string, state: Omit<SessionState, 'held'>): void {
     if (this.isReadOnly) throw readOnlyError();
-    this.#write(key, () => {
-      // The claim first, so nothing reads the cookie as held before it is.
-      this.#claim.set(key, state);
-      this.#writeCookie(key, `${state.principal.toText()}|${state.expiration.toString()}`);
-    });
+    // The local record first, so nothing reads the cookie as held before it is.
+    this.#local.set(key, state);
+    const payload = `${state.principal.toText()}|${state.expiration.toString()}`;
+    // biome-ignore lint/suspicious/noDocumentCookie: the Cookie Store API is async, and this record is read synchronously alongside isAuthenticated().
+    document.cookie = `${encodeURIComponent(key)}=${encodeURIComponent(payload)}; ${this.#attributes}; Max-Age=${RECORD_MAX_AGE_SECONDS}`;
+    this.#fire(key);
+    this.#publish(key);
   }
 
   public remove(key: string): void {
     if (this.isReadOnly) throw readOnlyError();
-    this.#write(key, () => {
-      this.#writeCookie(key, null);
-      this.#claim.remove(key);
-    });
+    this.#local.remove(key);
+    // biome-ignore lint/suspicious/noDocumentCookie: same reason as set().
+    document.cookie = `${encodeURIComponent(key)}=; ${this.#attributes}; Max-Age=0`;
+    this.#fire(key);
+    this.#publish(key);
   }
 
   /**
@@ -219,7 +250,9 @@ export class CookieStateStorage implements StateStorage {
    */
   public discard(key: string): void {
     if (this.isReadOnly) throw readOnlyError();
-    this.#write(key, () => this.#claim.remove(key));
+    this.#local.remove(key);
+    this.#fire(key);
+    this.#publish(key);
   }
 
   /**
@@ -233,8 +266,8 @@ export class CookieStateStorage implements StateStorage {
    */
   public subscribe(key: string, listener: () => void): () => void {
     // One logical change can arrive from several sources at once, so each is
-    // routed through a check that fires only when the answer actually changed
-    // since the last one.
+    // routed through a check that fires only when what is stored actually
+    // changed since the last one.
     //
     // Compared on what `get` answers and not on the cookie alone. `held` is the
     // per-origin half, and `discard` changes only that — leaving the cookie for
@@ -245,6 +278,7 @@ export class CookieStateStorage implements StateStorage {
       const now = stateOf(this.get(key));
       if (now !== last) {
         last = now;
+        this.#publish(key);
         listener();
       }
     };
@@ -268,18 +302,20 @@ export class CookieStateStorage implements StateStorage {
         stopListening();
       };
     }
+    // What this tab sees now, for workers that started before it.
+    this.#publish(key);
 
-    // The claim is in `localStorage`, which raises `storage` in every tab of this
-    // origin but the one that wrote. That is how a tab hears that another tab
-    // dropped this origin's claim, which no cookie event can carry.
+    const onVisible = (): void => {
+      if (document.visibilityState === 'visible') check();
+    };
+    // The local half is in `localStorage`, which raises `storage` in every tab
+    // of this origin but the one that wrote. That is how a sibling tab hears
+    // that this origin dropped its claim, which no cookie event can carry.
     const onStorage = (event: StorageEvent): void => {
       // `key` is null when a tab cleared the whole store, which changes this too.
       if (event.key === key || event.key === null) check();
     };
     globalThis.addEventListener('storage', onStorage);
-    const onVisible = (): void => {
-      if (document.visibilityState === 'visible') check();
-    };
     document.addEventListener('visibilitychange', onVisible);
     globalThis.addEventListener('pageshow', check);
     globalThis.addEventListener('focus', check);
@@ -301,49 +337,6 @@ export class CookieStateStorage implements StateStorage {
     for (const check of [...(this.#subscribers.get(key) ?? [])]) check();
   }
 
-  // Subscribers are told once, after both records a write changes have landed.
-  #write(key: string, write: () => void): void {
-    write();
-    this.#fire(key);
-    this.#publish(key, this.#answer(key));
-  }
-
-  /** A tab's answer: the cookie, and whether this origin's claim matches it. */
-  #answer(key: string): SessionState | null {
-    const raw = readCookie(key);
-    if (raw === null) return null;
-
-    const [principalText, expiration] = raw.split('|');
-    if (principalText === undefined || expiration === undefined) return null;
-    try {
-      const principal = Principal.fromText(principalText);
-      // Compared, not merely counted: a record can outlive the sign-in it was
-      // written for — an expired one is kept on purpose, so an application can
-      // say the session ended — and a sibling signing in as someone else then
-      // publishes a cookie this origin has no credential for. Asking only whether
-      // some local record exists would read that as held.
-      // The record's own fields are the shared truth, read as written. `held` is
-      // the only thing derived here, because it is the one fact a record every
-      // sibling reads cannot carry.
-      const claim = this.#claim.get(key);
-      return {
-        principal,
-        expiration: BigInt(expiration),
-        held: claim !== null && claim.principal.compareTo(principal) === 'eq',
-      };
-    } catch {
-      return null;
-    }
-  }
-
-  #writeCookie(key: string, raw: string | null): void {
-    // biome-ignore lint/suspicious/noDocumentCookie: the Cookie Store API is async, and this record is read synchronously alongside isAuthenticated().
-    document.cookie =
-      raw === null
-        ? `${encodeURIComponent(key)}=; ${this.#attributes}; Max-Age=0`
-        : `${encodeURIComponent(key)}=${encodeURIComponent(raw)}; ${this.#attributes}; Max-Age=${RECORD_MAX_AGE_SECONDS}`;
-  }
-
   /**
    * Publishes a tab's answer for the workers of its origin, when it changed.
    *
@@ -351,12 +344,13 @@ export class CookieStateStorage implements StateStorage {
    * so the last tab to write publishes what is true then rather than what it saw
    * earlier.
    */
-  #publish(key: string, state: SessionState | null): void {
-    const answer = stateOf(state);
+  #publish(key: string): void {
+    if (this.isReadOnly) return;
+    const answer = stateOf(this.get(key));
     if (this.#published.get(key) === answer) return;
     this.#published.set(key, answer);
     void withLock(`${ANSWER_CHANNEL}:${key}`, async () => {
-      const current = stateOf(this.#answer(key));
+      const current = stateOf(this.get(key));
       await (await this.#db).set<StoredAnswer>(answerKey(key), {
         raw: current === '' ? null : current,
       });
@@ -364,7 +358,7 @@ export class CookieStateStorage implements StateStorage {
       this.#published.set(key, current);
       this.#doorbell.ring({ key });
     }).catch(() => {
-      // No IndexedDB here, or the write failed. Forgotten, so the next read
+      // No IndexedDB here, or the write failed. Forgotten, so the next change
       // tries again; tabs read the cookie themselves meanwhile.
       this.#published.delete(key);
     });
@@ -408,8 +402,7 @@ export class CookieStateStorage implements StateStorage {
 }
 
 /**
- * What {@link CookieStateStorage.get} answers, as one comparable string, which
- * is also how a tab publishes it for its workers.
+ * What {@link CookieStateStorage.get} answers, as one comparable string.
  *
  * Both halves in it: the cookie every sibling reads, and the `held` this origin
  * derives, because a change in either is a change to the answer.

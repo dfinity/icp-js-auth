@@ -13,7 +13,6 @@ export { DB_VERSION, type DBCreateOptions, IdbKeyVal } from './db.js';
 export { watchActivity, watchForeground } from './foreground-refresh.js';
 export { IdbCredentialStorage } from './idb-credential-storage.js';
 export { LocalCredentialStorage } from './local-credential-storage.js';
-export { LocalStateStorage } from './local-state-storage.js';
 export { MemoryCredentialStorage } from './memory-credential-storage.js';
 export {
   NotificationConsent,
@@ -32,6 +31,7 @@ export {
 } from './shared-memory-credential-storage.js';
 export type { SsoStatus } from './sso-status.js';
 export {
+  LocalStateStorage,
   MemoryStateStorage,
   type SessionState,
   type StateStorage,
