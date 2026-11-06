@@ -98,11 +98,6 @@ export class CookieStateStorage implements StateStorage {
   // composed in on read, under the same key the cookie uses.
   readonly #claim = new LocalStorageCopy();
 
-  // Writes in progress. set() and remove() each change the claim and the cookie,
-  // and a subscriber told between the two would see, and could act on, a state
-  // that was never meant to exist. Subscribers are told once both have landed.
-  #writeDepth = 0;
-
   // In a tab: the answer last published for each key.
   readonly #published = new Map<string, string>();
 
@@ -247,7 +242,6 @@ export class CookieStateStorage implements StateStorage {
     // this origin losing its claim the one change nothing reported.
     let last = stateOf(this.get(key));
     const check = (): void => {
-      if (this.#writeDepth > 0) return;
       const now = stateOf(this.get(key));
       if (now !== last) {
         last = now;
@@ -278,7 +272,11 @@ export class CookieStateStorage implements StateStorage {
     // The claim is in `localStorage`, which raises `storage` in every tab of this
     // origin but the one that wrote. That is how a tab hears that another tab
     // dropped this origin's claim, which no cookie event can carry.
-    const unwatchClaim = this.#claim.subscribe(key, check);
+    const onStorage = (event: StorageEvent): void => {
+      // `key` is null when a tab cleared the whole store, which changes this too.
+      if (event.key === key || event.key === null) check();
+    };
+    globalThis.addEventListener('storage', onStorage);
     const onVisible = (): void => {
       if (document.visibilityState === 'visible') check();
     };
@@ -291,7 +289,7 @@ export class CookieStateStorage implements StateStorage {
 
     return () => {
       listeners.delete(check);
-      unwatchClaim();
+      globalThis.removeEventListener('storage', onStorage);
       document.removeEventListener('visibilitychange', onVisible);
       globalThis.removeEventListener('pageshow', check);
       globalThis.removeEventListener('focus', check);
@@ -303,13 +301,9 @@ export class CookieStateStorage implements StateStorage {
     for (const check of [...(this.#subscribers.get(key) ?? [])]) check();
   }
 
+  // Subscribers are told once, after both records a write changes have landed.
   #write(key: string, write: () => void): void {
-    this.#writeDepth++;
-    try {
-      write();
-    } finally {
-      this.#writeDepth--;
-    }
+    write();
     this.#fire(key);
     this.#publish(key, this.#answer(key));
   }
