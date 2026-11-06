@@ -9,7 +9,7 @@ import {
 } from './state-storage.js';
 
 /** The database the state is kept in, apart from the credentials' database. */
-export const STATE_DB: DBCreateOptions = { dbName: 'auth-client-state-db', storeName: 'ic-state' };
+export const STATE_DB: DBCreateOptions = { dbName: 'auth-client-state-db', storeName: 'ic-keyval' };
 
 /** The channel a store announces on, and the prefix of the locks its writes take. */
 const STATE_CHANNEL = 'ic-session-state';

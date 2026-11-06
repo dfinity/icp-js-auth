@@ -22,7 +22,7 @@ const settle = async () => {
   for (let turn = 0; turn < 25; turn++) await new Promise((resolve) => setTimeout(resolve, 0));
 };
 
-const stateDb = () => IdbKeyVal.create({ dbName: 'auth-client-state-db', storeName: 'ic-state' });
+const stateDb = () => IdbKeyVal.create({ dbName: 'auth-client-state-db', storeName: 'ic-keyval' });
 
 type Written = typeof alice | null;
 

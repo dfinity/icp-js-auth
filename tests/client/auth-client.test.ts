@@ -2376,7 +2376,7 @@ describe('Session restoration', () => {
     const chain = await createTestDelegation(key, expiration);
     const tab = new LocalStateStorage();
     tab.set(slots.state, stateFor(chain).get(SLOTS.state)!);
-    const db = await IdbKeyVal.create({ dbName: 'auth-client-state-db', storeName: 'ic-state' });
+    const db = await IdbKeyVal.create({ dbName: 'auth-client-state-db', storeName: 'ic-keyval' });
     await vi.waitFor(async () => expect(await db.get(slots.state)).not.toBeNull());
 
     const storage = spyStorage();
@@ -2399,7 +2399,7 @@ describe('Session restoration', () => {
     const chain = await createTestDelegation(key, expiration);
     const tab = new LocalStateStorage();
     tab.set(slots.state, stateFor(chain).get(SLOTS.state)!);
-    const db = await IdbKeyVal.create({ dbName: 'auth-client-state-db', storeName: 'ic-state' });
+    const db = await IdbKeyVal.create({ dbName: 'auth-client-state-db', storeName: 'ic-keyval' });
     await vi.waitFor(async () => expect(await db.get(slots.state)).not.toBeNull());
 
     const storage = spyStorage();
@@ -2444,7 +2444,7 @@ describe('Session restoration', () => {
     const chain = await createTestDelegation(key, new Date('2020-01-03T00:00:00.000Z'));
     const tab = new LocalStateStorage();
     tab.set(slots.state, stateFor(chain).get(SLOTS.state)!);
-    const db = await IdbKeyVal.create({ dbName: 'auth-client-state-db', storeName: 'ic-state' });
+    const db = await IdbKeyVal.create({ dbName: 'auth-client-state-db', storeName: 'ic-keyval' });
     await vi.waitFor(async () => expect(await db.get(slots.state)).not.toBeNull());
     const storage = spyStorage();
     await storage.set(slots.session, { identity: key, chain });

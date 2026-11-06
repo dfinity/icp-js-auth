@@ -2,7 +2,7 @@ import 'fake-indexeddb/auto';
 import { beforeEach } from 'vitest';
 
 const STATE_DB = 'auth-client-state-db';
-const STATE_STORE = 'ic-state';
+const STATE_STORE = 'ic-keyval';
 
 const request = <T>(req: IDBRequest<T>): Promise<T> =>
   new Promise((resolve, reject) => {
