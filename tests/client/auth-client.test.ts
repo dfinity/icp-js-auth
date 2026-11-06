@@ -16,6 +16,7 @@ import {
 } from '../../src/client/auth-client.ts';
 import { CookieStateStorage } from '../../src/client/cookie-state-storage.ts';
 import type { Credential, CredentialStorage } from '../../src/client/credential-storage.ts';
+import { IdbKeyVal } from '../../src/client/db.ts';
 import { IdbCredentialStorage } from '../../src/client/idb-credential-storage.ts';
 import { IdbStateStorage } from '../../src/client/idb-state-storage.ts';
 import { MemoryCredentialStorage } from '../../src/client/memory-credential-storage.ts';
@@ -2305,7 +2306,8 @@ describe('Session restoration', () => {
     const chain = await createTestDelegation(key, expiration);
     const tab = new IdbStateStorage();
     tab.set(SLOTS.state, stateFor(chain).get(SLOTS.state)!);
-    for (let turn = 0; turn < 25; turn++) await new Promise((r) => setTimeout(r, 0));
+    const db = await IdbKeyVal.create({ dbName: 'auth-client-state-db', storeName: 'ic-state' });
+    await vi.waitFor(async () => expect(await db.get(SLOTS.state)).not.toBeNull());
     tab.close();
 
     const storage = spyStorage({ identity: key, chain });
