@@ -2301,27 +2301,32 @@ describe('Session restoration', () => {
   it('restores in a worker once the state store has loaded', async () => {
     vi.setSystemTime(new Date('2020-01-01T00:00:00.000Z'));
 
+    // A namespace of its own: clients other tests left behind share the state
+    // database, and act on any record under the bare names.
+    const namespace = 'worker-restore';
+    const slots = slotsFor(namespace);
     const expiration = new Date('2020-01-03T00:00:00.000Z');
     const key = Ed25519KeyIdentity.fromJSON(JSON.stringify(testSecrets));
     const chain = await createTestDelegation(key, expiration);
     const tab = new IdbStateStorage();
-    tab.set(SLOTS.state, stateFor(chain).get(SLOTS.state)!);
+    tab.set(slots.state, stateFor(chain).get(SLOTS.state)!);
     const db = await IdbKeyVal.create({ dbName: 'auth-client-state-db', storeName: 'ic-state' });
-    await vi.waitFor(async () => expect(await db.get(SLOTS.state)).not.toBeNull());
+    await vi.waitFor(async () => expect(await db.get(slots.state)).not.toBeNull());
     tab.close();
 
-    const storage = spyStorage({ identity: key, chain });
+    const storage = spyStorage();
+    await storage.set(slots.session, { identity: key, chain });
     vi.stubGlobal('localStorage', undefined);
     let client: AuthClient;
     try {
-      client = track(new AuthClient({ credentialStorage: storage }));
+      client = track(new AuthClient({ credentialStorage: storage, namespace }));
     } finally {
       vi.unstubAllGlobals();
     }
     const identity = await client.getIdentity();
 
     expect(identity.getPrincipal().isAnonymous()).toBe(false);
-    expect(storage.remove).not.toHaveBeenCalledWith(SLOTS.session);
+    expect(storage.remove).not.toHaveBeenCalledWith(slots.session);
   });
 
   it('should remain anonymous with a key but no delegation', async () => {
