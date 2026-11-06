@@ -71,7 +71,6 @@ const hasLocalStorage = (): boolean => {
 export class IdbStateStorage implements StateStorage {
   readonly #copy: LocalStateStorage | MemoryStateStorage;
   readonly #channel: BroadcastChannel | undefined;
-  readonly #ready: Promise<void>;
 
   // Bumped by every write and every read of IndexedDB, per key. A read that
   // finishes after the number moved on is older than what the copy holds.
@@ -81,11 +80,13 @@ export class IdbStateStorage implements StateStorage {
   // holds them, so a read of IndexedDB in the meantime is older.
   readonly #pendingWrites = new Map<string, number>();
 
-  // Reads of IndexedDB in progress, which `ready()` waits for.
-  readonly #rereads = new Set<Promise<void>>();
+  // Loads from IndexedDB in progress, which `ready()` waits for.
+  readonly #pendingReads = new Set<Promise<void>>();
 
-  // Keys whose record in `localStorage` has been reconciled with IndexedDB.
-  readonly #reconciledKeys = new Set<string>();
+  // Keys whose stored record has been loaded into the copy, which happens the
+  // first time each is read: the client names its key, so this store cannot
+  // know them in advance.
+  readonly #loadedKeys = new Set<string>();
 
   constructor() {
     this.#copy = hasLocalStorage() ? new LocalStateStorage() : new MemoryStateStorage();
@@ -93,15 +94,15 @@ export class IdbStateStorage implements StateStorage {
       typeof BroadcastChannel === 'undefined' ? undefined : new BroadcastChannel(STATE_CHANNEL);
     // Listening before the first read, so a write that commits during it is not missed.
     this.#channel?.addEventListener('message', (event) => this.#receive(event.data));
-    this.#ready = this.#loadAll();
   }
 
   /**
-   * Resolves once this store's copy agrees with IndexedDB. Never rejects: where
-   * IndexedDB is unavailable, the copy is all there is.
+   * Resolves once every key read so far has been loaded from IndexedDB, along
+   * with any change announced in the meantime. Never rejects: where IndexedDB is
+   * unavailable, the copy is all there is.
    */
-  public ready(): Promise<void> {
-    return this.#ready;
+  public async ready(): Promise<void> {
+    while (this.#pendingReads.size > 0) await Promise.all([...this.#pendingReads]);
   }
 
   /**
@@ -114,9 +115,9 @@ export class IdbStateStorage implements StateStorage {
   }
 
   public get(key: string): SessionState | null {
-    if (this.#copy instanceof LocalStateStorage && !this.#reconciledKeys.has(key)) {
-      this.#reconciledKeys.add(key);
-      this.#track(this.#reconcile(key));
+    if (!this.#loadedKeys.has(key)) {
+      this.#loadedKeys.add(key);
+      this.#track(this.#copy instanceof LocalStateStorage ? this.#reconcile(key) : this.#load(key));
     }
     return this.#copy.get(key);
   }
@@ -174,15 +175,15 @@ export class IdbStateStorage implements StateStorage {
 
   #receive(data: unknown): void {
     if (!isAnnouncement(data)) return;
-    this.#track(this.#reread(data.key));
+    this.#track(this.#load(data.key));
   }
 
   #track(work: Promise<void>): void {
-    const tracked = work.catch(() => undefined).finally(() => this.#rereads.delete(tracked));
-    this.#rereads.add(tracked);
+    const tracked = work.catch(() => undefined).finally(() => this.#pendingReads.delete(tracked));
+    this.#pendingReads.add(tracked);
   }
 
-  async #reread(key: string): Promise<void> {
+  async #load(key: string): Promise<void> {
     const version = this.#bump(key);
     const stored = await (await this.#db).get<StoredState>(key);
     if (this.#versions.get(key) !== version) return;
@@ -209,24 +210,6 @@ export class IdbStateStorage implements StateStorage {
     const stored = await db.get<StoredState>(key);
     if (stored === null || this.#versions.get(key) !== version) return;
     this.#apply(key, stored.raw);
-  }
-
-  async #loadAll(): Promise<void> {
-    try {
-      const versions = new Map(this.#versions);
-      const entries = await (await this.#db).entries<StoredState>();
-      for (const [key, stored] of entries) {
-        if (typeof key !== 'string') continue;
-        // Anything written or read under this key since is newer than this snapshot.
-        if (this.#versions.get(key) !== versions.get(key)) continue;
-        this.#apply(key, stored.raw);
-      }
-    } catch {
-      // No IndexedDB here: the copy is all there is.
-    }
-    // A read started by an announcement is newer than the snapshot, so it has to
-    // land before the copy can be called up to date.
-    while (this.#rereads.size > 0) await Promise.all([...this.#rereads]);
   }
 
   #apply(key: string, raw: string | null): void {

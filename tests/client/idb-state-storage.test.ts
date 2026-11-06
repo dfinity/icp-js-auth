@@ -85,6 +85,7 @@ describe('IdbStateStorage in a worker', () => {
     await committed(key, alice);
 
     const worker = openWorker();
+    worker.get(key);
     await worker.ready();
 
     expect(worker.get(key)).toEqual({ ...alice, held: true });
@@ -94,6 +95,7 @@ describe('IdbStateStorage in a worker', () => {
     const key = freshKey();
     const tab = openTab();
     const worker = openWorker();
+    worker.get(key);
     await worker.ready();
     const listener = vi.fn();
     worker.subscribe(key, listener);
@@ -113,6 +115,7 @@ describe('IdbStateStorage in a worker', () => {
     tab.set(key, alice);
     await committed(key, alice);
     const worker = openWorker();
+    worker.get(key);
     await worker.ready();
 
     tab.set(key, bob);
@@ -126,6 +129,7 @@ describe('IdbStateStorage in a worker', () => {
     tab.set(key, alice);
     await committed(key, alice);
     const worker = openWorker();
+    worker.get(key);
     await worker.ready();
     const listener = vi.fn();
     tab.subscribe(key, listener);
@@ -140,9 +144,11 @@ describe('IdbStateStorage in a worker', () => {
   it('starts signed out where there is no IndexedDB', async () => {
     vi.stubGlobal('indexedDB', undefined);
     try {
+      const key = freshKey();
       const worker = openWorker();
+      worker.get(key);
       await worker.ready();
-      expect(worker.get(freshKey())).toBeNull();
+      expect(worker.get(key)).toBeNull();
     } finally {
       vi.unstubAllGlobals();
     }
@@ -158,6 +164,7 @@ describe('IdbStateStorage after an upgrade from LocalStateStorage', () => {
     await committed(key, alice);
 
     const worker = openWorker();
+    worker.get(key);
     await worker.ready();
     expect(worker.get(key)).toEqual({ ...alice, held: true });
   });
@@ -165,6 +172,7 @@ describe('IdbStateStorage after an upgrade from LocalStateStorage', () => {
   it('does not copy over a sign-out IndexedDB already has', async () => {
     const key = freshKey();
     const worker = openWorker();
+    worker.get(key);
     await worker.ready();
     worker.remove(key);
     await committed(key, null);
@@ -179,6 +187,7 @@ describe('IdbStateStorage after an upgrade from LocalStateStorage', () => {
     await settle();
     expect(await (await stateDb()).get(key)).toEqual({ raw: null });
     const later = openWorker();
+    later.get(key);
     await later.ready();
     expect(later.get(key)).toBeNull();
   });
@@ -197,6 +206,7 @@ describe('IdbStateStorage ordering', () => {
 
     expect(tab.get(key)).toBeNull();
     const worker = openWorker();
+    worker.get(key);
     await worker.ready();
     expect(worker.get(key)).toBeNull();
   });
@@ -208,6 +218,7 @@ describe('IdbStateStorage ordering', () => {
     one.set(key, alice);
     await committed(key, alice);
     const worker = openWorker();
+    worker.get(key);
     await worker.ready();
     const first = vi.fn();
     const second = vi.fn();
@@ -220,56 +231,39 @@ describe('IdbStateStorage ordering', () => {
     await vi.waitFor(() => expect(first).toHaveBeenCalledTimes(1));
   });
 
-  it('resolves ready only after a write announced during the load', async () => {
+  it('resolves ready only once the keys read so far have loaded', async () => {
     const key = freshKey();
-    // Holds the worker's first load, and then its re-read, so the announcement
-    // lands while the load is in progress.
-    let releaseLoad = () => {};
-    const loadHeld = new Promise<void>((resolve) => {
-      releaseLoad = resolve;
+    openTab().set(key, alice);
+    await committed(key, alice);
+
+    // Holds the worker's read of IndexedDB until released.
+    let release = () => {};
+    const held = new Promise<void>((resolve) => {
+      release = resolve;
     });
-    let releaseRead = () => {};
-    const readHeld = new Promise<void>((resolve) => {
-      releaseRead = resolve;
-    });
-    const entries = IdbKeyVal.prototype.entries;
     const get = IdbKeyVal.prototype.get;
-    const reads: string[] = [];
-    const entriesSpy = vi.spyOn(IdbKeyVal.prototype, 'entries').mockImplementation(async function (
-      this: IdbKeyVal,
-    ) {
-      await loadHeld;
-      return entries.call(this);
-    });
     const getSpy = vi.spyOn(IdbKeyVal.prototype, 'get').mockImplementation(async function (
       this: IdbKeyVal,
       slot,
     ) {
-      if (slot === key) {
-        reads.push(slot);
-        await readHeld;
-      }
+      if (slot === key) await held;
       return get.call(this, slot);
     });
     try {
       const worker = openWorker();
-      const tab = openTab();
-      tab.set(key, alice);
-      await vi.waitFor(() => expect(reads).toContain(key));
+      expect(worker.get(key)).toBeNull();
 
       let isReady = false;
       void worker.ready().then(() => {
         isReady = true;
       });
-      releaseLoad();
       await settle();
       expect(isReady).toBe(false);
 
-      releaseRead();
+      release();
       await worker.ready();
       expect(worker.get(key)).toEqual({ ...alice, held: true });
     } finally {
-      entriesSpy.mockRestore();
       getSpy.mockRestore();
     }
   });
