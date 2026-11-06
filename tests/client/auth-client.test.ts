@@ -2329,6 +2329,38 @@ describe('Session restoration', () => {
     expect(storage.remove).not.toHaveBeenCalledWith(slots.session);
   });
 
+  it('reads as signed in in a worker once ready', async () => {
+    vi.setSystemTime(new Date('2020-01-01T00:00:00.000Z'));
+
+    // A namespace of its own, for the same reason as the test above.
+    const namespace = 'worker-ready';
+    const slots = slotsFor(namespace);
+    const expiration = new Date('2020-01-03T00:00:00.000Z');
+    const key = Ed25519KeyIdentity.fromJSON(JSON.stringify(testSecrets));
+    const chain = await createTestDelegation(key, expiration);
+    const tab = new IdbStateStorage();
+    tab.set(slots.state, stateFor(chain).get(SLOTS.state)!);
+    const db = await IdbKeyVal.create({ dbName: 'auth-client-state-db', storeName: 'ic-state' });
+    await vi.waitFor(async () => expect(await db.get(slots.state)).not.toBeNull());
+    tab.close();
+
+    const storage = spyStorage();
+    await storage.set(slots.session, { identity: key, chain });
+    vi.stubGlobal('localStorage', undefined);
+    let client: AuthClient;
+    try {
+      client = track(new AuthClient({ credentialStorage: storage, namespace }));
+    } finally {
+      vi.unstubAllGlobals();
+    }
+    // Nothing loaded yet: the worker's copy of the state starts empty.
+    expect(client.isAuthenticated()).toBe(false);
+
+    await client.ready();
+
+    expect(client.isAuthenticated()).toBe(true);
+  });
+
   it('should remain anonymous with a key but no delegation', async () => {
     vi.setSystemTime(new Date('2020-01-01T00:00:00.000Z'));
 

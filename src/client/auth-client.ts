@@ -573,6 +573,31 @@ export class AuthClient {
   }
 
   /**
+   * Resolves once this client has loaded the stored state and restored the
+   * session, so that {@link isAuthenticated}, {@link getStatus} and
+   * {@link getPrincipal} give the stored answer.
+   *
+   * Only needed where there is no `localStorage`, which is a web worker or a
+   * service worker. There the state is loaded from IndexedDB, and until then the
+   * client reads as signed out:
+   *
+   * ```ts
+   * const client = new AuthClient();
+   * await client.ready();
+   * client.isAuthenticated();
+   * ```
+   *
+   * In a browser tab, don't wait for it. The status is correct from the moment
+   * the client is constructed, and waiting would hold up the page on IndexedDB
+   * and a session restore for nothing.
+   *
+   * Rejects where restoring the session fails, as {@link getIdentity} does.
+   */
+  ready(): Promise<void> {
+    return this.#init();
+  }
+
+  /**
    * Returns the current identity, restoring a previous session if available.
    */
   async getIdentity(): Promise<Identity> {

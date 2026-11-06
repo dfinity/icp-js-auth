@@ -63,12 +63,9 @@ const hasLocalStorage = (): boolean => {
  * always finds the write it was told about.
  *
  * {@link ready} resolves once the copy has been brought up to date with
- * IndexedDB. The client waits for it before restoring a session, so a worker
- * needs nothing more than:
- *
- * ```ts
- * const client = new AuthClient({ stateStorage: new IdbStateStorage() });
- * ```
+ * IndexedDB. The client waits for it before restoring a session. In a worker,
+ * where the copy starts empty, wait for `AuthClient.ready()` before reading the
+ * client's status.
  * @see implements {@link StateStorage}
  */
 export class IdbStateStorage implements StateStorage {
