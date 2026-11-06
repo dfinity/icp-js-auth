@@ -148,21 +148,6 @@ export class IdbKeyVal {
   }
 
   /**
-   * Stores a value only where the key has none, checked and written in one
-   * transaction so no other write can land in between.
-   * @returns Whether the value was stored.
-   */
-  public async setIfAbsent<T>(key: IDBValidKey, value: T): Promise<boolean> {
-    return await this._withDb(async (db) => {
-      const tx = db.transaction(this._storeName, 'readwrite');
-      const isAbsent = (await tx.store.count(key)) === 0;
-      if (isAbsent) await tx.store.put(value, key);
-      await tx.done;
-      return isAbsent;
-    });
-  }
-
-  /**
    * Remove a key
    * @param key {@link IDBValidKey}
    * @returns void

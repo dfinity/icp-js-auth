@@ -2435,6 +2435,33 @@ describe('Session restoration', () => {
     await expect(client.signIn()).rejects.toThrow(/read-only/);
   });
 
+  it('stops acting with a session a page ended, in a worker', async () => {
+    vi.setSystemTime(new Date('2020-01-01T00:00:00.000Z'));
+
+    const namespace = 'worker-ended';
+    const slots = slotsFor(namespace);
+    const key = Ed25519KeyIdentity.fromJSON(JSON.stringify(testSecrets));
+    const chain = await createTestDelegation(key, new Date('2020-01-03T00:00:00.000Z'));
+    const tab = new IdbStateStorage();
+    tab.set(slots.state, stateFor(chain).get(SLOTS.state)!);
+    const db = await IdbKeyVal.create({ dbName: 'auth-client-state-db', storeName: 'ic-state' });
+    await vi.waitFor(async () => expect(await db.get(slots.state)).not.toBeNull());
+    const storage = spyStorage();
+    await storage.set(slots.session, { identity: key, chain });
+    const client = await openWorkerClient({ credentialStorage: storage, namespace });
+    await client.ready();
+    expect((await client.getIdentity()).getPrincipal().isAnonymous()).toBe(false);
+
+    // The page ends the sign-in; the credentials are its to clear.
+    tab.remove(slots.state);
+
+    await vi.waitFor(async () =>
+      expect((await client.getIdentity()).getPrincipal().isAnonymous()).toBe(true),
+    );
+    expect(client.isAuthenticated()).toBe(false);
+    expect(storage.remove).not.toHaveBeenCalled();
+  });
+
   it('should remain anonymous with a key but no delegation', async () => {
     vi.setSystemTime(new Date('2020-01-01T00:00:00.000Z'));
 

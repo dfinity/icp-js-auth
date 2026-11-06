@@ -172,24 +172,23 @@ describe('IdbStateStorage after an upgrade from LocalStateStorage', () => {
     expect(worker.get(key)).toEqual({ ...alice, held: true });
   });
 
-  it('does not copy over a sign-out IndexedDB already has', async () => {
+  it('mirrors what localStorage holds over an older mirror', async () => {
     const key = freshKey();
-    openTab().remove(key);
-    await committed(key, null);
+    openTab().set(key, bob);
+    await committed(key, bob);
 
-    // A tab still holding the record from before the sign-out reached it.
+    // A write that never reached the mirror: a page closed first, or a tab still
+    // on the earlier version wrote only `localStorage`.
     new LocalStateStorage().set(key, alice);
     const tab = openTab();
-    tab.get(key);
 
-    // The tab takes the sign-out rather than keeping its stale record.
-    await vi.waitFor(() => expect(tab.get(key)).toBeNull());
-    await settle();
-    expect(await (await stateDb()).get(key)).toEqual({ raw: null });
-    const later = openWorker();
-    later.get(key);
-    await later.ready();
-    expect(later.get(key)).toBeNull();
+    expect(tab.get(key)).toEqual({ ...alice, held: true });
+    await committed(key, alice);
+    expect(tab.get(key)).toEqual({ ...alice, held: true });
+    const worker = openWorker();
+    worker.get(key);
+    await worker.ready();
+    expect(worker.get(key)).toEqual({ ...alice, held: true });
   });
 });
 

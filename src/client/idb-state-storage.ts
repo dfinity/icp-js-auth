@@ -14,12 +14,7 @@ export const STATE_DB: DBCreateOptions = { dbName: 'auth-client-state-db', store
 /** The channel a store announces on, and the prefix of the locks its writes take. */
 const STATE_CHANNEL = 'ic-session-state';
 
-/**
- * One record in IndexedDB.
- *
- * `raw` is `null` for a sign-out, which is kept rather than deleted, so that a
- * missing entry means "never written".
- */
+/** One mirrored record in IndexedDB: what `localStorage` holds, or `null` for none. */
 interface StoredState {
   raw: string | null;
 }
@@ -116,25 +111,23 @@ const hasLocalStorage = (): boolean => {
 /**
  * State that the tabs and the workers of an origin share.
  *
- * IndexedDB holds the state every context agrees on. Each context also keeps a
- * copy it can read synchronously: a tab in `localStorage`, exactly as
- * {@link LocalStateStorage} keeps it (same key, same format, so a sign-in made by
- * an earlier version reads as it is), and a dedicated, shared or service worker
- * in memory.
+ * A tab keeps the state in `localStorage`, exactly as {@link LocalStateStorage}
+ * does (same key, same format, so a sign-in made by an earlier version reads as
+ * it is), and that is what every tab agrees on. Workers cannot read
+ * `localStorage`, so tabs mirror it into IndexedDB and a worker reads the
+ * mirror. A worker keeps its own copy in memory and changes nothing: signing in
+ * and out happens in a page.
  *
- * Only tabs change the state. A worker reads it, follows it, and throws if asked
- * to change it: signing in and out happens in a page. A tab's write updates its
- * copy straight away and is written to IndexedDB without the tab waiting for it.
- * Writes to IndexedDB take a Web Lock per key, so they land in the order they
- * were made, across tabs. Once a write has committed, it is announced on a
- * `BroadcastChannel`, and every other store reads IndexedDB again and updates
- * its copy. Announcing only after the commit means a reader always finds the
- * write it was told about.
+ * Every tab write is mirrored without the tab waiting for it, under a Web Lock
+ * per key, and the mirror is written from what `localStorage` holds when the
+ * lock is granted. So the last write to land always mirrors the current state,
+ * whatever order the tabs' writes were queued in, and a write lost to a closing
+ * page is made good by the next tab to read the key. Once a write has committed,
+ * it is announced on a `BroadcastChannel`, and workers read the mirror again.
  *
- * {@link ready} resolves once the copy has been brought up to date with
- * IndexedDB. The client waits for it before restoring a session. In a worker,
- * where the copy starts empty, wait for `AuthClient.ready()` before reading the
- * client's status.
+ * {@link ready} resolves once a worker's copy has been loaded from the mirror.
+ * The client waits for it before restoring a session. In a worker, wait for
+ * `AuthClient.ready()` before reading the client's status.
  * @see implements {@link StateStorage}
  */
 export class IdbStateStorage implements StateStorage {
@@ -147,21 +140,20 @@ export class IdbStateStorage implements StateStorage {
   readonly #copy: LocalStateStorage | MemoryStateStorage;
   readonly #doorbell = new Doorbell(STATE_CHANNEL, (data) => this.#receive(data));
 
-  // Bumped by every write and every read of IndexedDB, per key. A read that
-  // finishes after the number moved on is older than what the copy holds.
+  // Each subscriber's check, per key. An announcement runs them in a tab: a
+  // write by another store in the same tab raises no `storage` event here.
+  readonly #checks = new Map<string, Set<() => void>>();
+
+  // Keys read so far: mirrored on first read in a tab, loaded on first read in
+  // a worker. The client names its key, so this store cannot know them sooner.
+  readonly #seenKeys = new Set<string>();
+
+  // In a worker: one number per key, bumped by each load. A load that finishes
+  // after the number moved on is older than the one that moved it.
   readonly #versions = new Map<string, number>();
 
-  // Writes made here that have not yet committed, per key. The copy already
-  // holds them, so a read of IndexedDB in the meantime is older.
-  readonly #pendingWrites = new Map<string, number>();
-
-  // Loads from IndexedDB in progress, which `ready()` waits for.
-  readonly #pendingReads = new Set<Promise<void>>();
-
-  // Keys whose stored record has been loaded into the copy, which happens the
-  // first time each is read: the client names its key, so this store cannot
-  // know them in advance.
-  readonly #loadedKeys = new Set<string>();
+  // Mirrors and loads in progress, which `ready()` waits for.
+  readonly #pendingWork = new Set<Promise<void>>();
 
   #subscriberCount = 0;
 
@@ -171,34 +163,33 @@ export class IdbStateStorage implements StateStorage {
   }
 
   /**
-   * Resolves once every key read so far has been loaded from IndexedDB, along
-   * with any change announced in the meantime. Never rejects: where IndexedDB is
-   * unavailable, the copy is all there is.
+   * Resolves once every key read so far is loaded (in a worker) or mirrored (in
+   * a tab). Never rejects: where IndexedDB is unavailable, the copy is all there
+   * is.
    */
   public async ready(): Promise<void> {
-    while (this.#pendingReads.size > 0) await Promise.all([...this.#pendingReads]);
+    while (this.#pendingWork.size > 0) await Promise.all([...this.#pendingWork]);
   }
 
   public get(key: string): SessionState | null {
-    if (!this.#loadedKeys.has(key)) {
-      this.#loadedKeys.add(key);
-      this.#track(this.#copy instanceof LocalStateStorage ? this.#reconcile(key) : this.#load(key));
+    if (!this.#seenKeys.has(key)) {
+      this.#seenKeys.add(key);
+      // In a tab, what an earlier version or a closing page left unmirrored.
+      this.#track(this.isReadOnly ? this.#load(key) : this.#mirror(key));
     }
     return this.#copy.get(key);
   }
 
   public set(key: string, state: Omit<SessionState, 'held'>): void {
     if (this.isReadOnly) throw readOnlyError();
-    // Queued before the copy changes, because changing it notifies subscribers,
-    // and a write one of them makes has to land after this one.
-    this.#persist(key, formatState(state));
     this.#copy.set(key, state);
+    this.#track(this.#mirror(key));
   }
 
   public remove(key: string): void {
     if (this.isReadOnly) throw readOnlyError();
-    this.#persist(key, null);
     this.#copy.remove(key);
+    this.#track(this.#mirror(key));
   }
 
   /** The same as {@link remove}: this store publishes nothing beyond the origin. */
@@ -207,18 +198,30 @@ export class IdbStateStorage implements StateStorage {
   }
 
   /**
-   * Fires when the state under `key` changes, here or in another tab or worker
-   * of this origin.
+   * Fires when the state under `key` changes, here or in another tab of this
+   * origin, or for a worker, in a tab.
    *
    * Changes from other contexts are followed only while this store has a
    * subscriber, which a client has from construction until `dispose()`.
    */
   public subscribe(key: string, listener: () => void): () => void {
-    const unsubscribe = this.#copy.subscribe(key, listener);
-    // Nothing was followed while this store had no subscribers, so what it
-    // loaded before may have changed since. `ready()` waits for the reload.
-    if (this.#subscriberCount++ === 0) {
-      for (const loadedKey of this.#loadedKeys) this.#track(this.#load(loadedKey));
+    // One check for every source of news, so a change heard twice is told once.
+    let last = this.#raw(key);
+    const check = (): void => {
+      const now = this.#raw(key);
+      if (now === last) return;
+      last = now;
+      listener();
+    };
+    const checks = this.#checks.get(key) ?? new Set();
+    checks.add(check);
+    this.#checks.set(key, checks);
+    const unsubscribe = this.#copy.subscribe(key, check);
+
+    // A worker followed nothing while it had no subscribers, so what it loaded
+    // before may have changed since. `ready()` waits for the reload.
+    if (this.#subscriberCount++ === 0 && this.isReadOnly) {
+      for (const seenKey of this.#seenKeys) this.#track(this.#load(seenKey));
     }
     const stopListening = this.#doorbell.listen();
     let isSubscribed = true;
@@ -226,79 +229,48 @@ export class IdbStateStorage implements StateStorage {
       if (!isSubscribed) return;
       isSubscribed = false;
       this.#subscriberCount--;
+      checks.delete(check);
       unsubscribe();
       stopListening();
     };
   }
 
-  #bump(key: string): number {
-    const version = (this.#versions.get(key) ?? 0) + 1;
-    this.#versions.set(key, version);
-    return version;
+  #raw(key: string): string | null {
+    const state = this.#copy.get(key);
+    return state === null ? null : formatState(state);
   }
 
-  #persist(key: string, raw: string | null): void {
-    this.#bump(key);
-    this.#pendingWrites.set(key, (this.#pendingWrites.get(key) ?? 0) + 1);
-    void withLock(`${STATE_CHANNEL}:${key}`, async () => {
-      try {
-        await (await this.#db).set<StoredState>(key, { raw });
-        this.#announce(key);
-      } finally {
-        this.#pendingWrites.set(key, (this.#pendingWrites.get(key) ?? 1) - 1);
-      }
-    }).catch(() => {
-      // No IndexedDB here, or the write failed. This context's copy is already
-      // written; other contexts keep what they have until the next write.
+  #track(work: Promise<void>): void {
+    const tracked = work.catch(() => undefined).finally(() => this.#pendingWork.delete(tracked));
+    this.#pendingWork.add(tracked);
+  }
+
+  /** Writes what `localStorage` holds now to the mirror, if the mirror differs. */
+  async #mirror(key: string): Promise<void> {
+    await withLock(`${STATE_CHANNEL}:${key}`, async () => {
+      const raw = this.#raw(key);
+      const db = await this.#db;
+      if ((await db.get<StoredState>(key))?.raw === raw) return;
+      await db.set<StoredState>(key, { raw });
+      this.#doorbell.ring({ key } satisfies Announcement);
     });
-  }
-
-  #announce(key: string): void {
-    this.#doorbell.ring({ key } satisfies Announcement);
   }
 
   #receive(data: unknown): void {
     if (!isAnnouncement(data)) return;
-    this.#track(this.#load(data.key));
-  }
-
-  #track(work: Promise<void>): void {
-    const tracked = work.catch(() => undefined).finally(() => this.#pendingReads.delete(tracked));
-    this.#pendingReads.add(tracked);
+    if (this.isReadOnly) {
+      this.#track(this.#load(data.key));
+      return;
+    }
+    for (const check of [...(this.#checks.get(data.key) ?? [])]) check();
   }
 
   async #load(key: string): Promise<void> {
-    const version = this.#bump(key);
+    const version = (this.#versions.get(key) ?? 0) + 1;
+    this.#versions.set(key, version);
     const stored = await (await this.#db).get<StoredState>(key);
     if (this.#versions.get(key) !== version) return;
-    this.#apply(key, stored?.raw ?? null);
-  }
-
-  /**
-   * Brings a tab's `localStorage` record in line with IndexedDB.
-   *
-   * IndexedDB has the record when anything has written it since this version, a
-   * sign-out included, and then it is the newer of the two. When it has nothing,
-   * the record in `localStorage` was written by an earlier version, and is
-   * copied across so workers find it. The check and the copy are one
-   * transaction, so no write can land between them.
-   */
-  async #reconcile(key: string): Promise<void> {
-    const version = this.#bump(key);
-    const state = this.#copy.get(key);
-    const db = await this.#db;
-    if (state !== null && (await db.setIfAbsent<StoredState>(key, { raw: formatState(state) }))) {
-      this.#announce(key);
-      return;
-    }
-    const stored = await db.get<StoredState>(key);
-    if (stored === null || this.#versions.get(key) !== version) return;
-    this.#apply(key, stored.raw);
-  }
-
-  #apply(key: string, raw: string | null): void {
-    if ((this.#pendingWrites.get(key) ?? 0) > 0) return;
-    const state = parseState(raw);
+    const state = parseState(stored?.raw ?? null);
     if (state === null) {
       this.#copy.remove(key);
     } else {

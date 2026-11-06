@@ -366,10 +366,13 @@ export class CookieStateStorage implements StateStorage {
       await (await this.#db).set<StoredAnswer>(answerKey(key), {
         raw: current === '' ? null : current,
       });
+      // What was written, which may be newer than what queued this.
+      this.#published.set(key, current);
       this.#doorbell.ring({ key });
     }).catch(() => {
-      // No IndexedDB here. Tabs read the cookie themselves; workers keep what
-      // they have until a tab publishes again.
+      // No IndexedDB here, or the write failed. Forgotten, so the next read
+      // tries again; tabs read the cookie themselves meanwhile.
+      this.#published.delete(key);
     });
   }
 
