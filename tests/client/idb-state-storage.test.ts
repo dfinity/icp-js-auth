@@ -128,22 +128,15 @@ describe('IdbStateStorage in a worker', () => {
     await vi.waitFor(() => expect(worker.get(key)).toEqual({ ...bob, held: true }));
   });
 
-  it('tells tabs when it signs out', async () => {
+  it('only reads: signing in and out happens in a page', () => {
     const key = freshKey();
-    const tab = openTab();
-    tab.set(key, alice);
-    await committed(key, alice);
     const worker = openWorker();
-    worker.get(key);
-    await worker.ready();
-    const listener = vi.fn();
-    tab.subscribe(key, listener);
 
-    worker.remove(key);
-
-    await vi.waitFor(() => expect(tab.get(key)).toBeNull());
-    expect(localStorage.getItem(key)).toBeNull();
-    expect(listener).toHaveBeenCalledTimes(1);
+    expect(worker.isReadOnly).toBe(true);
+    expect(() => worker.set(key, alice)).toThrow(/read-only/);
+    expect(() => worker.remove(key)).toThrow(/read-only/);
+    expect(() => worker.discard(key)).toThrow(/read-only/);
+    expect(openTab().isReadOnly).toBe(false);
   });
 
   it('starts signed out where there is no IndexedDB', async () => {
@@ -181,10 +174,7 @@ describe('IdbStateStorage after an upgrade from LocalStateStorage', () => {
 
   it('does not copy over a sign-out IndexedDB already has', async () => {
     const key = freshKey();
-    const worker = openWorker();
-    worker.get(key);
-    await worker.ready();
-    worker.remove(key);
+    openTab().remove(key);
     await committed(key, null);
 
     // A tab still holding the record from before the sign-out reached it.
@@ -221,21 +211,21 @@ describe('IdbStateStorage ordering', () => {
     expect(worker.get(key)).toBeNull();
   });
 
-  it('tells every store in a tab when a worker signs out', async () => {
+  it('tells every other store in a tab when one signs out', async () => {
     const key = freshKey();
     const one = openTab();
     const two = openTab();
+    const three = openTab();
     one.set(key, alice);
     await committed(key, alice);
-    const worker = openWorker();
-    worker.get(key);
-    await worker.ready();
     const first = vi.fn();
     const second = vi.fn();
     one.subscribe(key, first);
     two.subscribe(key, second);
 
-    worker.remove(key);
+    // `storage` does not fire in the tab that wrote, so the other stores here
+    // hear it through the announcement.
+    three.remove(key);
 
     await vi.waitFor(() => expect(second).toHaveBeenCalledTimes(1));
     await vi.waitFor(() => expect(first).toHaveBeenCalledTimes(1));

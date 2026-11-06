@@ -92,6 +92,15 @@ export interface StateStorage {
   subscribe(key: string, listener: () => void): () => void;
 
   /**
+   * Whether this store only reads the state here, as a store does in a worker.
+   * The client then changes nothing: it cannot sign in or out, and a session it
+   * finds unusable is left for a page of this origin to end.
+   *
+   * Absent means false.
+   */
+  readonly isReadOnly?: boolean;
+
+  /**
    * Resolves once {@link get} answers with the stored state, for a store that
    * loads it asynchronously. The client waits for it before restoring a session:
    * a store still loading reads as signed out, and restoring from that would end

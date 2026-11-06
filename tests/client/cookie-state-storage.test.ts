@@ -366,33 +366,7 @@ describe('CookieStateStorage in a worker', () => {
     expect(listener).toHaveBeenCalled();
   });
 
-  it('has an open tab remove the cookie when it signs out, so the siblings hear it', async () => {
-    const tab = openTab();
-    tab.set(KEY, state());
-    const worker = openWorker();
-    await vi.waitFor(() => expect(worker.get(KEY)).not.toBeNull());
-
-    worker.remove(KEY);
-
-    await vi.waitFor(() => expect(document.cookie).not.toContain(KEY));
-    expect(tab.get(KEY)).toBeNull();
-  });
-
-  it('drops only its own claim on discard, leaving the cookie for the siblings', async () => {
-    const tab = openTab();
-    tab.set(KEY, state());
-    const worker = openWorker();
-    await worker.ready();
-    await vi.waitFor(() => expect(worker.get(KEY)?.held).toBe(true));
-
-    worker.discard(KEY);
-
-    await vi.waitFor(() => expect(tab.get(KEY)?.held).toBe(false));
-    expect(worker.get(KEY)?.held).toBe(false);
-    expect(document.cookie).toContain(KEY);
-  });
-
-  it('starts loading its claim on the first read, so ready() covers it', async () => {
+  it('loads the answer on its first read, so ready() covers it', async () => {
     const written = state();
     openTab().set(KEY, written);
     const probe = openWorker();
@@ -405,44 +379,46 @@ describe('CookieStateStorage in a worker', () => {
     expect(worker.get(KEY)).toEqual({ ...written, held: true });
   });
 
-  it('drops its sign-out request where a tab has signed in since', async () => {
+  it('only reads: signing in and out happens in a page', () => {
+    const worker = openWorker();
+
+    expect(worker.isReadOnly).toBe(true);
+    expect(() => worker.set(KEY, state())).toThrow(/read-only/);
+    expect(() => worker.remove(KEY)).toThrow(/read-only/);
+    expect(() => worker.discard(KEY)).toThrow(/read-only/);
+  });
+
+  it('hears a tab drop this origin claim, cookie untouched', async () => {
     const tab = openTab();
     tab.set(KEY, state());
     const worker = openWorker();
-    await vi.waitFor(() => expect(worker.get(KEY)).not.toBeNull());
+    await vi.waitFor(() => expect(worker.get(KEY)?.held).toBe(true));
+
+    tab.discard(KEY);
+
+    await vi.waitFor(() => expect(worker.get(KEY)?.held).toBe(false));
+    expect(worker.get(KEY)).not.toBeNull();
+  });
+
+  // The answer is one record, so the claim and the cookie change together.
+  it('never sees half of an account switch', async () => {
+    const tab = openTab();
+    tab.set(KEY, state());
+    const worker = openWorker();
+    await vi.waitFor(() => expect(worker.get(KEY)?.held).toBe(true));
+    const seen: (SessionState | null)[] = [];
+    listening.push(worker.subscribe(KEY, () => seen.push(worker.get(KEY))));
 
     const bob = {
       principal: Principal.selfAuthenticating(new Uint8Array([4, 5, 6])),
       expiration: state().expiration,
     };
     tab.set(KEY, bob);
-    worker.remove(KEY);
-    await new Promise((resolve) => setTimeout(resolve, 50));
 
-    expect(tab.get(KEY)?.principal.toText()).toBe(bob.principal.toText());
-  });
-
-  it('ignores a request for a cookie scoped to another domain', async () => {
-    const tab = openTab();
-    tab.set(KEY, state());
-    const request = new BroadcastChannel('ic-session-cookie');
-    const current = decodeURIComponent(
-      document.cookie
-        .split('; ')
-        .find((entry) => entry.startsWith(`${KEY}=`))!
-        .slice(KEY.length + 1),
+    await vi.waitFor(() =>
+      expect(worker.get(KEY)?.principal.toText()).toBe(bob.principal.toText()),
     );
-
-    request.postMessage({
-      key: KEY,
-      previous: current,
-      next: null,
-      attributes: 'Domain=elsewhere',
-    });
-    await new Promise((resolve) => setTimeout(resolve, 50));
-    request.close();
-
-    expect(tab.get(KEY)).not.toBeNull();
+    expect(seen.every((answer) => answer?.held === true)).toBe(true);
   });
 });
 

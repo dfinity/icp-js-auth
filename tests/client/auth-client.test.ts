@@ -2413,6 +2413,28 @@ describe('Session restoration', () => {
     expect(client.isAuthenticated()).toBe(true);
   });
 
+  // A worker only reads the sign-in. Credentials with no sign-in behind them are
+  // left for a page to clear: in a worker they could belong to a sign-in its
+  // copy of the state has not caught up with.
+  it('changes nothing shared in a worker', async () => {
+    vi.setSystemTime(new Date('2020-01-01T00:00:00.000Z'));
+
+    const namespace = 'worker-read-only';
+    const slots = slotsFor(namespace);
+    const key = Ed25519KeyIdentity.fromJSON(JSON.stringify(testSecrets));
+    const chain = await createTestDelegation(key, new Date('2020-01-03T00:00:00.000Z'));
+    const storage = spyStorage();
+    await storage.set(slots.session, { identity: key, chain });
+
+    const client = await openWorkerClient({ credentialStorage: storage, namespace });
+    await client.ready();
+
+    expect(client.isAuthenticated()).toBe(false);
+    expect(storage.remove).not.toHaveBeenCalled();
+    await expect(client.signOut()).rejects.toThrow(/read-only/);
+    await expect(client.signIn()).rejects.toThrow(/read-only/);
+  });
+
   it('should remain anonymous with a key but no delegation', async () => {
     vi.setSystemTime(new Date('2020-01-01T00:00:00.000Z'));
 

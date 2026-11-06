@@ -23,7 +23,7 @@ import { fromBase64, toBase64 } from './base64.js';
 import type { Credential, CredentialStorage } from './credential-storage.js';
 import { watchActivity, watchForeground } from './foreground-refresh.js';
 import { IdbCredentialStorage } from './idb-credential-storage.js';
-import { IdbStateStorage } from './idb-state-storage.js';
+import { IdbStateStorage, readOnlyError } from './idb-state-storage.js';
 import {
   NotificationConsent,
   type NotificationConsentStatus,
@@ -917,6 +917,7 @@ export class AuthClient {
   }
 
   async signIn(options?: AuthClientSignInOptions): Promise<Identity> {
+    if (this.#isReadOnly) throw readOnlyError();
     // Counted here and locked inside, once the window is open: a ceremony is
     // both things — the signer channel an origin has one of, and this
     // namespace's sign-in, which `signOut` moves too — but neither lock may be
@@ -1382,6 +1383,7 @@ export class AuthClient {
    * @param options.returnTo - URL to navigate to after sign-out.
    */
   async signOut(options: { returnTo?: string } = {}): Promise<void> {
+    if (this.#isReadOnly) throw readOnlyError();
     // Wait for the constructor's session restore: hydration racing the
     // deletion below could re-populate the identity from already-read state.
     await this.#init();
@@ -1606,6 +1608,7 @@ export class AuthClient {
    * @param principal - The account whose session ended.
    */
   async #expireSession(principal: Principal): Promise<void> {
+    if (this.#isReadOnly) return;
     this.#stateStorage.set(this.#slots.state, {
       principal,
       expiration: BigInt(Date.now()) * 1_000_000n,
@@ -1791,7 +1794,7 @@ export class AuthClient {
     // the session's, so a chain this old leaves a record that reads as expired —
     // which is what a page loading after a session ran out should say.
     if (credential.chain === undefined || !isDelegationValid(credential.chain)) {
-      await this.#clearCredentials();
+      if (!this.#isReadOnly) await this.#clearCredentials();
       return null;
     }
     return credential;
@@ -1804,6 +1807,7 @@ export class AuthClient {
    * origin, because a sibling reading a shared record must stop seeing one.
    */
   async #endSession(): Promise<void> {
+    if (this.#isReadOnly) return;
     this.#stateStorage.remove(this.#slots.state);
     await this.#clearCredentials();
   }
@@ -1818,8 +1822,18 @@ export class AuthClient {
    * obtained is gone.
    */
   async #dropSession(): Promise<void> {
+    if (this.#isReadOnly) return;
     this.#stateStorage.discard(this.#slots.state);
     await this.#clearCredentials();
+  }
+
+  /**
+   * Whether this client only reads the sign-in, as it does in a worker. It then
+   * changes nothing shared: a session it cannot use is left for a page of this
+   * origin to end, which runs the same checks.
+   */
+  get #isReadOnly(): boolean {
+    return this.#stateStorage.isReadOnly === true;
   }
 
   // Every slot a completed sign-in writes. Not the ceremony's pending slot: a

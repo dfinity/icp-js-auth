@@ -9,7 +9,7 @@ import {
 } from './state-storage.js';
 
 /** The database the state is kept in, apart from the credentials' database. */
-const STATE_DB: DBCreateOptions = { dbName: 'auth-client-state-db', storeName: 'ic-state' };
+export const STATE_DB: DBCreateOptions = { dbName: 'auth-client-state-db', storeName: 'ic-state' };
 
 /** The channel a store announces on, and the prefix of the locks its writes take. */
 const STATE_CHANNEL = 'ic-session-state';
@@ -88,6 +88,22 @@ export class Doorbell {
   }
 }
 
+/**
+ * Runs `work` under a Web Lock, so writes from different tabs land in the order
+ * they were made. Without Web Locks it runs straight away.
+ */
+export function withLock<T>(name: string, work: () => Promise<T>): Promise<T> {
+  const locks = globalThis.navigator?.locks;
+  if (locks === undefined) return work();
+  return locks.request(name, work) as Promise<T>;
+}
+
+/** What a store throws when asked to change the sign-in where it can only read it. */
+export const readOnlyError = (): Error =>
+  new Error(
+    'The sign-in state is read-only in a worker: sign in and sign out from a page of this origin.',
+  );
+
 const hasLocalStorage = (): boolean => {
   try {
     return globalThis.localStorage !== undefined && globalThis.localStorage !== null;
@@ -106,12 +122,14 @@ const hasLocalStorage = (): boolean => {
  * an earlier version reads as it is), and a dedicated, shared or service worker
  * in memory.
  *
- * A write updates the copy straight away and is written to IndexedDB without the
- * writer waiting for it. Writes to IndexedDB take a Web Lock per key, so they
- * land in the order they were made, across contexts. Once a write has committed,
- * it is announced on a `BroadcastChannel`, and every other store reads IndexedDB
- * again and updates its copy. Announcing only after the commit means a reader
- * always finds the write it was told about.
+ * Only tabs change the state. A worker reads it, follows it, and throws if asked
+ * to change it: signing in and out happens in a page. A tab's write updates its
+ * copy straight away and is written to IndexedDB without the tab waiting for it.
+ * Writes to IndexedDB take a Web Lock per key, so they land in the order they
+ * were made, across tabs. Once a write has committed, it is announced on a
+ * `BroadcastChannel`, and every other store reads IndexedDB again and updates
+ * its copy. Announcing only after the commit means a reader always finds the
+ * write it was told about.
  *
  * {@link ready} resolves once the copy has been brought up to date with
  * IndexedDB. The client waits for it before restoring a session. In a worker,
@@ -120,6 +138,12 @@ const hasLocalStorage = (): boolean => {
  * @see implements {@link StateStorage}
  */
 export class IdbStateStorage implements StateStorage {
+  /**
+   * True in a worker, which reads the state the tabs of its origin write and
+   * changes nothing itself.
+   */
+  public readonly isReadOnly: boolean;
+
   readonly #copy: LocalStateStorage | MemoryStateStorage;
   readonly #doorbell = new Doorbell(STATE_CHANNEL, (data) => this.#receive(data));
 
@@ -142,7 +166,8 @@ export class IdbStateStorage implements StateStorage {
   #subscriberCount = 0;
 
   constructor() {
-    this.#copy = hasLocalStorage() ? new LocalStateStorage() : new MemoryStateStorage();
+    this.isReadOnly = !hasLocalStorage();
+    this.#copy = this.isReadOnly ? new MemoryStateStorage() : new LocalStateStorage();
   }
 
   /**
@@ -163,6 +188,7 @@ export class IdbStateStorage implements StateStorage {
   }
 
   public set(key: string, state: Omit<SessionState, 'held'>): void {
+    if (this.isReadOnly) throw readOnlyError();
     // Queued before the copy changes, because changing it notifies subscribers,
     // and a write one of them makes has to land after this one.
     this.#persist(key, formatState(state));
@@ -170,6 +196,7 @@ export class IdbStateStorage implements StateStorage {
   }
 
   public remove(key: string): void {
+    if (this.isReadOnly) throw readOnlyError();
     this.#persist(key, null);
     this.#copy.remove(key);
   }
@@ -213,7 +240,7 @@ export class IdbStateStorage implements StateStorage {
   #persist(key: string, raw: string | null): void {
     this.#bump(key);
     this.#pendingWrites.set(key, (this.#pendingWrites.get(key) ?? 0) + 1);
-    void this.#withLock(key, async () => {
+    void withLock(`${STATE_CHANNEL}:${key}`, async () => {
       try {
         await (await this.#db).set<StoredState>(key, { raw });
         this.#announce(key);
@@ -277,13 +304,6 @@ export class IdbStateStorage implements StateStorage {
     } else {
       this.#copy.set(key, state);
     }
-  }
-
-  #withLock<T>(key: string, work: () => Promise<T>): Promise<T> {
-    const locks = globalThis.navigator?.locks;
-    // Without Web Locks, writes from different contexts can land out of order.
-    if (locks === undefined) return work();
-    return locks.request(`${STATE_CHANNEL}:${key}`, work) as Promise<T>;
   }
 
   // Opened on first use, and forgotten again if opening failed, so a later call
