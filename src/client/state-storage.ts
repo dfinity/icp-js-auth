@@ -93,6 +93,29 @@ export interface StateStorage {
 }
 
 /**
+ * A state record as one string, `<principal>|<expiration>`.
+ *
+ * Not JSON, because an expiration is a `bigint` and JSON has no way to carry one.
+ * Every store that keeps a string writes this, so a record written by one reads
+ * in another.
+ */
+export function formatState(state: Omit<SessionState, 'held'>): string {
+  return `${state.principal.toText()}|${state.expiration.toString()}`;
+}
+
+/** Reads what {@link formatState} wrote, or `null` for anything else. */
+export function parseState(raw: string | null): Omit<SessionState, 'held'> | null {
+  if (raw === null) return null;
+  const [principalText, expiration] = raw.split('|');
+  if (principalText === undefined || expiration === undefined) return null;
+  try {
+    return { principal: Principal.fromText(principalText), expiration: BigInt(expiration) };
+  } catch {
+    return null;
+  }
+}
+
+/**
  * State held for the lifetime of the instance and shared with nothing.
  *
  * For tests and for environments with no `localStorage`, where a client is
@@ -160,18 +183,13 @@ export class MemoryStateStorage implements StateStorage {
   // in both: a record is one string, and comparing strings needs no field walk.
   #raw(key: string): string | null {
     const state = this.#state.get(key);
-    return state === undefined
-      ? null
-      : `${state.principal.toText()}|${state.expiration.toString()}`;
+    return state === undefined ? null : formatState(state);
   }
 }
 
 /**
  * State in `localStorage`, so every tab of an origin agrees on it and it
  * survives a reload.
- *
- * The two fields are written as `<principal>|<expiration>` rather than JSON,
- * because an expiration is a `bigint` and JSON has no way to carry one.
  * @see implements {@link StateStorage}
  */
 export class LocalStateStorage implements StateStorage {
@@ -181,26 +199,14 @@ export class LocalStateStorage implements StateStorage {
   #subscribers = new Map<string, Set<() => void>>();
 
   public get(key: string): SessionState | null {
-    const raw = this.#localStorage().getItem(key);
-    if (raw === null) return null;
-
-    const [principalText, expiration] = raw.split('|');
-    if (principalText === undefined || expiration === undefined) return null;
-    try {
-      return {
-        principal: Principal.fromText(principalText),
-        expiration: BigInt(expiration),
-        // This record is written by this origin and read by no other, so having
-        // one and holding a credential for it are the same thing.
-        held: true,
-      };
-    } catch {
-      return null;
-    }
+    const state = parseState(this.#localStorage().getItem(key));
+    // This record is written by this origin and read by no other, so having one
+    // and holding a credential for it are the same thing.
+    return state === null ? null : { ...state, held: true };
   }
 
   public set(key: string, state: Omit<SessionState, 'held'>): void {
-    this.#localStorage().setItem(key, `${state.principal.toText()}|${state.expiration.toString()}`);
+    this.#localStorage().setItem(key, formatState(state));
     this.#fire(key);
   }
 

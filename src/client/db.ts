@@ -148,6 +148,18 @@ export class IdbKeyVal {
   }
 
   /**
+   * Every key in the store with its value, read in one transaction.
+   * @returns `Promise<[IDBValidKey, T][]>`
+   */
+  public async entries<T>(): Promise<[IDBValidKey, T][]> {
+    return await this._withDb(async (db) => {
+      const tx = db.transaction(this._storeName, 'readonly');
+      const [keys, values] = await Promise.all([tx.store.getAllKeys(), tx.store.getAll(), tx.done]);
+      return keys.map((key, index) => [key, values[index] as T]);
+    });
+  }
+
+  /**
    * Remove a key
    * @param key {@link IDBValidKey}
    * @returns void

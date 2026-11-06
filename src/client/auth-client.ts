@@ -23,6 +23,7 @@ import { fromBase64, toBase64 } from './base64.js';
 import type { Credential, CredentialStorage } from './credential-storage.js';
 import { watchActivity, watchForeground } from './foreground-refresh.js';
 import { IdbCredentialStorage } from './idb-credential-storage.js';
+import { IdbStateStorage } from './idb-state-storage.js';
 import {
   NotificationConsent,
   type NotificationConsentStatus,
@@ -36,7 +37,7 @@ import { SessionMinter } from './session-minter.js';
 import { type Slots, slotsFor } from './slots.js';
 import { normalizeSsoDomain } from './sso.js';
 import { createSsoDomainService, type SsoStatus, SsoStatusChecker } from './sso-status.js';
-import { LocalStateStorage, type SessionState, type StateStorage } from './state-storage.js';
+import type { SessionState, StateStorage } from './state-storage.js';
 
 /**
  * The lock one signer interaction at a time holds.
@@ -90,7 +91,8 @@ export interface AuthClientBaseOptions {
 
   /**
    * Where the state of the sign-in is kept: which account is signed in here,
-   * and until when. Defaults to `localStorage`.
+   * and until when. Defaults to {@link IdbStateStorage}, which tabs and workers
+   * of this origin share.
    */
   stateStorage?: StateStorage;
 
@@ -405,6 +407,8 @@ export class AuthClient {
   // interaction rather than two.
   #interactions = 0;
   #channelLock: HeldLock | undefined;
+  // The default state store, which this client created and so closes.
+  readonly #ownStateStorage: IdbStateStorage | undefined;
   // Set only for a client built with `ssoDomain`.
   readonly #sso: SsoStatusChecker | undefined;
 
@@ -412,7 +416,13 @@ export class AuthClient {
     this.#options = options;
     this.#credentialStorage = options.credentialStorage ?? new IdbCredentialStorage();
     this.#slots = slotsFor(options.namespace);
-    this.#stateStorage = options.stateStorage ?? new LocalStateStorage();
+    if (options.stateStorage !== undefined) {
+      this.#stateStorage = options.stateStorage;
+    } else {
+      const own = new IdbStateStorage();
+      this.#ownStateStorage = own;
+      this.#stateStorage = own;
+    }
 
     // A string or URL is what this option used to be, and a caller still passing
     // one would otherwise be silently ignored — both halves falling back to
@@ -779,6 +789,8 @@ export class AuthClient {
     this.#unwatchActivity = undefined;
     this.#unwatchState?.();
     this.#unwatchState = undefined;
+    // Only a store this client created: one passed in may be shared with others.
+    this.#ownStateStorage?.close();
   }
 
   /**
