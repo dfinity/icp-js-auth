@@ -8,17 +8,32 @@ import { formatState, parseState, type SessionState, type StateStorage } from '.
  */
 const COOKIE_CHANNEL = 'ic-session-cookie';
 
-/** A worker's request for the tabs to write the cookie: a record, or `null` to remove it. */
+/**
+ * A worker's request for the tabs to write the cookie.
+ *
+ * `previous` is the record the worker last saw, and a tab writes `next` only if
+ * the cookie still holds it: a sign-in made since is newer, and the request
+ * gives way to it. `attributes` names the cookie's scope, so a store for another
+ * domain leaves the request alone.
+ */
 interface CookieRequest {
   key: string;
-  raw: string | null;
+  previous: string | null;
+  next: string | null;
+  attributes: string;
 }
+
+const isRecord = (value: unknown): value is string | null =>
+  typeof value === 'string' || value === null;
 
 const isCookieRequest = (value: unknown): value is CookieRequest => {
   if (typeof value !== 'object' || value === null) return false;
-  const request = value as { key?: unknown; raw?: unknown };
+  const request = value as Partial<Record<keyof CookieRequest, unknown>>;
   return (
-    typeof request.key === 'string' && (typeof request.raw === 'string' || request.raw === null)
+    typeof request.key === 'string' &&
+    isRecord(request.previous) &&
+    isRecord(request.next) &&
+    typeof request.attributes === 'string'
   );
 };
 
@@ -105,6 +120,11 @@ export class CookieStateStorage implements StateStorage {
   readonly #local = new IdbStateStorage();
   readonly #hasDocument = typeof document !== 'undefined';
   readonly #channel: BroadcastChannel | undefined;
+
+  // Writes in progress. set() and remove() each change two records, and a
+  // subscriber told between the two would see, and could act on, a state that
+  // was never meant to exist. Subscribers are told once both have landed.
+  #writeDepth = 0;
 
   constructor(options: CookieStateStorageOptions) {
     // Both sides, because this decides whether to skip the check below and drop
@@ -209,6 +229,9 @@ export class CookieStateStorage implements StateStorage {
   readonly #readKeys = new Set<string>();
 
   public get(key: string): SessionState | null {
+    // Read whatever the record says, so a worker starts loading its claim on the
+    // same first read as its copy of the cookie and `ready()` covers both.
+    const local = this.#local.get(key);
     const raw = this.#readRecord(key);
     if (raw === null) return null;
 
@@ -224,7 +247,6 @@ export class CookieStateStorage implements StateStorage {
       // The record's own fields are the shared truth, read as written. `held` is
       // the only thing derived here, because it is the one fact a record every
       // sibling reads cannot carry.
-      const local = this.#local.get(key);
       return {
         principal,
         expiration: BigInt(expiration),
@@ -236,18 +258,17 @@ export class CookieStateStorage implements StateStorage {
   }
 
   public set(key: string, state: Omit<SessionState, 'held'>): void {
-    // The local record first, so nothing reads the cookie as held before it is.
-    this.#local.set(key, state);
-    this.#writeRecord(key, formatState(state));
-    this.#fire(key);
+    this.#write(key, () => {
+      this.#local.set(key, state);
+      this.#writeRecord(key, formatState(state));
+    });
   }
 
   public remove(key: string): void {
-    // The cookie first, the reverse of set(), so nothing reads the sign-in as
-    // standing but no longer held on the way to signed out.
-    this.#writeRecord(key, null);
-    this.#local.remove(key);
-    this.#fire(key);
+    this.#write(key, () => {
+      this.#writeRecord(key, null);
+      this.#local.remove(key);
+    });
   }
 
   /**
@@ -283,6 +304,7 @@ export class CookieStateStorage implements StateStorage {
     // this origin losing its claim the one change nothing reported.
     let last = stateOf(this.get(key));
     const check = (): void => {
+      if (this.#writeDepth > 0) return;
       const now = stateOf(this.get(key));
       if (now !== last) {
         last = now;
@@ -330,6 +352,16 @@ export class CookieStateStorage implements StateStorage {
     for (const check of [...(this.#subscribers.get(key) ?? [])]) check();
   }
 
+  #write(key: string, write: () => void): void {
+    this.#writeDepth++;
+    try {
+      write();
+    } finally {
+      this.#writeDepth--;
+    }
+    this.#fire(key);
+  }
+
   /**
    * The shared record: the cookie where there is a document, and otherwise this
    * origin's copy of it. A tab updates the copy each time it reads the cookie.
@@ -356,9 +388,16 @@ export class CookieStateStorage implements StateStorage {
       this.#updateCopy(key, raw);
       return;
     }
+    const copy = this.#local.get(cookieCopyKey(key));
+    const previous = copy === null ? null : formatState(copy);
     this.#updateCopy(key, raw);
     try {
-      this.#channel?.postMessage({ key, raw } satisfies CookieRequest);
+      this.#channel?.postMessage({
+        key,
+        previous,
+        next: raw,
+        attributes: this.#attributes,
+      } satisfies CookieRequest);
     } catch {
       // A closed channel: no tab hears this worker any more.
     }
@@ -404,13 +443,16 @@ export class CookieStateStorage implements StateStorage {
     }
   }
 
-  // A worker's write, carried out by a tab. Live only: a request no tab was
-  // open to hear is not replayed later over a sibling's newer write.
+  // A worker's write, carried out by a tab. Live only, and only over the
+  // record the worker saw: a request no tab was open to hear is not replayed
+  // later, and one overtaken by a newer write is dropped.
   #writeRequested(data: unknown): void {
-    if (!isCookieRequest(data)) return;
-    this.#writeCookie(data.key, data.raw);
-    this.#updateCopy(data.key, data.raw);
-    this.#fire(data.key);
+    if (!isCookieRequest(data) || data.attributes !== this.#attributes) return;
+    if (readCookie(data.key) !== data.previous) return;
+    this.#write(data.key, () => {
+      this.#writeCookie(data.key, data.next);
+      this.#updateCopy(data.key, data.next);
+    });
   }
 }
 

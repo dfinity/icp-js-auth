@@ -248,6 +248,21 @@ describe('CookieStateStorage', () => {
     expect(listener).toHaveBeenCalledTimes(2);
   });
 
+  it('tells a subscriber once about an account switch, after both records changed', () => {
+    const storage = new CookieStateStorage({ domain: DOMAIN });
+    storage.set(KEY, state());
+    const seen: (SessionState | null)[] = [];
+    storage.subscribe(KEY, () => seen.push(storage.get(KEY)));
+
+    const bob = {
+      principal: Principal.selfAuthenticating(new Uint8Array([4, 5, 6])),
+      expiration: state().expiration,
+    };
+    storage.set(KEY, bob);
+
+    expect(seen).toEqual([{ ...bob, held: true }]);
+  });
+
   it('hears another tab of this origin drop its claim', () => {
     const storage = new CookieStateStorage({ domain: DOMAIN });
     storage.set(KEY, state());
@@ -354,7 +369,7 @@ describe('CookieStateStorage in a worker', () => {
     const tab = openTab();
     tab.set(KEY, state());
     const worker = openWorker();
-    await worker.ready();
+    await vi.waitFor(() => expect(worker.get(KEY)).not.toBeNull());
 
     worker.remove(KEY);
 
@@ -374,6 +389,59 @@ describe('CookieStateStorage in a worker', () => {
     await vi.waitFor(() => expect(tab.get(KEY)?.held).toBe(false));
     expect(worker.get(KEY)?.held).toBe(false);
     expect(document.cookie).toContain(KEY);
+  });
+
+  it('starts loading its claim on the first read, so ready() covers it', async () => {
+    const written = state();
+    openTab().set(KEY, written);
+    const probe = openWorker();
+    await vi.waitFor(() => expect(probe.get(KEY)?.held).toBe(true));
+
+    const worker = openWorker();
+    worker.get(KEY);
+    await worker.ready();
+
+    expect(worker.get(KEY)).toEqual({ ...written, held: true });
+  });
+
+  it('drops its sign-out request where a tab has signed in since', async () => {
+    const tab = openTab();
+    tab.set(KEY, state());
+    const worker = openWorker();
+    await vi.waitFor(() => expect(worker.get(KEY)).not.toBeNull());
+
+    const bob = {
+      principal: Principal.selfAuthenticating(new Uint8Array([4, 5, 6])),
+      expiration: state().expiration,
+    };
+    tab.set(KEY, bob);
+    worker.remove(KEY);
+    await new Promise((resolve) => setTimeout(resolve, 50));
+
+    expect(tab.get(KEY)?.principal.toText()).toBe(bob.principal.toText());
+  });
+
+  it('ignores a request for a cookie scoped to another domain', async () => {
+    const tab = openTab();
+    tab.set(KEY, state());
+    const request = new BroadcastChannel('ic-session-cookie');
+    const current = decodeURIComponent(
+      document.cookie
+        .split('; ')
+        .find((entry) => entry.startsWith(`${KEY}=`))!
+        .slice(KEY.length + 1),
+    );
+
+    request.postMessage({
+      key: KEY,
+      previous: current,
+      next: null,
+      attributes: 'Domain=elsewhere',
+    });
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    request.close();
+
+    expect(tab.get(KEY)).not.toBeNull();
   });
 });
 
