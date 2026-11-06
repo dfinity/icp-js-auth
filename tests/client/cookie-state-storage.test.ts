@@ -1,12 +1,9 @@
 import { Principal } from '@icp-sdk/core/principal';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { CookieStateStorage } from '../../src/client/cookie-state-storage.ts';
-import {
-  LocalStateStorage,
-  MemoryStateStorage,
-  type SessionState,
-  type StateStorage,
-} from '../../src/client/state-storage.ts';
+import { LocalStateStorage } from '../../src/client/local-state-storage.ts';
+import { MemoryStateStorage } from '../../src/client/memory-state-storage.ts';
+import type { SessionState, StateStorage } from '../../src/client/state-storage.ts';
 
 // jsdom serves this document from localhost, and `document.cookie` is scoped by
 // the document's own URL rather than by anything stubbed — so the tests write

@@ -1,12 +1,10 @@
 import { Principal } from '@icp-sdk/core/principal';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { IdbKeyVal } from '../../src/client/db.ts';
+import { LocalStateStorage } from '../../src/client/local-state-storage.ts';
+import { MemoryStateStorage } from '../../src/client/memory-state-storage.ts';
 import { slotsFor } from '../../src/client/slots.ts';
-import {
-  LocalStateStorage,
-  MemoryStateStorage,
-  type SessionState,
-} from '../../src/client/state-storage.ts';
+import type { SessionState } from '../../src/client/state-storage.ts';
 
 const STATE_KEY = slotsFor().state;
 

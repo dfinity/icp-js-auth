@@ -19,11 +19,12 @@ import { CookieStateStorage } from '../../src/client/cookie-state-storage.ts';
 import type { Credential, CredentialStorage } from '../../src/client/credential-storage.ts';
 import { IdbKeyVal } from '../../src/client/db.ts';
 import { IdbCredentialStorage } from '../../src/client/idb-credential-storage.ts';
+import { LocalStateStorage } from '../../src/client/local-state-storage.ts';
 import { MemoryCredentialStorage } from '../../src/client/memory-credential-storage.ts';
+import { MemoryStateStorage } from '../../src/client/memory-state-storage.ts';
 import { InteractionRequiredError } from '../../src/client/session-delegation.ts';
 import type { SessionIdentity } from '../../src/client/session-identity.ts';
 import { slotsFor } from '../../src/client/slots.ts';
-import { LocalStateStorage, MemoryStateStorage } from '../../src/client/state-storage.ts';
 import { FakeTransport } from './fake-transport.ts';
 
 /** The bare names, which is what a client with no namespace writes under. */

@@ -1,5 +1,6 @@
 import { Principal } from '@icp-sdk/core/principal';
-import { LocalStateStorage, type SessionState, type StateStorage } from './state-storage.js';
+import { LocalStateStorage } from './local-state-storage.js';
+import type { SessionState, StateStorage } from './state-storage.js';
 
 /**
  * How long the browser keeps the record, which is not how long the sign-in
