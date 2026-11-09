@@ -313,6 +313,57 @@ describe('LocalStateStorage across tabs and workers', () => {
   });
 
   describe('LocalStateStorage ordering', () => {
+    it('mirrors a write it hears from a tab on an earlier version', async () => {
+      const key = freshKey();
+      const tab = openTab();
+      listening.push(tab.subscribe(key, () => {}));
+      await committed(key, null);
+
+      // An earlier version writes only `localStorage`; this tab hears it as `storage`.
+      localStorage.setItem(key, format(alice));
+      globalThis.dispatchEvent(new StorageEvent('storage', { key }));
+
+      await committed(key, alice);
+    });
+
+    it('rewrites the mirror when a write lands after a later one from another tab', async () => {
+      const key = freshKey();
+      const db = await stateDb();
+
+      // Holds this tab's first mirror write until released.
+      let release = () => {};
+      const held = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      const set = IdbKeyVal.prototype.set;
+      let isHeld = true;
+      const setSpy = vi.spyOn(IdbKeyVal.prototype, 'set').mockImplementation(async function (
+        this: IdbKeyVal,
+        slot,
+        value,
+      ) {
+        if (slot === key && isHeld) {
+          isHeld = false;
+          await held;
+        }
+        return set.call(this, slot, value);
+      });
+      try {
+        openTab().set(key, alice);
+        await vi.waitFor(() => expect(isHeld).toBe(false));
+
+        // Another tab signs out, and its mirror write lands first.
+        localStorage.removeItem(key);
+        await set.call(db, key, { raw: null });
+
+        release();
+        await settle();
+        await committed(key, null);
+      } finally {
+        setSpy.mockRestore();
+      }
+    });
+
     it('lands a write a subscriber makes after the write that notified it', async () => {
       const key = freshKey();
       const tab = openTab();
@@ -383,6 +434,46 @@ describe('LocalStateStorage across tabs and workers', () => {
         release();
         await worker.ready();
         expect(worker.get(key)).toEqual({ ...alice, held: true });
+      } finally {
+        getSpy.mockRestore();
+      }
+    });
+
+    it('resolves ready only once a load queued while it waited has landed', async () => {
+      const key = freshKey();
+      const tab = openTab();
+      tab.set(key, alice);
+      await committed(key, alice);
+
+      // Holds the worker's reads of IndexedDB, once read, until released.
+      let release = () => {};
+      const held = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      const get = IdbKeyVal.prototype.get;
+      const getSpy = vi.spyOn(IdbKeyVal.prototype, 'get').mockImplementation(async function (
+        this: IdbKeyVal,
+        slot,
+      ) {
+        const value = await get.call(this, slot);
+        if (slot === key) await held;
+        return value;
+      });
+      try {
+        const worker = openWorker();
+        listening.push(worker.subscribe(key, () => {}));
+        await settle();
+        const ready = worker.ready();
+
+        // The worker hears this while its first load still holds Alice.
+        tab.set(key, bob);
+        const db = await stateDb();
+        await vi.waitFor(async () => expect(await get.call(db, key)).toEqual({ raw: format(bob) }));
+        await settle();
+
+        release();
+        await ready;
+        expect(worker.get(key)).toEqual({ ...bob, held: true });
       } finally {
         getSpy.mockRestore();
       }

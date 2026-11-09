@@ -49,9 +49,13 @@ export class LocalStateStorage implements StateStorage {
   readonly #mirrored = new Map<string, string | null>();
   #loads: Promise<void> = Promise.resolve();
 
-  /** Resolves once a worker has loaded the keys subscribed to so far. */
-  public ready(): Promise<void> {
-    return this.#loads;
+  /** Resolves once a worker has loaded the keys subscribed to so far, and every load queued meanwhile. */
+  public async ready(): Promise<void> {
+    let loads: Promise<void>;
+    do {
+      loads = this.#loads;
+      await loads;
+    } while (loads !== this.#loads);
   }
 
   public get(key: string): SessionState | null {
@@ -133,9 +137,13 @@ export class LocalStateStorage implements StateStorage {
       }
     });
 
+    // A tab running an older version writes without mirroring, so the tab that
+    // hears the write mirrors it.
     const onStorage = (event: StorageEvent): void => {
       // `key` is null when a tab cleared the whole store, which changes this too.
-      if (event.key === key || event.key === null) check();
+      if (event.key !== key && event.key !== null) return;
+      check();
+      void this.#mirror(key);
     };
     globalThis.addEventListener('storage', onStorage);
 
@@ -178,9 +186,14 @@ export class LocalStateStorage implements StateStorage {
   async #mirror(key: string): Promise<void> {
     try {
       const db = await IdbKeyVal.create(MIRROR_DB);
-      // Read after the await and right before the write: IndexedDB applies writes
-      // in the order they are made, so the last to land holds what is current.
-      await db.set(key, { raw: this.#raw(key) });
+      // Another tab's write can land after this one, carrying what it read
+      // earlier, so a tab writes until what it wrote is what `localStorage` holds
+      // once the write has landed. The last write to land is then current.
+      let raw: string | null;
+      do {
+        raw = this.#raw(key);
+        await db.set(key, { raw });
+      } while (this.#raw(key) !== raw);
       const channel = new BroadcastChannel(MIRROR_CHANNEL);
       channel.postMessage(key);
       channel.close();
