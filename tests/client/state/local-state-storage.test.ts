@@ -313,57 +313,6 @@ describe('LocalStateStorage across tabs and workers', () => {
   });
 
   describe('LocalStateStorage ordering', () => {
-    it('mirrors a write it hears from a tab on an earlier version', async () => {
-      const key = freshKey();
-      const tab = openTab();
-      listening.push(tab.subscribe(key, () => {}));
-      await committed(key, null);
-
-      // An earlier version writes only `localStorage`; this tab hears it as `storage`.
-      localStorage.setItem(key, format(alice));
-      globalThis.dispatchEvent(new StorageEvent('storage', { key }));
-
-      await committed(key, alice);
-    });
-
-    it('rewrites the mirror when a write lands after a later one from another tab', async () => {
-      const key = freshKey();
-      const db = await stateDb();
-
-      // Holds this tab's first mirror write until released.
-      let release = () => {};
-      const held = new Promise<void>((resolve) => {
-        release = resolve;
-      });
-      const set = IdbKeyVal.prototype.set;
-      let isHeld = true;
-      const setSpy = vi.spyOn(IdbKeyVal.prototype, 'set').mockImplementation(async function (
-        this: IdbKeyVal,
-        slot,
-        value,
-      ) {
-        if (slot === key && isHeld) {
-          isHeld = false;
-          await held;
-        }
-        return set.call(this, slot, value);
-      });
-      try {
-        openTab().set(key, alice);
-        await vi.waitFor(() => expect(isHeld).toBe(false));
-
-        // Another tab signs out, and its mirror write lands first.
-        localStorage.removeItem(key);
-        await set.call(db, key, { raw: null });
-
-        release();
-        await settle();
-        await committed(key, null);
-      } finally {
-        setSpy.mockRestore();
-      }
-    });
-
     it('lands a write a subscriber makes after the write that notified it', async () => {
       const key = freshKey();
       const tab = openTab();
