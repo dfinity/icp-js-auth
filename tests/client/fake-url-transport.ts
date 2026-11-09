@@ -3,7 +3,7 @@ import type { Channel, Transport } from '@icp-sdk/signer';
 // `JsonRpcRequest` / `JsonRpcResponse` aren't re-exported from the package
 // root; extract the request shape from `Channel['send']` and redeclare the
 // JSON-RPC 2.0 response shape locally.
-type JsonRpcRequest = Parameters<Channel['send']>[0];
+type JsonRpcRequest = Awaited<Parameters<Channel['send']>[0]>;
 
 interface JsonRpcError {
   code: number;
@@ -42,11 +42,13 @@ export type RequestHandler = (
 export class FakeUrlTransport implements Transport {
   static instances: FakeUrlTransport[] = [];
   static journal: unknown[] = [];
+  static asyncSlots = new Set<number>();
   static nextRespond = true;
 
   static reset(): void {
     FakeUrlTransport.instances = [];
     FakeUrlTransport.journal = [];
+    FakeUrlTransport.asyncSlots = new Set();
     FakeUrlTransport.nextRespond = true;
   }
 
@@ -74,16 +76,19 @@ export class FakeUrlTransport implements Transport {
 
   // Mirrors the real transport's polymorphic memoize: a sync producer returns
   // synchronously (so a value can be read where `await` isn't possible, e.g. in
-  // a constructor), an async one returns a promise.
+  // a constructor), an async one returns a promise, on the replay too.
   memoize<T>(produce: () => Promise<T>): Promise<T>;
   memoize<T>(produce: () => T): T;
   memoize<T>(produce: () => T | Promise<T>): T | Promise<T> {
     const index = this.#cursor++;
     if (index < FakeUrlTransport.journal.length) {
-      return FakeUrlTransport.journal[index] as T; // replay from an earlier load
+      // replay from an earlier load
+      const value = FakeUrlTransport.journal[index] as T;
+      return FakeUrlTransport.asyncSlots.has(index) ? Promise.resolve(value) : value;
     }
     const produced = produce();
     if (produced instanceof Promise) {
+      FakeUrlTransport.asyncSlots.add(index);
       return produced.then((value) => {
         FakeUrlTransport.journal[index] = value;
         return value;
@@ -128,10 +133,11 @@ class FakeUrlChannel implements Channel {
     return () => this.#closeListeners.delete(fn);
   }
 
-  async send(request: JsonRpcRequest): Promise<void> {
+  async send(sent: JsonRpcRequest | Promise<JsonRpcRequest>): Promise<void> {
     if (this.closed) {
       throw new Error('FakeUrlTransport: cannot send on a closed channel');
     }
+    const request = await sent;
     this.#requests.push(request);
     // A load that navigates to the signer records the request but never
     // receives a response in-context (the page unloads), so the request

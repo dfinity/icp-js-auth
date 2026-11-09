@@ -3,7 +3,7 @@ import type { Channel, Transport } from '@icp-sdk/signer';
 // `JsonRpcRequest` / `JsonRpcResponse` aren't re-exported from the package
 // root; extract the request shape from `Channel['send']` and redeclare the
 // JSON-RPC 2.0 response shape locally.
-type JsonRpcRequest = Parameters<Channel['send']>[0];
+type JsonRpcRequest = Awaited<Parameters<Channel['send']>[0]>;
 
 interface JsonRpcError {
   code: number;
@@ -91,10 +91,11 @@ class FakeChannel implements Channel {
     return () => this.#closeListeners.delete(fn);
   }
 
-  async send(request: JsonRpcRequest): Promise<void> {
+  async send(sent: JsonRpcRequest | Promise<JsonRpcRequest>): Promise<void> {
     if (this.closed) {
       throw new Error('FakeTransport: cannot send on a closed channel');
     }
+    const request = await sent;
     this.#requests.push(request);
     // Per JSON-RPC 2.0, a request without an id is a Notification and receives
     // no response. This test transport treats `id: null` the same way, so

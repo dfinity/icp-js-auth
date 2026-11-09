@@ -1,12 +1,9 @@
 import { Principal } from '@icp-sdk/core/principal';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { CookieStateStorage } from '../../src/client/cookie-state-storage.ts';
-import {
-  LocalStateStorage,
-  MemoryStateStorage,
-  type SessionState,
-  type StateStorage,
-} from '../../src/client/state-storage.ts';
+import { CookieStateStorage } from '../../../src/client/state/cookie-state-storage.ts';
+import { LocalStateStorage } from '../../../src/client/state/local-state-storage.ts';
+import { MemoryStateStorage } from '../../../src/client/state/memory-state-storage.ts';
+import type { SessionState, StateStorage } from '../../../src/client/state/state-storage.ts';
 
 // jsdom serves this document from localhost, and `document.cookie` is scoped by
 // the document's own URL rather than by anything stubbed — so the tests write
@@ -248,6 +245,21 @@ describe('CookieStateStorage', () => {
     expect(listener).toHaveBeenCalledTimes(2);
   });
 
+  it('tells a subscriber once about an account switch, after both records changed', () => {
+    const storage = new CookieStateStorage({ domain: DOMAIN });
+    storage.set(KEY, state());
+    const seen: (SessionState | null)[] = [];
+    storage.subscribe(KEY, () => seen.push(storage.get(KEY)));
+
+    const bob = {
+      principal: Principal.selfAuthenticating(new Uint8Array([4, 5, 6])),
+      expiration: state().expiration,
+    };
+    storage.set(KEY, bob);
+
+    expect(seen).toEqual([{ ...bob, held: true }]);
+  });
+
   it('hears another tab of this origin drop its claim', () => {
     const storage = new CookieStateStorage({ domain: DOMAIN });
     storage.set(KEY, state());
@@ -279,6 +291,117 @@ describe('CookieStateStorage', () => {
     globalThis.dispatchEvent(new Event('focus'));
 
     expect(listener).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('CookieStateStorage in a worker', () => {
+  let stores: CookieStateStorage[] = [];
+  let listening: (() => void)[] = [];
+  // A store follows other tabs and workers while it has a subscriber, as it
+  // does under a client, so every store here gets one.
+  // Subscribed to the key under test, as a client is: that is when a tab mirrors
+  // it and a worker loads it.
+  const track = (store: CookieStateStorage) => {
+    stores.push(store);
+    listening.push(store.subscribe(KEY, () => {}));
+    return store;
+  };
+  const openTab = () => track(new CookieStateStorage({ domain: DOMAIN }));
+  // A worker has neither `document` nor `localStorage`. Both are hidden only
+  // while the store is built, which is when it decides how to work.
+  const openWorker = () => track(buildWorker());
+  const buildWorker = () => {
+    vi.stubGlobal('document', undefined);
+    vi.stubGlobal('localStorage', undefined);
+    try {
+      return new CookieStateStorage({ domain: DOMAIN });
+    } finally {
+      vi.unstubAllGlobals();
+      vi.stubGlobal('location', { hostname: 'localhost', protocol: 'http:' });
+    }
+  };
+
+  afterEach(async () => {
+    for (const stop of listening) stop();
+    listening = [];
+    // A mirror still queued would otherwise land after the clear below and
+    // write "none" into the next test's database.
+    await Promise.all(stores.map((store) => store.ready()));
+    stores = [];
+    localStorage.clear();
+  });
+
+  it('reads the sign-in a tab of its origin holds', async () => {
+    const written = state();
+    openTab().set(KEY, written);
+    const worker = openWorker();
+    await worker.ready();
+
+    await vi.waitFor(() => expect(worker.get(KEY)).toEqual({ ...written, held: true }));
+  });
+
+  // A worker acts only with this origin's credentials, so a sign-in this origin
+  // holds none for is one it cannot act on.
+  it('reads a sibling sign-in this origin holds no credentials for as signed out', async () => {
+    const tab = openTab();
+    // biome-ignore lint/suspicious/noDocumentCookie: as above.
+    document.cookie = `${KEY}=${encodeURIComponent(
+      `${state().principal.toText()}|${state().expiration}`,
+    )}; Path=/`;
+    expect(tab.get(KEY)?.held).toBe(false);
+    const worker = openWorker();
+    worker.get(KEY);
+    await worker.ready();
+
+    expect(worker.get(KEY)).toBeNull();
+  });
+
+  it('hears a tab of its origin sign out', async () => {
+    const tab = openTab();
+    tab.set(KEY, state());
+    const worker = openWorker();
+    await vi.waitFor(() => expect(worker.get(KEY)).not.toBeNull());
+    const listener = vi.fn();
+    worker.subscribe(KEY, listener);
+
+    tab.remove(KEY);
+
+    await vi.waitFor(() => expect(worker.get(KEY)).toBeNull());
+    expect(listener).toHaveBeenCalled();
+  });
+
+  it('loads the claim when subscribed, so ready() covers it', async () => {
+    const written = state();
+    openTab().set(KEY, written);
+    const probe = openWorker();
+    await vi.waitFor(() => expect(probe.get(KEY)?.held).toBe(true));
+
+    const worker = openWorker();
+    worker.get(KEY);
+    await worker.ready();
+
+    expect(worker.get(KEY)).toEqual({ ...written, held: true });
+  });
+
+  it('only reads: signing in and out happens in a page', () => {
+    const worker = openWorker();
+
+    expect(worker.isReadOnly).toBe(true);
+    expect(() => worker.set(KEY, state())).toThrow(/read-only/);
+    expect(() => worker.remove(KEY)).toThrow(/read-only/);
+    expect(() => worker.discard(KEY)).toThrow(/read-only/);
+  });
+
+  it('reads a claim a tab dropped as signed out, cookie untouched', async () => {
+    const tab = openTab();
+    tab.set(KEY, state());
+    const worker = openWorker();
+    await vi.waitFor(() => expect(worker.get(KEY)?.held).toBe(true));
+
+    tab.discard(KEY);
+
+    await vi.waitFor(() => expect(worker.get(KEY)).toBeNull());
+    expect(tab.get(KEY)?.held).toBe(false);
   });
 });
 

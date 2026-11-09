@@ -13,18 +13,35 @@ import {
 import { Principal } from '@icp-sdk/core/principal';
 import { Signer } from '@icp-sdk/signer';
 import { PostMessageTransport, UrlTransport } from '@icp-sdk/signer/web';
-import { AccountMismatchError, chainAuthorisesKey } from './app-delegation-source.js';
-import { type HeldLock, stealLock, stealMintLock } from './app-lock.js';
 import { fromBase64, toBase64 } from './base64.js';
-import type { Credential, CredentialStorage } from './credential-storage.js';
+import type { Credential, CredentialStorage } from './credentials/credential-storage.js';
+import { IdbCredentialStorage } from './credentials/idb-credential-storage.js';
 import { watchActivity, watchForeground } from './foreground-refresh.js';
-import { IdbCredentialStorage } from './idb-credential-storage.js';
-import { requestSessionDelegation } from './session-delegation.js';
-import { SessionIdentity } from './session-identity.js';
-import { SessionMinter } from './session-minter.js';
+import {
+  NotificationConsent,
+  type NotificationConsentStatus,
+  // Aliased: the method below is this library's name for the operation, and this
+  // is the request it sends.
+  requestNotificationConsent as sendConsentRequest,
+} from './notification-consent.js';
+import {
+  AccountMismatchError,
+  chainAuthorisesKey,
+  SessionGoneError,
+} from './session/app-delegation-source.js';
+import { type HeldLock, stealLock, stealMintLock } from './session/app-lock.js';
+import { requestSessionDelegation } from './session/session-delegation.js';
+import { SessionIdentity } from './session/session-identity.js';
+import { SessionMinter } from './session/session-minter.js';
 import { type Slots, slotsFor } from './slots.js';
-import { normalizeSsoDomain } from './sso.js';
-import { LocalStateStorage, type SessionState, type StateStorage } from './state-storage.js';
+import {
+  createSsoDomainService,
+  normalizeSsoDomain,
+  type SsoStatus,
+  SsoStatusChecker,
+} from './sso.js';
+import { LocalStateStorage, readOnlyError } from './state/local-state-storage.js';
+import type { SessionState, StateStorage } from './state/state-storage.js';
 
 /**
  * The lock one signer interaction at a time holds.
@@ -78,7 +95,9 @@ export interface AuthClientBaseOptions {
 
   /**
    * Where the state of the sign-in is kept: which account is signed in here,
-   * and until when. Defaults to `localStorage`.
+   * and until when. Defaults to one {@link LocalStateStorage} shared by every
+   * client in this page or worker that sets none, and followed by the other
+   * tabs and workers of this origin.
    */
   stateStorage?: StateStorage;
 
@@ -235,8 +254,17 @@ export type AuthClientCreateOptions = AuthClientBaseOptions &
          * When set, the identity provider URL includes an `sso` search param so
          * the user authenticates via that organization's own provider.
          *
-         * A value that is not a domain with an optional port throws. Use
-         * {@link isValidSsoDomain} to check a domain the user typed.
+         * The value is trimmed, lowercased and IDNA-encoded, and has to be a
+         * domain and nothing else: no scheme, port, path, query, fragment or
+         * userinfo. A loopback host (`localhost`, `127.0.0.1`, or a name under
+         * `.localhost`) is accepted too, with a port, for a local mock provider.
+         *
+         * The client checks the domain with Internet Identity as soon as it is
+         * built, and {@link AuthClient.getSsoStatus} reports the answer. A value
+         * that is not a domain is reported as `invalid`, with the reason, rather
+         * than thrown, so a
+         * client can be built from whatever the user typed; a sign-in with it
+         * opens Internet Identity, which explains the error on its own screen.
          */
         ssoDomain?: string;
       }
@@ -333,6 +361,15 @@ export class SessionNotHeldError extends Error {
  *   ? await authClient.getIdentity()
  *   : await authClient.signIn();
  */
+// Every client in this page or worker that brings no store of its own shares
+// this one. They share the sign-in anyway, since it lives in one record, and one
+// store tells each of them about the others' writes as they happen.
+let sharedStateStorage: LocalStateStorage | undefined;
+const defaultStateStorage = (): LocalStateStorage => {
+  sharedStateStorage ??= new LocalStateStorage();
+  return sharedStateStorage;
+};
+
 /**
  * Thrown when a later sign-in or sign-out took over from this one.
  *
@@ -368,6 +405,9 @@ export class AuthClient {
   readonly #listeners = new Set<() => void>();
   // Set while a restore is running, so its own writes are not news.
   #restoring = false;
+  // Set while a ceremony writes the record and installs the identity that goes
+  // with it, so `getIdentity()` in between waits for the identity.
+  #committing: Promise<void> | null = null;
   #stateStorage: StateStorage;
   #signer: Signer;
   // Set only in redirect mode, so the redirect-specific paths (nonce/key
@@ -381,12 +421,14 @@ export class AuthClient {
   // interaction rather than two.
   #interactions = 0;
   #channelLock: HeldLock | undefined;
+  // Set only for a client built with `ssoDomain`.
+  readonly #sso: SsoStatusChecker | undefined;
 
   constructor(options: AuthClientCreateOptions = {}) {
     this.#options = options;
     this.#credentialStorage = options.credentialStorage ?? new IdbCredentialStorage();
     this.#slots = slotsFor(options.namespace);
-    this.#stateStorage = options.stateStorage ?? new LocalStateStorage();
+    this.#stateStorage = options.stateStorage ?? defaultStateStorage();
 
     // A string or URL is what this option used to be, and a caller still passing
     // one would otherwise be silently ignored — both halves falling back to
@@ -437,11 +479,10 @@ export class AuthClient {
     // stale.
     this.#status = this.#readStatus();
     this.#unwatchState = this.#stateStorage.subscribe(this.#slots.state, () => {
-      // The held answer first, then the listeners, then whatever this client has
-      // to do about it — so a listener asking who is signed in sees what it was
-      // told about, whether or not the guard below lets a restore run.
+      // The held answer first, then the restore, then the listeners — so a
+      // listener asking who is signed in sees what it was told about, and one
+      // asking for the identity waits for the restore that installs it.
       this.#status = this.#readStatus();
-      for (const listener of [...this.#listeners]) listener();
 
       // Only a change this client did not cause. A ceremony writes this record
       // itself and installs the identity that goes with it, and a restore writes
@@ -452,8 +493,11 @@ export class AuthClient {
       //
       // What this gives up is a peer's change arriving during our own restore,
       // which the next change reports.
-      if (this.#interactions > 0 || this.#restoring || this.#disposed) return;
-      this.#restoreAgain();
+      if (this.#interactions === 0 && !this.#restoring && !this.#disposed) {
+        this.#restoreAgain();
+      }
+
+      for (const listener of [...this.#listeners]) listener();
     });
     if (options.openIdProvider !== undefined && options.ssoDomain !== undefined) {
       throw new Error('openIdProvider and ssoDomain are mutually exclusive');
@@ -462,7 +506,18 @@ export class AuthClient {
       identityProviderUrl.searchParams.set('openid', OPENID_PROVIDER_URLS[options.openIdProvider]);
     }
     if (options.ssoDomain !== undefined) {
-      identityProviderUrl.searchParams.set('sso', normalizeSsoDomain(options.ssoDomain));
+      let domain: string | { invalid: string };
+      try {
+        domain = normalizeSsoDomain(options.ssoDomain);
+      } catch (error) {
+        domain = { invalid: error instanceof Error ? error.message : String(error) };
+      }
+      // A value that is not a domain goes to Internet Identity as typed, which
+      // explains it on its own screen.
+      identityProviderUrl.searchParams.set(
+        'sso',
+        typeof domain === 'string' ? domain : options.ssoDomain.trim(),
+      );
       // The SSO ceremony starts before a delegation is requested, so the
       // channel carries the derivation origin too late to resolve the client.
       if (options.derivationOrigin !== undefined) {
@@ -471,6 +526,14 @@ export class AuthClient {
           options.derivationOrigin.toString(),
         );
       }
+      const canisterId = this.#canisterId;
+      this.#sso = new SsoStatusChecker(
+        domain,
+        () => createSsoDomainService({ canisterId, agentOptions: options.agentOptions }),
+        () => {
+          for (const listener of [...this.#listeners]) listener();
+        },
+      );
     }
     // `prompt` and `hint` are Internet Identity extensions, so they ride on the
     // authorize URL rather than in the ICRC request. Baking them in here, as
@@ -524,10 +587,38 @@ export class AuthClient {
   }
 
   /**
+   * Resolves once this client has loaded the stored state and restored the
+   * session, so that {@link isAuthenticated}, {@link getStatus} and
+   * {@link getPrincipal} give the stored answer.
+   *
+   * Only needed where there is no `localStorage`, which is a web worker or a
+   * service worker. There the state is loaded from IndexedDB, and until then the
+   * client reads as signed out:
+   *
+   * ```ts
+   * const client = new AuthClient();
+   * await client.ready();
+   * client.isAuthenticated();
+   * ```
+   *
+   * In a browser tab, don't wait for it. The status is correct from the moment
+   * the client is constructed, and waiting would hold up the page on IndexedDB
+   * and a session restore for nothing.
+   *
+   * Rejects where restoring the session fails, as {@link getIdentity} does.
+   */
+  ready(): Promise<void> {
+    return this.#init();
+  }
+
+  /**
    * Returns the current identity, restoring a previous session if available.
    */
   async getIdentity(): Promise<Identity> {
     await this.#init();
+    // A ceremony that fails partway leaves the record without an identity, which
+    // the check below reports; its own error is `signIn()`'s to throw.
+    await this.#committing?.catch(() => undefined);
 
     // A record exists and this client holds nothing to act with. Handing back an
     // anonymous identity here is the dangerous answer: calls would go out
@@ -613,6 +704,45 @@ export class AuthClient {
     return this.#status;
   }
 
+  /**
+   * Whether the organization domain this client was built with can be signed
+   * in with, or `undefined` for a client built without `ssoDomain`.
+   *
+   * Synchronous, and the same object until the answer changes, like
+   * {@link getStatus}; {@link subscribe} says when to read it again. A client
+   * built with `ssoDomain` starts checking as soon as it is built: it asks
+   * Internet Identity to resolve the domain, then reads the result
+   * until it is final, so `checking` lasts until Internet Identity answers.
+   * Building the client also warms Internet Identity's cache for the domain, so
+   * a sign-in that follows starts without waiting on the fetch.
+   *
+   * {@link signIn} proceeds in every state: Internet Identity resolves the
+   * domain itself during the sign-in, and explains a failure, a value that is
+   * not a domain included, on its own screen.
+   *
+   * @example
+   * const client = new AuthClient({ ssoDomain: input.value });
+   * client.subscribe(() => render(client.getSsoStatus()));
+   * render(client.getSsoStatus());
+   */
+  getSsoStatus(): SsoStatus | undefined {
+    return this.#sso?.status;
+  }
+
+  /**
+   * Checks the organization domain again, for a "Try again" button.
+   *
+   * The status goes back to `checking` and then to the new answer. Calling it
+   * while an `unavailable` answer's `retryAfter` is still in the future is
+   * harmless: Internet Identity does not fetch again before then, so the answer
+   * comes back the same at once. Nothing re-checks on its own once `retryAfter`
+   * passes. Does nothing for an `invalid` domain, which no retry can fix, or for
+   * a client built without `ssoDomain`.
+   */
+  refreshSsoStatus(): void {
+    this.#sso?.refresh();
+  }
+
   /** Reads the record and builds the answer `getStatus` hands out. */
   #readStatus(): SessionStatus {
     const record = this.#stateStorage.get(this.#slots.state);
@@ -629,22 +759,24 @@ export class AuthClient {
   }
 
   /**
-   * Watches who is signed in here, and returns a function that stops watching.
+   * Watches who is signed in here, and the SSO status of a client built with
+   * `ssoDomain`, and returns a function that stops watching.
    *
-   * `getStatus()` and the predicates beside it are snapshots, so an application
-   * rendering on them needs to be told when to read again. The record changes
-   * for reasons that are nothing to do with this client — another tab signing
-   * out, a sibling subdomain publishing a sign-in, a peer client on this page
-   * re-issuing silently — and this is how those arrive.
+   * `getStatus()`, `getSsoStatus()` and the predicates beside them are
+   * snapshots, so an application rendering on them needs to be told when to read
+   * again. The record changes for reasons that are nothing to do with this
+   * client: another tab signing out, a sibling subdomain publishing a sign-in,
+   * a peer client on this page re-issuing silently. The SSO status changes when
+   * Internet Identity answers. This is how both arrive.
    *
-   * Fired once the record is readable, so a listener asking who is signed in
-   * sees what it was told about. It says that something changed and not what: a
-   * listener reads the answer it wants, which for most is `getStatus()`.
+   * Fired once the new answer is readable, so a listener sees what it was told
+   * about. It says that something changed and not what: a listener reads the
+   * answer it wants, `getStatus()` or `getSsoStatus()`.
    *
    * What it does not cover is the identity being replaced under an application
    * that holds one — an app delegation rotating is deliberately invisible, and
    * nothing about who is signed in has changed when it does.
-   * @param listener - Called after the record changes.
+   * @param listener - Called after the record or the SSO status changes.
    * @returns A function that unregisters it.
    */
   subscribe(listener: () => void): () => void {
@@ -659,10 +791,12 @@ export class AuthClient {
 
   /**
    * Releases what this client hooked: the browser listeners, the state
-   * subscription, and the refresh the identity has scheduled. Call it when
-   * discarding a client, so nothing it registered outlives it.
+   * subscription, the refresh the identity has scheduled, and an SSO domain
+   * check still in progress. Call it when discarding a client, so nothing it
+   * registered outlives it.
    */
   dispose(): void {
+    this.#sso?.dispose();
     // Recorded, because the constructor starts the restore without awaiting it:
     // a client disposed while one is in flight would otherwise have an identity
     // installed afterwards, scheduling refreshes nobody can stop.
@@ -733,19 +867,14 @@ export class AuthClient {
   }
 
   /**
-   * Opens the signer channel and takes the lock that makes this the only
-   * interaction on it.
+   * Takes the lock that makes this the only interaction on the signer channel.
    *
-   * One method because the order is the whole point. A popup may only be opened
-   * from the task the click started, so nothing may be asked of the browser
-   * before `openChannel` — two lock requests in front of it were enough for
-   * Chromium to refuse the window — and the lock has to be taken as soon as it
-   * is open. Two callers doing that by hand is one place too many for the order
-   * to come out backwards.
+   * Called right after a request is handed to the signer, which opens the
+   * channel within that call: a popup may only be opened from the task the
+   * click started, and lock requests in front of it were enough for Chromium to
+   * refuse the window, so the lock is asked for once the window exists.
    */
-  async #openSignerChannel(): Promise<void> {
-    await this.#signer.openChannel();
-
+  #takeChannelLock(): void {
     if (this.#channelLock === undefined) {
       const lock = stealLock(CHANNEL_LOCK);
       // Whoever took the channel has already renavigated the window this one was
@@ -792,6 +921,7 @@ export class AuthClient {
   }
 
   async signIn(options?: AuthClientSignInOptions): Promise<Identity> {
+    if (this.#isReadOnly) throw readOnlyError();
     // Counted here and locked inside, once the window is open: a ceremony is
     // both things — the signer channel an origin has one of, and this
     // namespace's sign-in, which `signOut` moves too — but neither lock may be
@@ -824,14 +954,11 @@ export class AuthClient {
     const returnTo =
       raw === undefined ? undefined : this.memoize(() => sameOriginTarget(raw)?.href ?? null);
 
-    // Start session-key acquisition BEFORE opening the channel, awaiting it only
-    // after. In the redirect flow the acquisition's first `transport.memoize`
-    // runs synchronously when invoked, so its in-flight bump lands in the same
-    // tick `signIn` is called — holding the transport's batch flush from the
-    // very start of the flow rather than only after the `openChannel` await.
-    // Under `Promise.all([signIn, requestAttributes])` this is what keeps a
-    // faster concurrent request from flushing before this flow's delegation
-    // request is buffered.
+    // Session-key acquisition starts on the call, and the delegation request
+    // that needs it is handed to the signer on the call too, as a promise of the
+    // request. The signer places it in call order there, so in the redirect
+    // flow it replays into the slot it was sent from whatever the key costs on
+    // either load, and a `requestAttributes` issued alongside keeps its own.
     const sessionKeyPromise: Promise<{
       key: SignIdentity | PartialIdentity;
       pending?: boolean;
@@ -845,9 +972,25 @@ export class AuthClient {
     // rejection and propagates it when reached.
     void sessionKeyPromise.catch(() => undefined);
 
-    // Must stay the first await: it opens the signer window, which the browser
-    // allows only in the tick the click started.
-    await this.#openSignerChannel();
+    // Opens the signer window within the call, which the browser allows only in
+    // the tick the click started, so nothing before it may ask the browser for
+    // anything.
+    const sessionChainPromise = requestSessionDelegation(
+      this.#signer,
+      sessionKeyPromise.then(({ key }) => ({
+        sessionPublicKey: key.getPublicKey().toDer(),
+        // Both bounds are sent only where the caller asked, so the provider's
+        // own defaults apply otherwise rather than numbers this library
+        // invented. How long a sign-in lasts is the provider's policy, narrowed
+        // by what the user chooses at consent and by an organization's cap.
+        maxTimeToLive: options?.maxTimeToLive,
+        maxTimeToIdle: options?.maxTimeToIdle,
+        derivationOrigin: this.#options.derivationOrigin?.toString(),
+      })),
+    );
+    void sessionChainPromise.catch(() => undefined);
+
+    this.#takeChannelLock();
 
     // The other lock a ceremony needs, taken once the window is open for the
     // same reason. Stolen rather than queued for, so the newer intent wins and
@@ -885,16 +1028,7 @@ export class AuthClient {
         throw new Error('A session needs a key that can sign');
       }
 
-      const sessionChain = await requestSessionDelegation(this.#signer, {
-        sessionPublicKey: key.getPublicKey().toDer(),
-        // Both bounds are sent only where the caller asked, so the provider's
-        // own defaults apply otherwise rather than numbers this library
-        // invented. How long a sign-in lasts is the provider's policy, narrowed
-        // by what the user chooses at consent and by an organization's cap.
-        maxTimeToLive: options?.maxTimeToLive,
-        maxTimeToIdle: options?.maxTimeToIdle,
-        derivationOrigin: this.#options.derivationOrigin?.toString(),
-      });
+      const sessionChain = await sessionChainPromise;
 
       // The chain comes from the signer over a transport shared with others, so
       // the key it delegates to is checked here rather than assumed. A chain for
@@ -926,12 +1060,20 @@ export class AuthClient {
       // The session and the state first, because the state is what makes this
       // account the one this origin answers for; promoting ahead of it would
       // publish a credential for a sign-in nothing has recorded yet.
-      await guarded(() => this.#persistSession(key, sessionChain, appChain.publicKey));
-      await guarded(() => this.#promoteAppCredential(appKey, appChain));
+      const committing = (async () => {
+        await guarded(() => this.#persistSession(key, sessionChain, appChain.publicKey));
+        await guarded(() => this.#promoteAppCredential(appKey, appChain));
 
-      await guarded(async () => {
-        this.#installIdentity(await this.#openSession(key, sessionChain, minter));
-      });
+        await guarded(async () => {
+          this.#installIdentity(await this.#openSession(key, sessionChain, minter));
+        });
+      })();
+      this.#committing = committing;
+      try {
+        await committing;
+      } finally {
+        if (this.#committing === committing) this.#committing = null;
+      }
 
       // Best-effort — the user is already signed in, so a cleanup failure must not
       // fail signIn(), and the next ceremony overwrites what is left behind.
@@ -986,21 +1128,10 @@ export class AuthClient {
       );
     }
 
-    // Acquire the key inside a `memoize` producer so the transport holds its
-    // batch flush across the (async) key read/create + storage write. The
-    // transport coalesces concurrently issued requests into one redirect by
-    // flushing on a macrotask once no memoize producer is in flight; without
-    // this hold, a faster concurrent request (e.g. the nonce path of
-    // `requestAttributes`) buffers first and trips that flush before this flow's
-    // delegation request — issued only once the key is ready — is buffered,
-    // splitting what should be one redirect into two.
-    //
-    // The key is captured in a closure, not read back after the producer: on the
-    // FIRST load the producer sets `acquired`, so the delegation request that
-    // follows is issued with no intervening storage read — a read there would
-    // re-open the very flush gap this closes. The producer is skipped on the
-    // replay load (its result is journaled), where the key is instead read from
-    // the pending slot.
+    // Acquired inside a `memoize` producer, so the first load journals which key
+    // this ceremony started with. The key is captured in a closure on the first
+    // load, where the producer runs; on the replay load the producer is skipped
+    // (its result is journaled) and the key is read from the pending slot.
     //
     // What is journaled is the key's *public* half: not a secret, it survives the
     // redirect as text, and on the return load it says whether the pending slot
@@ -1041,9 +1172,10 @@ export class AuthClient {
    *
    * In 'window' mode the callback lets the identity provider window open while the
    * nonce is still resolving, avoiding a perceived delay before the user sees
-   * the prompt; auto-close of the signer transport channel is temporarily
-   * disabled while awaiting so the window cannot be closed out from under the
-   * pending flow.
+   * the prompt; the signer keeps the channel open while the request waits for
+   * its nonce. In both modes the request takes its place with the signer when
+   * this method is called, so it can be issued alongside `signIn` in either
+   * order.
    *
    * @param params - Request parameters.
    * @param params.keys - Attribute keys to request (e.g. `['email', 'name']`).
@@ -1073,16 +1205,24 @@ export class AuthClient {
   }): Promise<SignedAttributes> {
     // In redirect mode the nonce is journaled (base64, since the journal is
     // JSON) so the replay on the return load signs against the same bytes.
-    const nonceBytes = this.#urlTransport
-      ? fromBase64(await this.#urlTransport.memoize(async () => toBase64(await params.nonce())))
-      : await this.#resolveNonce(params.nonce);
+    const nonce: Promise<string> = this.#urlTransport
+      ? this.#urlTransport.memoize(async () => toBase64(await params.nonce()))
+      : params.nonce().then(toBase64);
 
-    const response = await this.#signer.sendRequest({
-      jsonrpc: '2.0',
-      id: globalThis.crypto.randomUUID(),
-      method: 'ii-icrc3-attributes',
-      params: { keys: params.keys, nonce: toBase64(nonceBytes) },
-    });
+    // Handed to the signer on the call, as a promise of the request: the signer
+    // window opens within the call while the nonce is still on its way, and the
+    // request keeps its place in call order however long the nonce takes on
+    // either load of a redirect flow.
+    const responsePromise = this.#signer.sendRequest(
+      nonce.then((value) => ({
+        jsonrpc: '2.0' as const,
+        id: globalThis.crypto.randomUUID(),
+        method: 'ii-icrc3-attributes',
+        params: { keys: params.keys, nonce: value },
+      })),
+    );
+    this.#takeChannelLock();
+    const response = await responsePromise;
 
     if ('error' in response) {
       throw new Error(response.error.message);
@@ -1101,6 +1241,97 @@ export class AuthClient {
     } catch (cause) {
       throw new Error('Invalid response: data or signature is not valid base64', { cause });
     }
+  }
+
+  /**
+   * Asks the user whether this application may notify them.
+   *
+   * Opens the identity provider the way a sign-in does, because consent is the
+   * user's answer and nothing else can stand in for it. Where they agree, the
+   * browser they answered on is registered for delivery.
+   *
+   * A refusal is an answer rather than a failure: it returns `granted: false`,
+   * and an application renders that. Calling it again where consent is already
+   * held returns what is recorded without asking a second time.
+   *
+   * @returns Whether this application may notify the user.
+   * @throws {InteractionRequiredError} Where the client was built with
+   *   `prompt: 'none'`, which no consent ceremony can be run under.
+   * @throws {NotificationsUnsupportedError} Where this identity provider does
+   *   not send notifications at all.
+   * @example
+   * const { granted } = await authClient.requestNotificationConsent();
+   */
+  async requestNotificationConsent(): Promise<NotificationConsentStatus> {
+    // The channel lock and not the sign-in lock, for the reason `requestAttributes`
+    // takes it: this opens the signer channel, which an origin has one of, and
+    // writes nothing anyone else reads.
+    this.#beginInteraction();
+    try {
+      const response = sendConsentRequest(this.#signer, this.#options.derivationOrigin?.toString());
+      this.#takeChannelLock();
+      return await response;
+    } finally {
+      this.#endInteraction();
+    }
+  }
+
+  /**
+   * Withdraws this application's consent to notify the user.
+   *
+   * A canister call made as the session, so it needs no ceremony and opens
+   * nothing: the user already decided, and this records that they changed their
+   * mind. Idempotent — consent that is already withdrawn is not an error.
+   *
+   * @throws {SessionGoneError} Where this origin holds no live session.
+   */
+  async revokeNotificationConsent(): Promise<void> {
+    await (await this.#consent()).revoke();
+  }
+
+  /**
+   * Whether this application may notify the signed-in user.
+   *
+   * What a notifications control is painted from. A query, so the answer is
+   * uncertified, and it reports the consent alone: whether a notification would
+   * reach the user also depends on the device they hold, which this does not
+   * speak for.
+   *
+   * @returns Whether this application may notify the user.
+   * @throws {SessionGoneError} Where this origin holds no live session.
+   * @example
+   * const { granted } = await authClient.getNotificationConsentStatus();
+   */
+  async getNotificationConsentStatus(): Promise<NotificationConsentStatus> {
+    return (await this.#consent()).status();
+  }
+
+  /**
+   * Builds the consent calls from the session this origin holds.
+   *
+   * Read at the call rather than kept, so a session replaced since the last call
+   * is not the one spoken for, and a sign-out between them is reported as what it
+   * is instead of answered from a stale actor.
+   */
+  async #consent(): Promise<NotificationConsent> {
+    // Wait for the constructor's session restore, which is what puts the
+    // credential these calls are made with where this can read it.
+    await this.#init();
+
+    // The chain is checked and not just its presence: `#init()` resolves once, so a
+    // session that ran out while the page stayed open is still in the slot, and a
+    // call made with it would fail as a rejected signature rather than as what it is.
+    const session = await this.#credentialStorage.get(this.#slots.session);
+    if (session === null || session.chain === undefined || !isDelegationValid(session.chain)) {
+      throw new SessionGoneError();
+    }
+
+    return NotificationConsent.create({
+      sessionKey: session.identity,
+      sessionChain: session.chain,
+      canisterId: this.#canisterId,
+      agentOptions: this.#options.agentOptions,
+    });
   }
 
   /**
@@ -1156,6 +1387,7 @@ export class AuthClient {
    * @param options.returnTo - URL to navigate to after sign-out.
    */
   async signOut(options: { returnTo?: string } = {}): Promise<void> {
+    if (this.#isReadOnly) throw readOnlyError();
     // Wait for the constructor's session restore: hydration racing the
     // deletion below could re-populate the identity from already-read state.
     await this.#init();
@@ -1216,24 +1448,6 @@ export class AuthClient {
       if (target !== undefined) {
         window.location.assign(target.href);
       }
-    }
-  }
-
-  // Popup-mode nonce resolution. Start the fetch, then open the transport
-  // channel so the identity provider window is visible while we wait, and
-  // suspend auto-close so it can't fire mid-await (e.g. due to a close
-  // scheduled by a prior request on the same signer). The original auto-close
-  // setting is restored before sendRequest, so the next response resumes
-  // normal close behaviour.
-  async #resolveNonce(nonce: () => Promise<Uint8Array>): Promise<Uint8Array> {
-    const value = nonce();
-    await this.#openSignerChannel();
-    const previousAutoClose = this.#signer.autoCloseTransportChannel;
-    this.#signer.autoCloseTransportChannel = false;
-    try {
-      return await value;
-    } finally {
-      this.#signer.autoCloseTransportChannel = previousAutoClose;
     }
   }
 
@@ -1398,6 +1612,7 @@ export class AuthClient {
    * @param principal - The account whose session ended.
    */
   async #expireSession(principal: Principal): Promise<void> {
+    if (this.#isReadOnly) return;
     this.#stateStorage.set(this.#slots.state, {
       principal,
       expiration: BigInt(Date.now()) * 1_000_000n,
@@ -1465,6 +1680,7 @@ export class AuthClient {
   async #restore(): Promise<void> {
     this.#restoring = true;
     try {
+      await this.#stateStorage.ready?.();
       await this.#hydrate();
     } finally {
       this.#restoring = false;
@@ -1496,6 +1712,9 @@ export class AuthClient {
     // signed in removes nothing.
     if (this.#stateStorage.get(this.#slots.state) === null) {
       await this.#endSession();
+      // Installed here too: on a restore after the record changed, an identity
+      // from the sign-in that just ended is still in place.
+      this.#installIdentity(new AnonymousIdentity());
       return;
     }
 
@@ -1582,7 +1801,7 @@ export class AuthClient {
     // the session's, so a chain this old leaves a record that reads as expired —
     // which is what a page loading after a session ran out should say.
     if (credential.chain === undefined || !isDelegationValid(credential.chain)) {
-      await this.#clearCredentials();
+      if (!this.#isReadOnly) await this.#clearCredentials();
       return null;
     }
     return credential;
@@ -1595,6 +1814,7 @@ export class AuthClient {
    * origin, because a sibling reading a shared record must stop seeing one.
    */
   async #endSession(): Promise<void> {
+    if (this.#isReadOnly) return;
     this.#stateStorage.remove(this.#slots.state);
     await this.#clearCredentials();
   }
@@ -1609,8 +1829,18 @@ export class AuthClient {
    * obtained is gone.
    */
   async #dropSession(): Promise<void> {
+    if (this.#isReadOnly) return;
     this.#stateStorage.discard(this.#slots.state);
     await this.#clearCredentials();
+  }
+
+  /**
+   * Whether this client only reads the sign-in, as it does in a worker. It then
+   * changes nothing shared: a session it cannot use is left for a page of this
+   * origin to end, which runs the same checks.
+   */
+  get #isReadOnly(): boolean {
+    return this.#stateStorage.isReadOnly === true;
   }
 
   // Every slot a completed sign-in writes. Not the ceremony's pending slot: a

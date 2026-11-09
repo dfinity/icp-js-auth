@@ -1,6 +1,7 @@
 import type { DerEncodedPublicKey, HttpAgentRequest } from '@icp-sdk/core/agent';
 import { DelegationChain, DelegationIdentity } from '@icp-sdk/core/identity';
 import { Principal } from '@icp-sdk/core/principal';
+import type { Credential, CredentialStorage } from '../credentials/credential-storage.js';
 import {
   AccountMismatchError,
   type AppDelegationSource,
@@ -9,7 +10,6 @@ import {
   SessionUnsupportedError,
 } from './app-delegation-source.js';
 import { withMintLock } from './app-lock.js';
-import type { Credential, CredentialStorage } from './credential-storage.js';
 
 /**
  * How much life a delegation needs left to be handed to a caller. Covers a

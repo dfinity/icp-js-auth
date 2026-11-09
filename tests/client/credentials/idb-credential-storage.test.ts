@@ -1,12 +1,12 @@
 import { DelegationChain, Ed25519KeyIdentity } from '@icp-sdk/core/identity';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { slotsFor } from '../../src/client/slots.ts';
+import { slotsFor } from '../../../src/client/slots.ts';
 
 /** The bare names, which is what a client with no namespace writes under. */
 const SLOTS = slotsFor();
 
-import { IdbKeyVal } from '../../src/client/db.ts';
-import { IdbCredentialStorage } from '../../src/client/idb-credential-storage.ts';
+import { IdbCredentialStorage } from '../../../src/client/credentials/idb-credential-storage.ts';
+import { IdbKeyVal } from '../../../src/client/db.ts';
 
 let testCounter = 0;
 

@@ -1,76 +1,26 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { isValidSsoDomain } from '../../src/client/sso.ts';
+import {
+  normalizeSsoDomain,
+  SSO_POLL_MAX_MS,
+  SSO_POLL_MIN_MS,
+  SSO_RECHECK_AFTER_MS,
+  type SsoDomainService,
+  SsoStatusChecker,
+} from '../../src/client/sso.ts';
 
-const WELL_KNOWN_PATH = '/.well-known/ii-openid-configuration';
-
-function jsonResponse(body: unknown, init?: ResponseInit): Response {
-  return new Response(JSON.stringify(body), {
-    status: 200,
-    headers: { 'Content-Type': 'application/json' },
-    ...init,
-  });
-}
-
-const validConfiguration = {
-  client_id: 'ii-client',
-  openid_configuration: 'https://idp.dfinity.org/.well-known/openid-configuration',
-};
-
-/** The signal is required, so a check that never aborts still needs one. */
-function check(domain: string, signal = new AbortController().signal): Promise<boolean> {
-  return isValidSsoDomain(domain, signal);
-}
-
-describe('isValidSsoDomain', () => {
-  let fetchMock: ReturnType<typeof vi.fn>;
-
-  beforeEach(() => {
-    fetchMock = vi.fn().mockResolvedValue(jsonResponse(validConfiguration));
-    vi.stubGlobal('fetch', fetchMock);
-  });
-
-  afterEach(() => {
-    vi.unstubAllGlobals();
-  });
-
-  it('should accept a domain publishing an SSO configuration', async () => {
-    await expect(check('dfinity.org')).resolves.toBe(true);
-    expect(fetchMock).toHaveBeenCalledWith(
-      `https://dfinity.org${WELL_KNOWN_PATH}`,
-      expect.objectContaining({ headers: { Accept: 'application/json' } }),
-    );
-  });
-
-  it('should normalize the domain before fetching', async () => {
-    await expect(check('  DFINITY.org  ')).resolves.toBe(true);
-    expect(fetchMock).toHaveBeenCalledWith(
-      `https://dfinity.org${WELL_KNOWN_PATH}`,
-      expect.anything(),
-    );
-  });
-
-  it('should encode an internationalized domain', async () => {
-    await expect(check('zürich.example')).resolves.toBe(true);
-    expect(fetchMock).toHaveBeenCalledWith(
-      `https://xn--zrich-kva.example${WELL_KNOWN_PATH}`,
-      expect.anything(),
-    );
-  });
-
-  it('should keep a non-default port', async () => {
-    await expect(check('sso.dfinity.org:8443')).resolves.toBe(true);
-    expect(fetchMock).toHaveBeenCalledWith(
-      `https://sso.dfinity.org:8443${WELL_KNOWN_PATH}`,
-      expect.anything(),
-    );
-  });
-
-  it('should use http for a loopback host', async () => {
-    await expect(check('localhost:11107')).resolves.toBe(true);
-    expect(fetchMock).toHaveBeenCalledWith(
-      `http://localhost:11107${WELL_KNOWN_PATH}`,
-      expect.anything(),
-    );
+describe('normalizeSsoDomain', () => {
+  it.each([
+    ['a domain', 'dfinity.org', 'dfinity.org'],
+    ['a domain with whitespace and capitals', '  DFINITY.org  ', 'dfinity.org'],
+    ['an internationalized domain', 'zürich.example', 'xn--zrich-kva.example'],
+    ['a loopback host with a port', 'localhost:11107', 'localhost:11107'],
+    ['a loopback address', '127.0.0.1', '127.0.0.1'],
+    ['a name under .localhost with a port', 'app.localhost:8000', 'app.localhost:8000'],
+    ['a domain with a hyphen and digits', 'sso-2.dfinity.org', 'sso-2.dfinity.org'],
+    ['a punycode domain', 'xn--zrich-kva.example', 'xn--zrich-kva.example'],
+    ['a 253-character name', `${'a.'.repeat(125)}org`, `${'a.'.repeat(125)}org`],
+  ])('accepts %s', (_case, domain, expected) => {
+    expect(normalizeSsoDomain(domain)).toBe(expected);
   });
 
   it.each([
@@ -81,43 +31,288 @@ describe('isValidSsoDomain', () => {
     ['a domain carrying a query', 'dfinity.org?x=1'],
     ['a domain carrying a fragment', 'dfinity.org#x'],
     ['a domain carrying userinfo', 'user:pw@dfinity.org'],
+    ['a domain carrying a port', 'sso.dfinity.org:8443'],
+    ['a domain carrying the default port', 'dfinity.org:443'],
+    ['a domain carrying an empty port', 'dfinity.org:'],
+    ['a loopback host with an empty port', 'localhost:'],
+    ['a loopback host with the default port', 'localhost:443'],
+    ['a domain starting with a dot', '.org'],
+    ['a domain with an empty label', 'dfinity..org'],
+    ['a label starting with a hyphen', '-dfinity.org'],
+    ['a label ending with a hyphen', 'dfinity-.org'],
+    ['a label with an underscore', 'df_inity.org'],
+    ['a label over 63 characters', `${'a'.repeat(64)}.org`],
+    ['a label with hyphens in the third and fourth places', 'ab--cd.org'],
+    ['a name over 253 characters', `aa.${'a.'.repeat(124)}org`],
     ['a domain carrying a space', 'dfinity .org'],
     ['an authority over 255 characters', `${'a'.repeat(252)}.org`],
-  ])('should reject %s without fetching', async (_case, domain) => {
-    await expect(check(domain)).resolves.toBe(false);
-    expect(fetchMock).not.toHaveBeenCalled();
+  ])('rejects %s', (_case, domain) => {
+    expect(() => normalizeSsoDomain(domain)).toThrow();
   });
 
-  it.each([
-    ['a non-200 response', jsonResponse(validConfiguration, { status: 404 })],
-    ['a body that is not JSON', new Response('<html>nope</html>', { status: 200 })],
-    ['a configuration without client_id', jsonResponse({ openid_configuration: 'https://x/y' })],
-    ['a configuration without openid_configuration', jsonResponse({ client_id: 'ii-client' })],
-    ['a configuration that is not an object', jsonResponse('ii-client')],
-  ])('should reject %s', async (_case, response) => {
-    fetchMock.mockResolvedValue(response);
-    await expect(check('dfinity.org')).resolves.toBe(false);
+  it('quotes the value in its error, cut to 100 characters', () => {
+    expect(() => normalizeSsoDomain('a\nb.org/x')).toThrow('ssoDomain "a\\nb.org/x" has a path');
+    const long = `${'a'.repeat(300)}/x`;
+    expect(() => normalizeSsoDomain(long)).toThrow(
+      `ssoDomain "${'a'.repeat(100)}…" has a path and more than 255 characters`,
+    );
   });
 
-  it('should reject a domain the request cannot reach', async () => {
-    fetchMock.mockRejectedValue(new TypeError('Failed to fetch'));
-    await expect(check('dfinity.org')).resolves.toBe(false);
+  it('names every problem it finds', () => {
+    expect(() => normalizeSsoDomain('https://user@acme.com:8443/sso?x=1#y')).toThrow(
+      'ssoDomain "https://user@acme.com:8443/sso?x=1#y" has a scheme, userinfo, a path, a query, a fragment and a port, which only loopback hosts may carry',
+    );
+    expect(() => normalizeSsoDomain('-a--cd..org')).toThrow(
+      'ssoDomain "-a--cd..org" has an empty label, a label starting or ending with a hyphen and a label with "--" in its third and fourth places',
+    );
+  });
+});
+
+type Answer = Awaited<ReturnType<SsoDomainService['app_sso_domain_status']>>;
+
+const PENDING: Answer = { Pending: null };
+
+/** A service whose status answers come from a queue; once it runs dry it keeps giving the last. */
+function fakeService(...answers: Answer[]) {
+  const queue = [...answers];
+  let last: Answer = PENDING;
+  const service = {
+    app_sso_domain_check: vi.fn(async (_domain: string) => undefined),
+    app_sso_domain_status: vi.fn(async (_domain: string) => {
+      last = queue.shift() ?? last;
+      return last;
+    }),
+    answer(next: Answer) {
+      queue.length = 0;
+      last = next;
+    },
+  };
+  return service;
+}
+
+function build(
+  service: ReturnType<typeof fakeService>,
+  domain: string | { invalid: string } = 'dfinity.org',
+) {
+  const onChange = vi.fn();
+  const checker = new SsoStatusChecker(domain, async () => service, onChange);
+  return { checker, onChange };
+}
+
+beforeEach(() => {
+  vi.useFakeTimers();
+});
+
+afterEach(() => {
+  vi.useRealTimers();
+});
+
+describe('SsoStatusChecker', () => {
+  it('checks once as soon as it is built, then reads the status', async () => {
+    const service = fakeService({ Available: { name: ['DFINITY'] } });
+    const { checker } = build(service);
+
+    expect(checker.status).toEqual({ state: 'checking' });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(service.app_sso_domain_check).toHaveBeenCalledExactlyOnceWith('dfinity.org');
+    expect(service.app_sso_domain_status).toHaveBeenCalledExactlyOnceWith('dfinity.org');
+    expect(checker.status).toEqual({ state: 'available', name: 'DFINITY' });
   });
 
-  it('should require a signal', async () => {
-    // @ts-expect-error the caller sets the deadline, so the signal is required
-    await expect(isValidSsoDomain('dfinity.org')).rejects.toThrow();
+  it('reports available without a name when the organization publishes none', async () => {
+    const { checker } = build(fakeService({ Available: { name: [] } }));
+    await vi.advanceTimersByTimeAsync(0);
+    expect(checker.status).toEqual({ state: 'available' });
   });
 
-  it('should reject rather than resolve false when aborted', async () => {
-    const controller = new AbortController();
-    const pending = isValidSsoDomain('dfinity.org', controller.signal);
-    controller.abort();
-    await expect(pending).rejects.toThrow();
+  it('reports unavailable with the time Internet Identity will fetch again', async () => {
+    const retryAt = Date.UTC(2026, 9, 7, 12, 0, 0);
+    const { checker } = build(
+      fakeService({ Unavailable: { retry_after: [BigInt(retryAt) * 1_000_000n], reason: [] } }),
+    );
+    await vi.advanceTimersByTimeAsync(0);
+    expect(checker.status).toEqual({ state: 'unavailable', retryAfter: new Date(retryAt) });
   });
 
-  it('should reject an already-aborted check without fetching', async () => {
-    await expect(isValidSsoDomain('dfinity.org', AbortSignal.abort())).rejects.toThrow();
-    expect(fetchMock).not.toHaveBeenCalled();
+  it('reports the reason Internet Identity gives for unavailable', async () => {
+    const { checker } = build(
+      fakeService({
+        Unavailable: { retry_after: [], reason: ['the discovery file is too large'] },
+      }),
+    );
+    await vi.advanceTimersByTimeAsync(0);
+    expect(checker.status).toEqual({
+      state: 'unavailable',
+      reason: 'the discovery file is too large',
+    });
+  });
+
+  it('reports unavailable without retryAfter when a retry cannot help', async () => {
+    const { checker } = build(fakeService({ Unavailable: { retry_after: [], reason: [] } }));
+    await vi.advanceTimersByTimeAsync(0);
+    expect(checker.status).toEqual({ state: 'unavailable' });
+  });
+
+  it('polls the query with a backoff while the answer is pending, and checks only once', async () => {
+    const service = fakeService();
+    build(service);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(service.app_sso_domain_status).toHaveBeenCalledTimes(1);
+
+    const waits = [SSO_POLL_MIN_MS, SSO_POLL_MIN_MS * 2, SSO_POLL_MAX_MS, SSO_POLL_MAX_MS];
+    for (const [index, wait] of waits.entries()) {
+      await vi.advanceTimersByTimeAsync(wait - 1);
+      expect(service.app_sso_domain_status).toHaveBeenCalledTimes(index + 1);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(service.app_sso_domain_status).toHaveBeenCalledTimes(index + 2);
+    }
+    expect(service.app_sso_domain_check).toHaveBeenCalledTimes(1);
+  });
+
+  it('stops polling on a final answer', async () => {
+    const service = fakeService(PENDING, PENDING, { Available: { name: [] } });
+    const { checker } = build(service);
+    await vi.advanceTimersByTimeAsync(SSO_POLL_MIN_MS * 3);
+    expect(checker.status).toEqual({ state: 'available' });
+
+    const reads = service.app_sso_domain_status.mock.calls.length;
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(service.app_sso_domain_status).toHaveBeenCalledTimes(reads);
+  });
+
+  it('checks again once the answer has been pending for the abandon window', async () => {
+    const service = fakeService();
+    build(service);
+    await vi.advanceTimersByTimeAsync(SSO_RECHECK_AFTER_MS - 1);
+    expect(service.app_sso_domain_check).toHaveBeenCalledTimes(1);
+
+    // The first read past the window, then one more interval.
+    await vi.advanceTimersByTimeAsync(SSO_POLL_MAX_MS * 2);
+    expect(service.app_sso_domain_check).toHaveBeenCalledTimes(2);
+  });
+
+  it('retries a status read that failed, at the next interval', async () => {
+    const service = fakeService();
+    service.app_sso_domain_status.mockRejectedValueOnce(new Error('offline'));
+    const { checker } = build(service);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(checker.status).toEqual({ state: 'checking' });
+
+    service.answer({ Available: { name: [] } });
+    await vi.advanceTimersByTimeAsync(SSO_POLL_MIN_MS);
+    expect(checker.status).toEqual({ state: 'available' });
+  });
+
+  it('still reads the status when the check update fails', async () => {
+    const service = fakeService({ Available: { name: [] } });
+    service.app_sso_domain_check.mockRejectedValueOnce(new Error('rejected'));
+    const { checker } = build(service);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(checker.status).toEqual({ state: 'available' });
+  });
+
+  it('builds the service again when building it failed', async () => {
+    const service = fakeService({ Available: { name: [] } });
+    const create = vi
+      .fn<() => Promise<SsoDomainService>>()
+      .mockRejectedValueOnce(new Error('no agent'))
+      .mockResolvedValue(service);
+    const checker = new SsoStatusChecker('dfinity.org', create, vi.fn());
+    await vi.advanceTimersByTimeAsync(SSO_POLL_MIN_MS);
+    expect(checker.status).toEqual({ state: 'available' });
+    expect(create).toHaveBeenCalledTimes(2);
+  });
+
+  it('keeps the same object until the answer changes', async () => {
+    const service = fakeService();
+    const { checker, onChange } = build(service);
+    const checking = checker.status;
+    await vi.advanceTimersByTimeAsync(SSO_POLL_MIN_MS * 3);
+    expect(checker.status).toBe(checking);
+    expect(onChange).not.toHaveBeenCalled();
+
+    service.answer({ Available: { name: ['DFINITY'] } });
+    await vi.advanceTimersByTimeAsync(SSO_POLL_MAX_MS);
+    const available = checker.status;
+    expect(available).toEqual({ state: 'available', name: 'DFINITY' });
+    expect(checker.status).toBe(available);
+    expect(onChange).toHaveBeenCalledOnce();
+  });
+
+  it('treats a value that is not a domain as invalid and never calls', async () => {
+    const service = fakeService();
+    const { checker, onChange } = build(service, { invalid: 'ssoDomain "x" has a path' });
+    expect(checker.status).toEqual({ state: 'invalid', reason: 'ssoDomain "x" has a path' });
+
+    checker.refresh();
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(service.app_sso_domain_check).not.toHaveBeenCalled();
+    expect(service.app_sso_domain_status).not.toHaveBeenCalled();
+    expect(checker.status).toEqual({ state: 'invalid', reason: 'ssoDomain "x" has a path' });
+    expect(onChange).not.toHaveBeenCalled();
+  });
+
+  it('checks again on refresh, through checking', async () => {
+    const service = fakeService({ Unavailable: { retry_after: [], reason: [] } });
+    const { checker, onChange } = build(service);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(checker.status).toEqual({ state: 'unavailable' });
+
+    service.answer({ Available: { name: [] } });
+    checker.refresh();
+    expect(checker.status).toEqual({ state: 'checking' });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(service.app_sso_domain_check).toHaveBeenCalledTimes(2);
+    expect(checker.status).toEqual({ state: 'available' });
+    expect(onChange).toHaveBeenCalledTimes(3);
+  });
+
+  it('does not check again on its own once retryAfter passes', async () => {
+    const retryAt = Date.now() + 60_000;
+    const service = fakeService({
+      Unavailable: { retry_after: [BigInt(retryAt) * 1_000_000n], reason: [] },
+    });
+    build(service);
+    await vi.advanceTimersByTimeAsync(0);
+    await vi.advanceTimersByTimeAsync(10 * 60_000);
+    expect(service.app_sso_domain_check).toHaveBeenCalledTimes(1);
+    expect(service.app_sso_domain_status).toHaveBeenCalledTimes(1);
+  });
+
+  it('never calls when disposed before its first call', async () => {
+    const service = fakeService();
+    const { checker } = build(service);
+    checker.dispose();
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(service.app_sso_domain_check).not.toHaveBeenCalled();
+  });
+
+  it('stops polling when disposed, and drops an answer already in flight', async () => {
+    let release: (answer: Answer) => void = () => undefined;
+    const service = fakeService();
+    service.app_sso_domain_status.mockImplementationOnce(
+      () =>
+        new Promise<Answer>((resolve) => {
+          release = resolve;
+        }),
+    );
+    const { checker, onChange } = build(service);
+    await vi.advanceTimersByTimeAsync(0);
+
+    checker.dispose();
+    release({ Available: { name: [] } });
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(checker.status).toEqual({ state: 'checking' });
+    expect(onChange).not.toHaveBeenCalled();
+    expect(service.app_sso_domain_status).toHaveBeenCalledTimes(1);
+  });
+
+  it('ignores refresh once disposed', async () => {
+    const service = fakeService();
+    const { checker } = build(service);
+    checker.dispose();
+    checker.refresh();
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(service.app_sso_domain_check).not.toHaveBeenCalled();
   });
 });

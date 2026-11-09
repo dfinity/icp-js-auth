@@ -4,16 +4,35 @@
     "items": [
       { "label": "Overview", "link": "/" },
       { "label": "Installation", "link": "/installation" },
-      { "label": "Quick Start", "link": "/quick-start" },
-      { "label": "One-Click Sign-In", "link": "/one-click-sign-in" }
+      { "label": "Quick Start", "link": "/quick-start" }
     ]
   },
   {
     "label": "Guides",
     "items": [
       {
+        "label": "Getting started",
+        "link": "https://docs.internetcomputer.org/guides/authentication/internet-identity/"
+      },
+      {
+        "label": "App metadata",
+        "link": "https://docs.internetcomputer.org/guides/authentication/app-metadata/"
+      },
+      {
+        "label": "Identity attributes",
+        "link": "https://docs.internetcomputer.org/guides/authentication/identity-attributes/"
+      },
+      {
+        "label": "One-click sign-in",
+        "link": "https://docs.internetcomputer.org/guides/authentication/one-click-sign-in/"
+      },
+      {
+        "label": "Enterprise SSO",
+        "link": "https://docs.internetcomputer.org/guides/authentication/enterprise-sso/"
+      },
+      {
         "label": "Shared sessions across subdomains",
-        "link": "/shared-sessions"
+        "link": "https://docs.internetcomputer.org/guides/authentication/shared-sessions/"
       }
     ]
   },
