@@ -1,3 +1,9 @@
+## Unreleased
+
+### Feat
+
+- share the sign-in state with web workers (#214)
+
 ## 11.1.0 (2026-10-27)
 
 ### Feat
