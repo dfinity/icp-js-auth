@@ -13,16 +13,10 @@ import {
 import { Principal } from '@icp-sdk/core/principal';
 import { Signer } from '@icp-sdk/signer';
 import { PostMessageTransport, UrlTransport } from '@icp-sdk/signer/web';
-import {
-  AccountMismatchError,
-  chainAuthorisesKey,
-  SessionGoneError,
-} from './app-delegation-source.js';
-import { type HeldLock, stealLock, stealMintLock } from './app-lock.js';
 import { fromBase64, toBase64 } from './base64.js';
-import type { Credential, CredentialStorage } from './credential-storage.js';
+import type { Credential, CredentialStorage } from './credentials/credential-storage.js';
+import { IdbCredentialStorage } from './credentials/idb-credential-storage.js';
 import { watchActivity, watchForeground } from './foreground-refresh.js';
-import { IdbCredentialStorage } from './idb-credential-storage.js';
 import {
   NotificationConsent,
   type NotificationConsentStatus,
@@ -30,13 +24,24 @@ import {
   // is the request it sends.
   requestNotificationConsent as sendConsentRequest,
 } from './notification-consent.js';
-import { requestSessionDelegation } from './session-delegation.js';
-import { SessionIdentity } from './session-identity.js';
-import { SessionMinter } from './session-minter.js';
+import {
+  AccountMismatchError,
+  chainAuthorisesKey,
+  SessionGoneError,
+} from './session/app-delegation-source.js';
+import { type HeldLock, stealLock, stealMintLock } from './session/app-lock.js';
+import { requestSessionDelegation } from './session/session-delegation.js';
+import { SessionIdentity } from './session/session-identity.js';
+import { SessionMinter } from './session/session-minter.js';
 import { type Slots, slotsFor } from './slots.js';
-import { normalizeSsoDomain } from './sso.js';
-import { createSsoDomainService, type SsoStatus, SsoStatusChecker } from './sso-status.js';
-import { LocalStateStorage, type SessionState, type StateStorage } from './state-storage.js';
+import {
+  createSsoDomainService,
+  normalizeSsoDomain,
+  type SsoStatus,
+  SsoStatusChecker,
+} from './sso.js';
+import { LocalStateStorage, readOnlyError } from './state/local-state-storage.js';
+import type { SessionState, StateStorage } from './state/state-storage.js';
 
 /**
  * The lock one signer interaction at a time holds.
@@ -90,7 +95,9 @@ export interface AuthClientBaseOptions {
 
   /**
    * Where the state of the sign-in is kept: which account is signed in here,
-   * and until when. Defaults to `localStorage`.
+   * and until when. Defaults to one {@link LocalStateStorage} shared by every
+   * client in this page or worker that sets none, and followed by the other
+   * tabs and workers of this origin.
    */
   stateStorage?: StateStorage;
 
@@ -354,6 +361,15 @@ export class SessionNotHeldError extends Error {
  *   ? await authClient.getIdentity()
  *   : await authClient.signIn();
  */
+// Every client in this page or worker that brings no store of its own shares
+// this one. They share the sign-in anyway, since it lives in one record, and one
+// store tells each of them about the others' writes as they happen.
+let sharedStateStorage: LocalStateStorage | undefined;
+const defaultStateStorage = (): LocalStateStorage => {
+  sharedStateStorage ??= new LocalStateStorage();
+  return sharedStateStorage;
+};
+
 /**
  * Thrown when a later sign-in or sign-out took over from this one.
  *
@@ -412,7 +428,7 @@ export class AuthClient {
     this.#options = options;
     this.#credentialStorage = options.credentialStorage ?? new IdbCredentialStorage();
     this.#slots = slotsFor(options.namespace);
-    this.#stateStorage = options.stateStorage ?? new LocalStateStorage();
+    this.#stateStorage = options.stateStorage ?? defaultStateStorage();
 
     // A string or URL is what this option used to be, and a caller still passing
     // one would otherwise be silently ignored — both halves falling back to
@@ -568,6 +584,31 @@ export class AuthClient {
     // Eagerly start restoring a previous session from storage.
     // The result is awaited in getIdentity() before returning.
     this.#init();
+  }
+
+  /**
+   * Resolves once this client has loaded the stored state and restored the
+   * session, so that {@link isAuthenticated}, {@link getStatus} and
+   * {@link getPrincipal} give the stored answer.
+   *
+   * Only needed where there is no `localStorage`, which is a web worker or a
+   * service worker. There the state is loaded from IndexedDB, and until then the
+   * client reads as signed out:
+   *
+   * ```ts
+   * const client = new AuthClient();
+   * await client.ready();
+   * client.isAuthenticated();
+   * ```
+   *
+   * In a browser tab, don't wait for it. The status is correct from the moment
+   * the client is constructed, and waiting would hold up the page on IndexedDB
+   * and a session restore for nothing.
+   *
+   * Rejects where restoring the session fails, as {@link getIdentity} does.
+   */
+  ready(): Promise<void> {
+    return this.#init();
   }
 
   /**
@@ -880,6 +921,7 @@ export class AuthClient {
   }
 
   async signIn(options?: AuthClientSignInOptions): Promise<Identity> {
+    if (this.#isReadOnly) throw readOnlyError();
     // Counted here and locked inside, once the window is open: a ceremony is
     // both things — the signer channel an origin has one of, and this
     // namespace's sign-in, which `signOut` moves too — but neither lock may be
@@ -1345,6 +1387,7 @@ export class AuthClient {
    * @param options.returnTo - URL to navigate to after sign-out.
    */
   async signOut(options: { returnTo?: string } = {}): Promise<void> {
+    if (this.#isReadOnly) throw readOnlyError();
     // Wait for the constructor's session restore: hydration racing the
     // deletion below could re-populate the identity from already-read state.
     await this.#init();
@@ -1569,6 +1612,7 @@ export class AuthClient {
    * @param principal - The account whose session ended.
    */
   async #expireSession(principal: Principal): Promise<void> {
+    if (this.#isReadOnly) return;
     this.#stateStorage.set(this.#slots.state, {
       principal,
       expiration: BigInt(Date.now()) * 1_000_000n,
@@ -1636,6 +1680,7 @@ export class AuthClient {
   async #restore(): Promise<void> {
     this.#restoring = true;
     try {
+      await this.#stateStorage.ready?.();
       await this.#hydrate();
     } finally {
       this.#restoring = false;
@@ -1667,6 +1712,9 @@ export class AuthClient {
     // signed in removes nothing.
     if (this.#stateStorage.get(this.#slots.state) === null) {
       await this.#endSession();
+      // Installed here too: on a restore after the record changed, an identity
+      // from the sign-in that just ended is still in place.
+      this.#installIdentity(new AnonymousIdentity());
       return;
     }
 
@@ -1753,7 +1801,7 @@ export class AuthClient {
     // the session's, so a chain this old leaves a record that reads as expired —
     // which is what a page loading after a session ran out should say.
     if (credential.chain === undefined || !isDelegationValid(credential.chain)) {
-      await this.#clearCredentials();
+      if (!this.#isReadOnly) await this.#clearCredentials();
       return null;
     }
     return credential;
@@ -1766,6 +1814,7 @@ export class AuthClient {
    * origin, because a sibling reading a shared record must stop seeing one.
    */
   async #endSession(): Promise<void> {
+    if (this.#isReadOnly) return;
     this.#stateStorage.remove(this.#slots.state);
     await this.#clearCredentials();
   }
@@ -1780,8 +1829,18 @@ export class AuthClient {
    * obtained is gone.
    */
   async #dropSession(): Promise<void> {
+    if (this.#isReadOnly) return;
     this.#stateStorage.discard(this.#slots.state);
     await this.#clearCredentials();
+  }
+
+  /**
+   * Whether this client only reads the sign-in, as it does in a worker. It then
+   * changes nothing shared: a session it cannot use is left for a page of this
+   * origin to end, which runs the same checks.
+   */
+  get #isReadOnly(): boolean {
+    return this.#stateStorage.isReadOnly === true;
   }
 
   // Every slot a completed sign-in writes. Not the ceremony's pending slot: a

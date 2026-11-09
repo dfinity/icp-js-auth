@@ -1,11 +1,11 @@
 import { DelegationChain, Ed25519KeyIdentity } from '@icp-sdk/core/identity';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { slotsFor } from '../../src/client/slots.ts';
+import { slotsFor } from '../../../src/client/slots.ts';
 
 /** The bare names, which is what a client with no namespace writes under. */
 const SLOTS = slotsFor();
 
-import { SharedMemoryCredentialStorage } from '../../src/client/shared-memory-credential-storage.ts';
+import { SharedMemoryCredentialStorage } from '../../../src/client/credentials/shared-memory-credential-storage.ts';
 
 /**
  * A Web Locks implementation for one process, because jsdom has none and this

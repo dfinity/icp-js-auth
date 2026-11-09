@@ -2,15 +2,14 @@ import { Delegation, DelegationChain, Ed25519KeyIdentity } from '@icp-sdk/core/i
 import { Principal } from '@icp-sdk/core/principal';
 import type { Signer } from '@icp-sdk/signer';
 import { describe, expect, it, vi } from 'vitest';
-
-import { SessionGoneError } from '../../src/client/app-delegation-source.ts';
 import {
   NotificationConsent,
   type NotificationConsentService,
   NotificationsUnsupportedError,
   requestNotificationConsent,
 } from '../../src/client/notification-consent.ts';
-import { InteractionRequiredError } from '../../src/client/session-delegation.ts';
+import { SessionGoneError } from '../../src/client/session/app-delegation-source.ts';
+import { InteractionRequiredError } from '../../src/client/session/session-delegation.ts';
 
 const II = Principal.fromText('rdmx6-jaaaa-aaaaa-aaadq-cai');
 
