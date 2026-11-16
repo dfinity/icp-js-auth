@@ -63,7 +63,7 @@
     "@icp-sdk/core": "^6"
   },
   "dependencies": {
-    "@icp-sdk/signer": "^6.1.0",
+    "@icp-sdk/signer": "^6.1.1",
     "idb": "^8.0.4"
   }
 }
