@@ -15,8 +15,11 @@ import { Principal } from '@icp-sdk/core/principal';
 import type { AuthClient } from '../client/auth-client.js';
 import { type NotShownReason, type PwaAccess, pwaAccess } from '../client/pwa-notifications.js';
 
-/** How long the app's content may take before the generic notification is shown instead. */
-const CONTENT_DEADLINE_MS = 8_000;
+/**
+ * How long everything before showing may take, from reading the session to the
+ * app's content, before the generic notification is shown instead.
+ */
+const DISPLAY_DEADLINE_MS = 8_000;
 
 const GENERIC_TAG = 'ii-notification';
 
@@ -92,13 +95,20 @@ const appActor = async (
     canisterId,
   });
 
-class DeadlineError extends Error {}
-
-const withDeadline = <T>(work: Promise<T>, deadlineMs: number): Promise<T> =>
-  Promise.race([
-    work,
-    new Promise<never>((_, reject) => setTimeout(() => reject(new DeadlineError()), deadlineMs)),
-  ]);
+/** `work`'s result, or `undefined` where it takes longer than `deadlineMs`. */
+const withinDeadline = async <T>(work: Promise<T>, deadlineMs: number): Promise<T | undefined> => {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      work,
+      new Promise<undefined>((resolve) => {
+        timer = setTimeout(() => resolve(undefined), deadlineMs);
+      }),
+    ]);
+  } finally {
+    clearTimeout(timer);
+  }
+};
 
 /** The inbox entry a wake-up names, or `undefined` where its payload is not one. */
 const inboxNotificationIdOf = (data: PushEvent['data']): bigint | undefined => {
@@ -133,12 +143,6 @@ const showGeneric = async (scope: NotificationWorkerScope): Promise<void> => {
   });
 };
 
-/** The generic notification, unless something is already on screen. */
-const showGenericIfNothingShown = async (scope: NotificationWorkerScope): Promise<void> => {
-  if ((await scope.registration.getNotifications()).length > 0) return;
-  await showGeneric(scope);
-};
-
 /** `url` where it is on this origin, resolved against it. */
 const sameOriginUrl = (url: string | undefined, origin: string): string | undefined => {
   if (url === undefined) return undefined;
@@ -153,75 +157,101 @@ const sameOriginUrl = (url: string | undefined, origin: string): string | undefi
 const notShownReasonOf = (error: unknown): NotShownReason =>
   error instanceof RejectError ? { PayloadRejected: null } : { PayloadUnreachable: null };
 
-/** One wake-up: read the entry, fetch and show its content, report it, and clear it. */
+/** What one wake-up comes to, worked out before anything is shown. */
+interface Outcome {
+  /** The app's notification, or the generic one where absent. */
+  shown?: { title: string; options: NotificationOptions };
+  /** A copy of this notification already on screen, closed before anything is shown. */
+  closeTag?: string;
+  /** Reports the notification received to the app, once it is shown. */
+  received?: () => Promise<void>;
+  /** Clears the entry at Internet Identity, with why it was not shown where it was not. */
+  clear?: (notShown?: NotShownReason) => Promise<void>;
+  /** Why the app's notification could not be shown. */
+  notShown?: NotShownReason;
+}
+
+/**
+ * Reads the entry a wake-up names and the app's content for it. Shows nothing,
+ * so a result that arrives after the deadline cannot put a second notification
+ * on screen.
+ */
+async function resolvePush(
+  scope: NotificationWorkerScope,
+  authClient: AuthClient,
+  access: PwaAccess,
+  inboxNotificationId: bigint | undefined,
+): Promise<Outcome> {
+  if (inboxNotificationId === undefined) return {};
+
+  // Signed out after the push was sent: nothing can be read.
+  const inbox = await access.inbox().catch(() => undefined);
+  if (inbox === undefined) return {};
+
+  const clear = (notShown?: NotShownReason): Promise<void> =>
+    inbox.remove(inboxNotificationId, notShown).catch(() => undefined);
+
+  const entry = await inbox.get(inboxNotificationId).catch(() => null);
+  // Unreadable, expired or already taken. Cleared anyway, so an expired entry is
+  // counted as one asked for too late.
+  if (entry === null || entry === undefined) return { clear };
+
+  const tag = tagOf(entry.canister_id, entry.id);
+  let app: AppNotificationService;
+  let content: [] | [NotificationContent];
+  try {
+    app = await appActor(access, await authClient.getIdentity(), entry.canister_id);
+    content = await app._internet_identity_notification_content(entry.id);
+  } catch (error) {
+    return { clear, notShown: notShownReasonOf(error) };
+  }
+
+  const [shown] = content;
+  // The app dismissed it or it expired, so any copy on screen goes too.
+  if (shown === undefined) return { closeTag: tag, clear };
+
+  const url = sameOriginUrl(shown.url[0], scope.location.origin);
+  const data: ShownData = { canisterId: entry.canister_id.toText(), id: entry.id.toString(), url };
+  return {
+    shown: { title: shown.title, options: { body: shown.body, tag, data } },
+    closeTag: tag,
+    received: () => app._internet_identity_notification_received(entry.id).catch(() => undefined),
+    clear,
+  };
+}
+
+/**
+ * One wake-up: show the app's notification for it, or the generic one, and
+ * clear its entry. Something is shown for every push, because Safari requires
+ * it of a `userVisibleOnly` subscription.
+ */
 async function onPush(
   scope: NotificationWorkerScope,
   authClient: AuthClient,
   access: PwaAccess,
   inboxNotificationId: bigint | undefined,
 ): Promise<void> {
-  if (inboxNotificationId === undefined) {
+  const resolving = resolvePush(scope, authClient, access, inboxNotificationId);
+  const outcome = await withinDeadline(resolving, DISPLAY_DEADLINE_MS);
+
+  if (outcome === undefined) {
     await showGeneric(scope);
+    // The late answer is not shown, and its entry is cleared as one the app could
+    // not deliver in time.
+    const late = await resolving;
+    await late.clear?.(late.shown === undefined ? late.notShown : { PayloadUnreachable: null });
     return;
   }
 
-  // Signed out after the push was sent: nothing can be read, and iOS still needs
-  // a notification.
-  const inbox = await access.inbox().catch(() => undefined);
-  if (inbox === undefined) {
+  if (outcome.closeTag !== undefined) await closeTagged(scope.registration, outcome.closeTag);
+  if (outcome.shown === undefined) {
     await showGeneric(scope);
+    await outcome.clear?.(outcome.notShown);
     return;
   }
 
-  const remove = (notShown?: NotShownReason): Promise<void> =>
-    inbox.remove(inboxNotificationId, notShown).catch(() => undefined);
-
-  const entry = await inbox.get(inboxNotificationId).catch(() => null);
-  if (entry === null) {
-    await showGeneric(scope);
-    await remove();
-    return;
-  }
-  if (entry === undefined) {
-    await showGenericIfNothingShown(scope);
-    return;
-  }
-
-  const tag = tagOf(entry.canister_id, entry.id);
-  let app: AppNotificationService;
-  let content: [] | [NotificationContent];
-  try {
-    ({ app, content } = await withDeadline(
-      (async () => {
-        const app = await appActor(access, await authClient.getIdentity(), entry.canister_id);
-        return { app, content: await app._internet_identity_notification_content(entry.id) };
-      })(),
-      CONTENT_DEADLINE_MS,
-    ));
-  } catch (error) {
-    await showGeneric(scope);
-    await remove(notShownReasonOf(error));
-    return;
-  }
-
-  const [shown] = content;
-  if (shown === undefined) {
-    // The app dismissed it or it expired, so any copy on screen goes too.
-    await closeTagged(scope.registration, tag);
-    await showGenericIfNothingShown(scope);
-    await remove();
-    return;
-  }
-
-  const url = sameOriginUrl(shown.url[0], scope.location.origin);
-  const data: ShownData = { canisterId: entry.canister_id.toText(), id: entry.id.toString(), url };
-  await closeTagged(scope.registration, tag);
-  await scope.registration.showNotification(shown.title, { body: shown.body, tag, data });
-
-  await Promise.all([
-    app._internet_identity_notification_received(entry.id).catch(() => undefined),
-    remove(),
-  ]);
+  await scope.registration.showNotification(outcome.shown.title, outcome.shown.options);
+  await Promise.all([outcome.received?.(), outcome.clear?.()]);
 }
 
 const shownDataOf = (data: unknown): ShownData | undefined => {
