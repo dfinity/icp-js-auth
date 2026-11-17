@@ -369,29 +369,22 @@ const subscribedWith = (subscription: PushSubscription, applicationServerKey: Ui
 
 /**
  * The push subscription the registration holds where it is bound to
- * `vapidPublicKey`, or a new one bound to it where the registration holds none.
+ * `vapidPublicKey`, and a new one bound to it otherwise.
  *
- * A subscription bound to any other key is the application's own, and is left
- * alone: a service worker holds one push subscription, so notifications from
- * Internet Identity cannot share it.
+ * A service worker holds one push subscription, so one bound to any other key
+ * is replaced: subscribing is the application handing it to Internet Identity.
  */
 const heldOrNewSubscription = async (
   registration: ServiceWorkerRegistration,
   vapidPublicKey: Uint8Array,
 ): Promise<PushSubscription> => {
   const held = await registration.pushManager.getSubscription();
-  if (held === null) {
-    return registration.pushManager.subscribe({
-      userVisibleOnly: true,
-      applicationServerKey: bytesOf(vapidPublicKey),
-    });
-  }
-  if (!subscribedWith(held, vapidPublicKey)) {
-    throw new Error(
-      "This service worker's push subscription belongs to the application, so Internet Identity's notifications cannot use it",
-    );
-  }
-  return held;
+  if (held !== null && subscribedWith(held, vapidPublicKey)) return held;
+  await held?.unsubscribe();
+  return registration.pushManager.subscribe({
+    userVisibleOnly: true,
+    applicationServerKey: bytesOf(vapidPublicKey),
+  });
 };
 
 /**
