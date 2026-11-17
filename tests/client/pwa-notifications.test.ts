@@ -3,10 +3,8 @@ import {
   isInstalledApp,
   type PwaNotificationService,
   PwaNotifications,
-  recordPushKey,
   sealSubscription,
   subscribeDevice,
-  takeOwnPushSubscription,
 } from '../../src/client/pwa-notifications.ts';
 import { SessionGoneError } from '../../src/client/session/app-delegation-source.ts';
 
@@ -224,6 +222,18 @@ describe('subscribeDevice', () => {
     expect(set.mock.calls[0][0].subscription[0].endpoint).toBe('https://push.example/1');
   });
 
+  it('reuses the push subscription the service worker already holds', async () => {
+    const { inbox, registration, set, subscribe, first } = await setUp([{ Ok: null }]);
+    vi.mocked(registration.pushManager.getSubscription).mockResolvedValueOnce(
+      first as unknown as PushSubscription,
+    );
+
+    await subscribeDevice(inbox, registration);
+
+    expect(subscribe).not.toHaveBeenCalled();
+    expect(set.mock.calls[0][0].subscription[0].endpoint).toBe('https://push.example/1');
+  });
+
   it('moves to a fresh endpoint once where the endpoint is held with other keys', async () => {
     const { inbox, registration, set, first } = await setUp([
       { Err: { EndpointInUse: null } },
@@ -246,38 +256,5 @@ describe('subscribeDevice', () => {
     await expect(subscribeDevice(inbox, registration)).rejects.toThrow(
       'This push endpoint is registered with other keys',
     );
-  });
-});
-
-describe('takeOwnPushSubscription', () => {
-  function stubRegistration(applicationServerKey: Uint8Array) {
-    const subscription = { options: { applicationServerKey: applicationServerKey.buffer } };
-    const getRegistration = vi.fn(async () => ({
-      pushManager: { getSubscription: async () => subscription },
-    }));
-    vi.stubGlobal('navigator', { serviceWorker: { getRegistration } });
-    return { subscription, getRegistration };
-  }
-
-  it('touches nothing where this client recorded no subscription', async () => {
-    const { getRegistration } = stubRegistration(KEYS.vapid_public_key);
-
-    await expect(takeOwnPushSubscription('none:push-key')).resolves.toBeUndefined();
-    expect(getRegistration).not.toHaveBeenCalled();
-  });
-
-  it('answers the subscription made with the recorded key, once', async () => {
-    const { subscription } = stubRegistration(KEYS.vapid_public_key);
-    await recordPushKey('own:push-key', KEYS.vapid_public_key);
-
-    await expect(takeOwnPushSubscription('own:push-key')).resolves.toBe(subscription);
-    await expect(takeOwnPushSubscription('own:push-key')).resolves.toBeUndefined();
-  });
-
-  it("leaves a subscription made with another key, which is the application's", async () => {
-    stubRegistration(new Uint8Array([4, 7, 7, 7]));
-    await recordPushKey('other:push-key', KEYS.vapid_public_key);
-
-    await expect(takeOwnPushSubscription('other:push-key')).resolves.toBeUndefined();
   });
 });

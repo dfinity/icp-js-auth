@@ -30,9 +30,7 @@ import {
   isInstalledApp,
   PwaNotifications,
   pwaAccess,
-  recordPushKey,
   subscribeDevice,
-  takeOwnPushSubscription,
 } from './pwa-notifications.js';
 import {
   AccountMismatchError,
@@ -1307,15 +1305,10 @@ export class AuthClient {
    * nothing: the user already decided, and this records that they changed their
    * mind. Idempotent — consent that is already withdrawn is not an error.
    *
-   * Also unsubscribes this origin's service worker from the push service, once
-   * the consent is withdrawn, where {@link subscribeToNotifications} made its
-   * subscription.
-   *
    * @throws {SessionGoneError} Where this origin holds no live session.
    */
   async revokeNotificationConsent(): Promise<void> {
     await (await this.#consent()).revoke();
-    await (await takeOwnPushSubscription(this.#slots.pushKey))?.unsubscribe();
   }
 
   /**
@@ -1326,7 +1319,8 @@ export class AuthClient {
    * `granted: true`, and only in an installed web app: iOS asks for notification
    * permission only from a tap in the page itself, so this asks for it first,
    * before anything else is awaited. The service worker has to be registered
-   * already and import `handleNotifications` from `@icp-sdk/auth/worker`.
+   * already and import `handleNotifications` from `@icp-sdk/auth/worker`. A push
+   * subscription the service worker already holds is reused.
    *
    * A permission the user did not grant is an answer: it comes back as is, and
    * nothing is subscribed.
@@ -1351,8 +1345,7 @@ export class AuthClient {
       throw new Error('This origin has no service worker registered to receive notifications');
     }
     const inbox = await this.#pwaNotifications();
-    const vapidPublicKey = await subscribeDevice(inbox, registration);
-    await recordPushKey(this.#slots.pushKey, vapidPublicKey);
+    await subscribeDevice(inbox, registration);
     return permission;
   }
 
@@ -1460,10 +1453,9 @@ export class AuthClient {
   /**
    * Clears the stored session and resets the client to an anonymous state.
    *
-   * Where {@link subscribeToNotifications} subscribed this origin's service
-   * worker, this device's installed-app subscription is removed at Internet
-   * Identity while the session still exists, and the service worker is
-   * unsubscribed from the push service.
+   * In an installed web app, this device's installed-app subscription is
+   * removed at Internet Identity while the session still exists. The push
+   * subscription of the service worker is left as it is.
    *
    * @param options - Sign-out options.
    * @param options.returnTo - URL to navigate to after sign-out.
@@ -1571,15 +1563,13 @@ export class AuthClient {
   }
 
   /**
-   * Removes this device's installed-app subscription at the canister, then
-   * unsubscribes from the push service.
+   * Removes this device's installed-app subscription at the canister.
    *
    * Best-effort: the session is revoked next, and a subscription whose session
    * has ended is not delivered to.
    */
   async #removePwaSubscription(key: SignIdentity, sessionChain: DelegationChain): Promise<void> {
-    const subscription = await takeOwnPushSubscription(this.#slots.pushKey).catch(() => undefined);
-    if (subscription === undefined) return;
+    if (!isInstalledApp()) return;
     try {
       const inbox = await PwaNotifications.create({
         sessionKey: key,
@@ -1591,7 +1581,6 @@ export class AuthClient {
     } catch {
       // Left to the session's end, which stops delivery to it.
     }
-    await subscription.unsubscribe().catch(() => undefined);
   }
 
   /**

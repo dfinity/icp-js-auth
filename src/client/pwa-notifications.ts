@@ -2,7 +2,6 @@ import { Actor, HttpAgent } from '@icp-sdk/core/agent';
 import type { IDL } from '@icp-sdk/core/candid';
 import { DelegationIdentity } from '@icp-sdk/core/identity';
 import type { Principal } from '@icp-sdk/core/principal';
-import { IdbKeyVal } from './db.js';
 import type { NotificationConsentOptions } from './notification-consent.js';
 import { SessionGoneError } from './session/app-delegation-source.js';
 import { assertChainReaches } from './session/session-minter.js';
@@ -357,33 +356,16 @@ export async function sealSubscription(
   };
 }
 
-/** Whether `subscription` was minted with `applicationServerKey`. */
-const subscribedWith = (subscription: PushSubscription, applicationServerKey: Uint8Array) => {
-  const minted = subscription.options.applicationServerKey;
-  if (minted === null || minted === undefined) return false;
-  const bytes = new Uint8Array(minted);
-  return (
-    bytes.length === applicationServerKey.length &&
-    bytes.every((byte, at) => byte === applicationServerKey[at])
-  );
-};
-
-/**
- * A push subscription bound to `vapidPublicKey`: the one the registration holds
- * where it was minted with that key, and a fresh one otherwise.
- */
-const usableSubscription = async (
+/** The push subscription the registration holds, or a new one bound to `vapidPublicKey`. */
+const heldOrNewSubscription = async (
   registration: ServiceWorkerRegistration,
   vapidPublicKey: Uint8Array,
-): Promise<PushSubscription> => {
-  const held = await registration.pushManager.getSubscription();
-  if (held !== null && subscribedWith(held, vapidPublicKey)) return held;
-  await held?.unsubscribe();
-  return registration.pushManager.subscribe({
+): Promise<PushSubscription> =>
+  (await registration.pushManager.getSubscription()) ??
+  registration.pushManager.subscribe({
     userVisibleOnly: true,
     applicationServerKey: bytesOf(vapidPublicKey),
   });
-};
 
 /**
  * Subscribes `registration` with Internet Identity's VAPID key and registers the
@@ -391,18 +373,16 @@ const usableSubscription = async (
  *
  * An endpoint registered by another entry with other keys is refused, and the
  * device moves to a fresh endpoint and tries once more.
- *
- * @returns The VAPID key the registration is subscribed with.
  */
 export async function subscribeDevice(
   inbox: PwaNotifications,
   registration: ServiceWorkerRegistration,
-): Promise<Uint8Array> {
+): Promise<void> {
   const keys = await inbox.prepare();
-  const subscription = await usableSubscription(registration, keys.vapidPublicKey);
+  const subscription = await heldOrNewSubscription(registration, keys.vapidPublicKey);
   try {
     await inbox.set(await sealSubscription(subscription, keys.transportPublicKey));
-    return keys.vapidPublicKey;
+    return;
   } catch (error) {
     if (!(error instanceof EndpointInUseError)) throw error;
   }
@@ -415,31 +395,6 @@ export async function subscribeDevice(
     applicationServerKey: bytesOf(fresh.vapidPublicKey),
   });
   await inbox.set(await sealSubscription(replacement, fresh.transportPublicKey));
-  return fresh.vapidPublicKey;
-}
-
-/** Records the VAPID key this client subscribed with, under `slot`. */
-export async function recordPushKey(slot: string, vapidPublicKey: Uint8Array): Promise<void> {
-  await (await IdbKeyVal.create()).set(slot, vapidPublicKey);
-}
-
-/**
- * The push subscription this client made, and forgets that it made one.
- *
- * Only a subscription made with the key recorded under `slot` is answered: one
- * with any other key belongs to the application, and none is touched where
- * nothing is recorded.
- */
-export async function takeOwnPushSubscription(slot: string): Promise<PushSubscription | undefined> {
-  const db = await IdbKeyVal.create();
-  const recorded = await db.get<Uint8Array>(slot);
-  if (recorded === null) return undefined;
-  const container = globalThis.navigator?.serviceWorker;
-  const registration = await container?.getRegistration();
-  const subscription = (await registration?.pushManager?.getSubscription()) ?? null;
-  await db.remove(slot);
-  if (subscription === null || !subscribedWith(subscription, recorded)) return undefined;
-  return subscription;
 }
 
 /**
