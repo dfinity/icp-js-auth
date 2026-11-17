@@ -1,3 +1,9 @@
+## Unreleased
+
+### Fix
+
+- bump @icp-sdk/signer to 6.1.1 (#217)
+
 ## 11.2.0 (2026-11-09)
 
 ### Feat
