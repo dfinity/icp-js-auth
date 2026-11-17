@@ -56,7 +56,7 @@ describe('isInstalledApp', () => {
 });
 
 describe('PwaNotifications', () => {
-  it('asks again while the canister is still drawing the keys', async () => {
+  it('asks again while Internet Identity answers Pending', async () => {
     vi.useFakeTimers();
     const prepare = vi
       .fn()
