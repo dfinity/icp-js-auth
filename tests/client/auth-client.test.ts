@@ -20,7 +20,11 @@ import type {
 import { IdbCredentialStorage } from '../../src/client/credentials/idb-credential-storage.ts';
 import { MemoryCredentialStorage } from '../../src/client/credentials/memory-credential-storage.ts';
 import { IdbKeyVal } from '../../src/client/db.ts';
-import { NotificationsUnsupportedError } from '../../src/client/notification-consent.ts';
+import {
+  NotificationConsent,
+  NotificationsUnsupportedError,
+} from '../../src/client/notification-consent.ts';
+import { PwaNotifications } from '../../src/client/pwa-notifications.ts';
 import { SessionGoneError } from '../../src/client/session/app-delegation-source.ts';
 import { stealLock } from '../../src/client/session/app-lock.ts';
 import { InteractionRequiredError } from '../../src/client/session/session-delegation.ts';
@@ -2983,5 +2987,112 @@ describe('AuthClient SSO domain status', () => {
     expect(FakeTransport.last().requests.some((r) => r.method === 'ii_session_delegation')).toBe(
       true,
     );
+  });
+});
+
+describe('AuthClient re-subscribing an installed app after sign-in', () => {
+  const VAPID = new Uint8Array([4, 1, 2, 3]);
+
+  /** An installed app whose worker holds a subscription made with II's key. */
+  function installedApp(permission: NotificationPermission) {
+    vi.stubGlobal('matchMedia', (query: string) => ({
+      matches: query === '(display-mode: standalone)',
+    }));
+    const requestPermission = vi.fn(async () => permission);
+    vi.stubGlobal('Notification', { permission, requestPermission });
+    const subscription = {
+      endpoint: 'https://push.example/1',
+      options: { applicationServerKey: VAPID.buffer },
+      getKey: (name: string) =>
+        name === 'p256dh' ? new Uint8Array(65).buffer : new Uint8Array(16).buffer,
+    };
+    const registration = {
+      pushManager: { getSubscription: async () => subscription, subscribe: vi.fn() },
+    };
+    Object.defineProperty(navigator, 'serviceWorker', {
+      configurable: true,
+      value: { getRegistration: async () => registration },
+    });
+    return { requestPermission };
+  }
+
+  function fakeCalls(granted: boolean) {
+    const status = vi.fn(async () => ({ granted }));
+    vi.spyOn(NotificationConsent, 'create').mockResolvedValue({
+      status,
+    } as unknown as NotificationConsent);
+    const set = vi.fn(async () => undefined);
+    const prepare = vi.fn(async () => {
+      const transport = await crypto.subtle.generateKey(
+        { name: 'ECDH', namedCurve: 'P-256' },
+        true,
+        ['deriveBits'],
+      );
+      return {
+        vapidPublicKey: VAPID,
+        transportPublicKey: new Uint8Array(
+          await crypto.subtle.exportKey('raw', transport.publicKey),
+        ),
+      };
+    });
+    vi.spyOn(PwaNotifications, 'create').mockResolvedValue({
+      prepare,
+      set,
+    } as unknown as PwaNotifications);
+    return { status, set };
+  }
+
+  afterEach(() => {
+    Reflect.deleteProperty(navigator, 'serviceWorker');
+    vi.restoreAllMocks();
+  });
+
+  it('registers the subscription again without asking, where permission and consent hold', async () => {
+    const { requestPermission } = installedApp('granted');
+    const { set } = fakeCalls(true);
+    const client = track(new AuthClient());
+    handleSignIn(FakeTransport.last());
+
+    await client.signIn();
+
+    await vi.waitFor(() => expect(set).toHaveBeenCalledTimes(1));
+    expect(set.mock.calls[0]).toEqual([
+      expect.objectContaining({ endpoint: 'https://push.example/1' }),
+    ]);
+    expect(requestPermission).not.toHaveBeenCalled();
+  });
+
+  it('registers nothing where the identity has not consented', async () => {
+    installedApp('granted');
+    const { status, set } = fakeCalls(false);
+    const client = track(new AuthClient());
+    handleSignIn(FakeTransport.last());
+
+    await client.signIn();
+
+    await vi.waitFor(() => expect(status).toHaveBeenCalled());
+    expect(set).not.toHaveBeenCalled();
+  });
+
+  it('asks Internet Identity nothing where notification permission is not granted', async () => {
+    installedApp('default');
+    const { status } = fakeCalls(true);
+    const client = track(new AuthClient());
+    handleSignIn(FakeTransport.last());
+
+    await client.signIn();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(status).not.toHaveBeenCalled();
+  });
+
+  it('signs in whatever registering fails with', async () => {
+    installedApp('granted');
+    fakeCalls(true);
+    vi.spyOn(PwaNotifications, 'create').mockRejectedValue(new Error('the canister is down'));
+    const client = track(new AuthClient());
+    handleSignIn(FakeTransport.last());
+
+    await expect(client.signIn()).resolves.toBeDefined();
   });
 });

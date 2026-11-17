@@ -1087,6 +1087,10 @@ export class AuthClient {
         if (this.#committing === committing) this.#committing = null;
       }
 
+      // Not awaited: it is several update calls the user is not waiting for, and a
+      // failure must not fail signIn().
+      void this.#resubscribeAfterSignIn(key, sessionChain).catch(() => undefined);
+
       // Best-effort — the user is already signed in, so a cleanup failure must not
       // fail signIn(), and the next ceremony overwrites what is left behind.
       if (pending) {
@@ -1321,8 +1325,11 @@ export class AuthClient {
    * before anything else is awaited. The service worker has to be registered
    * already and import `handleNotifications` from `@icp-sdk/auth/worker`. A push
    * subscription the service worker already holds with Internet Identity's key
-   * is reused; one bound to any other key is the application's own, and this
-   * throws rather than touch it.
+   * is reused. A service worker holds one push subscription, so one bound to any
+   * other key is unsubscribed and replaced.
+   *
+   * After a later sign-in in the installed app, the subscription is registered
+   * again without asking, where permission and consent are both still granted.
    *
    * A permission the user did not grant is an answer: it comes back as is, and
    * nothing is subscribed.
@@ -1562,6 +1569,28 @@ export class AuthClient {
     if (this.#interactions > 0) return;
     const identity = this.#identity;
     if (identity instanceof SessionIdentity) await identity.refresh().catch(() => undefined);
+  }
+
+  /**
+   * Registers this installed app's push subscription for the session a sign-in
+   * just created, where the user already granted notification permission and
+   * this application's consent. Asks the user for nothing.
+   */
+  async #resubscribeAfterSignIn(key: SignIdentity, sessionChain: DelegationChain): Promise<void> {
+    if (!isInstalledApp()) return;
+    if (globalThis.Notification?.permission !== 'granted') return;
+    const registration = await globalThis.navigator?.serviceWorker?.getRegistration();
+    if (registration === undefined) return;
+
+    const options = {
+      sessionKey: key,
+      sessionChain,
+      canisterId: this.#canisterId,
+      agentOptions: this.#options.agentOptions,
+    };
+    const consent = await NotificationConsent.create(options);
+    if (!(await consent.status()).granted) return;
+    await subscribeDevice(await PwaNotifications.create(options), registration);
   }
 
   /**
