@@ -1087,9 +1087,10 @@ export class AuthClient {
         if (this.#committing === committing) this.#committing = null;
       }
 
-      // Not awaited: it is several update calls the user is not waiting for, and a
-      // failure must not fail signIn().
-      void this.#resubscribeAfterSignIn(key, sessionChain).catch(() => undefined);
+      // Awaited only before navigating away, which would abandon it. Otherwise it
+      // is several update calls the user is not waiting for. A failure never fails
+      // signIn().
+      const resubscribing = this.#resubscribeAfterSignIn(key, sessionChain).catch(() => undefined);
 
       // Best-effort — the user is already signed in, so a cleanup failure must not
       // fail signIn(), and the next ceremony overwrites what is left behind.
@@ -1106,7 +1107,10 @@ export class AuthClient {
       // sign-in page and the redirect chain are not what a back button returns to.
       // `await` above resolved the journaled value to a validated href or null.
       const target = await returnTo;
-      if (typeof target === 'string') location.replace(target);
+      if (typeof target === 'string') {
+        await resubscribing;
+        location.replace(target);
+      }
 
       return this.#identity;
     } finally {

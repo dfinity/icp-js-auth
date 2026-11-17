@@ -3086,6 +3086,54 @@ describe('AuthClient re-subscribing an installed app after sign-in', () => {
     expect(status).not.toHaveBeenCalled();
   });
 
+  it('finishes registering before a returnTo navigates away from the page', async () => {
+    installedApp('granted');
+    const { set } = fakeCalls(true);
+    let land: () => void = () => undefined;
+    set.mockImplementation(
+      () =>
+        new Promise<undefined>((resolve) => {
+          land = () => resolve(undefined);
+        }),
+    );
+    const replace = vi.fn();
+    vi.stubGlobal('location', {
+      replace,
+      reload: vi.fn(),
+      href: 'http://localhost/sign-in',
+      origin: 'http://localhost',
+    });
+    const client = track(new AuthClient());
+    handleSignIn(FakeTransport.last());
+
+    const signingIn = client.signIn({ returnTo: '/app' });
+    await vi.waitFor(() => expect(set).toHaveBeenCalled());
+    expect(replace).not.toHaveBeenCalled();
+
+    land();
+    await signingIn;
+    expect(replace).toHaveBeenCalledWith('http://localhost/app');
+  });
+
+  it('navigates to a returnTo even where registering fails', async () => {
+    installedApp('granted');
+    fakeCalls(true);
+    vi.spyOn(PwaNotifications, 'create').mockRejectedValue(new Error('the canister is down'));
+    const replace = vi.fn();
+    vi.stubGlobal('location', {
+      replace,
+      reload: vi.fn(),
+      href: 'http://localhost/sign-in',
+      origin: 'http://localhost',
+    });
+    const client = track(new AuthClient());
+    handleSignIn(FakeTransport.last());
+
+    await client.signIn({ returnTo: '/app' });
+
+    expect(replace).toHaveBeenCalledWith('http://localhost/app');
+  });
+
   it('signs in whatever registering fails with', async () => {
     installedApp('granted');
     fakeCalls(true);
