@@ -1109,6 +1109,9 @@ export class AuthClient {
       const target = await returnTo;
       if (typeof target === 'string') {
         await resubscribing;
+        // Re-checked after that wait: a sign-out or a later sign-in may have taken
+        // over meanwhile, and this page is no longer this sign-in's to navigate.
+        this.#assertCurrent(signInLock);
         location.replace(target);
       }
 

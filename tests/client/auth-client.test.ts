@@ -3115,6 +3115,36 @@ describe('AuthClient re-subscribing an installed app after sign-in', () => {
     expect(replace).toHaveBeenCalledWith('http://localhost/app');
   });
 
+  it('does not navigate where a sign-out takes over while registering is pending', async () => {
+    stubLocks();
+    installedApp('granted');
+    const { set } = fakeCalls(true);
+    let land: () => void = () => undefined;
+    set.mockImplementationOnce(
+      () =>
+        new Promise<undefined>((resolve) => {
+          land = () => resolve(undefined);
+        }),
+    );
+    const replace = vi.fn();
+    vi.stubGlobal('location', {
+      replace,
+      reload: vi.fn(),
+      href: 'http://localhost/sign-in',
+      origin: 'http://localhost',
+    });
+    const client = track(new AuthClient());
+    handleSignIn(FakeTransport.last());
+
+    const signingIn = client.signIn({ returnTo: '/app' });
+    await vi.waitFor(() => expect(set).toHaveBeenCalled());
+    await client.signOut();
+
+    land();
+    await expect(signingIn).rejects.toBeInstanceOf(SupersededError);
+    expect(replace).not.toHaveBeenCalled();
+  });
+
   it('navigates to a returnTo even where registering fails', async () => {
     installedApp('granted');
     fakeCalls(true);
