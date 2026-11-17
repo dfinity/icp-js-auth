@@ -356,16 +356,43 @@ export async function sealSubscription(
   };
 }
 
-/** The push subscription the registration holds, or a new one bound to `vapidPublicKey`. */
+/** Whether `subscription` was minted with `applicationServerKey`. */
+const subscribedWith = (subscription: PushSubscription, applicationServerKey: Uint8Array) => {
+  const minted = subscription.options.applicationServerKey;
+  if (minted === null || minted === undefined) return false;
+  const bytes = new Uint8Array(minted);
+  return (
+    bytes.length === applicationServerKey.length &&
+    bytes.every((byte, at) => byte === applicationServerKey[at])
+  );
+};
+
+/**
+ * The push subscription the registration holds where it is bound to
+ * `vapidPublicKey`, or a new one bound to it where the registration holds none.
+ *
+ * A subscription bound to any other key is the application's own, and is left
+ * alone: a service worker holds one push subscription, so notifications from
+ * Internet Identity cannot share it.
+ */
 const heldOrNewSubscription = async (
   registration: ServiceWorkerRegistration,
   vapidPublicKey: Uint8Array,
-): Promise<PushSubscription> =>
-  (await registration.pushManager.getSubscription()) ??
-  registration.pushManager.subscribe({
-    userVisibleOnly: true,
-    applicationServerKey: bytesOf(vapidPublicKey),
-  });
+): Promise<PushSubscription> => {
+  const held = await registration.pushManager.getSubscription();
+  if (held === null) {
+    return registration.pushManager.subscribe({
+      userVisibleOnly: true,
+      applicationServerKey: bytesOf(vapidPublicKey),
+    });
+  }
+  if (!subscribedWith(held, vapidPublicKey)) {
+    throw new Error(
+      "This service worker's push subscription belongs to the application, so Internet Identity's notifications cannot use it",
+    );
+  }
+  return held;
+};
 
 /**
  * Subscribes `registration` with Internet Identity's VAPID key and registers the
