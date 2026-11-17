@@ -21,16 +21,18 @@ import {
   NotificationConsent,
   type NotificationConsentOptions,
   type NotificationConsentStatus,
+  NotificationsUnsupportedError,
   // Aliased: the method below is this library's name for the operation, and this
   // is the request it sends.
   requestNotificationConsent as sendConsentRequest,
 } from './notification-consent.js';
 import {
-  currentPushSubscription,
   isInstalledApp,
   PwaNotifications,
   pwaAccess,
+  recordPushKey,
   subscribeDevice,
+  takeOwnPushSubscription,
 } from './pwa-notifications.js';
 import {
   AccountMismatchError,
@@ -1306,13 +1308,14 @@ export class AuthClient {
    * mind. Idempotent — consent that is already withdrawn is not an error.
    *
    * Also unsubscribes this origin's service worker from the push service, once
-   * the consent is withdrawn.
+   * the consent is withdrawn, where {@link subscribeToNotifications} made its
+   * subscription.
    *
    * @throws {SessionGoneError} Where this origin holds no live session.
    */
   async revokeNotificationConsent(): Promise<void> {
     await (await this.#consent()).revoke();
-    await (await currentPushSubscription())?.unsubscribe();
+    await (await takeOwnPushSubscription(this.#slots.pushKey))?.unsubscribe();
   }
 
   /**
@@ -1329,16 +1332,27 @@ export class AuthClient {
    * nothing is subscribed.
    *
    * @returns The notification permission, which is `'granted'` once subscribed.
+   * @throws {NotificationsUnsupportedError} Outside an installed web app.
    * @throws {SessionGoneError} Where this origin holds no live session.
    * @example
    * const permission = await authClient.subscribeToNotifications();
    */
   async subscribeToNotifications(): Promise<NotificationPermission> {
+    if (!isInstalledApp()) {
+      throw new NotificationsUnsupportedError(
+        'Notifications are subscribed to only in an installed web app',
+      );
+    }
     const permission = await Notification.requestPermission();
     if (permission !== 'granted') return permission;
 
+    const registration = await navigator.serviceWorker.getRegistration();
+    if (registration === undefined) {
+      throw new Error('This origin has no service worker registered to receive notifications');
+    }
     const inbox = await this.#pwaNotifications();
-    await subscribeDevice(inbox, await navigator.serviceWorker.ready);
+    const vapidPublicKey = await subscribeDevice(inbox, registration);
+    await recordPushKey(this.#slots.pushKey, vapidPublicKey);
     return permission;
   }
 
@@ -1446,9 +1460,10 @@ export class AuthClient {
   /**
    * Clears the stored session and resets the client to an anonymous state.
    *
-   * Where this origin's service worker holds a push subscription, this device's
-   * installed-app subscription is removed at Internet Identity while the session
-   * still exists, and the service worker is unsubscribed from the push service.
+   * Where {@link subscribeToNotifications} subscribed this origin's service
+   * worker, this device's installed-app subscription is removed at Internet
+   * Identity while the session still exists, and the service worker is
+   * unsubscribed from the push service.
    *
    * @param options - Sign-out options.
    * @param options.returnTo - URL to navigate to after sign-out.
@@ -1563,7 +1578,7 @@ export class AuthClient {
    * has ended is not delivered to.
    */
   async #removePwaSubscription(key: SignIdentity, sessionChain: DelegationChain): Promise<void> {
-    const subscription = await currentPushSubscription().catch(() => undefined);
+    const subscription = await takeOwnPushSubscription(this.#slots.pushKey).catch(() => undefined);
     if (subscription === undefined) return;
     try {
       const inbox = await PwaNotifications.create({

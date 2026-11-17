@@ -2,6 +2,7 @@ import { Actor, HttpAgent } from '@icp-sdk/core/agent';
 import type { IDL } from '@icp-sdk/core/candid';
 import { DelegationIdentity } from '@icp-sdk/core/identity';
 import type { Principal } from '@icp-sdk/core/principal';
+import { IdbKeyVal } from './db.js';
 import type { NotificationConsentOptions } from './notification-consent.js';
 import { SessionGoneError } from './session/app-delegation-source.js';
 import { assertChainReaches } from './session/session-minter.js';
@@ -390,16 +391,18 @@ const usableSubscription = async (
  *
  * An endpoint registered by another entry with other keys is refused, and the
  * device moves to a fresh endpoint and tries once more.
+ *
+ * @returns The VAPID key the registration is subscribed with.
  */
 export async function subscribeDevice(
   inbox: PwaNotifications,
   registration: ServiceWorkerRegistration,
-): Promise<void> {
+): Promise<Uint8Array> {
   const keys = await inbox.prepare();
   const subscription = await usableSubscription(registration, keys.vapidPublicKey);
   try {
     await inbox.set(await sealSubscription(subscription, keys.transportPublicKey));
-    return;
+    return keys.vapidPublicKey;
   } catch (error) {
     if (!(error instanceof EndpointInUseError)) throw error;
   }
@@ -412,14 +415,31 @@ export async function subscribeDevice(
     applicationServerKey: bytesOf(fresh.vapidPublicKey),
   });
   await inbox.set(await sealSubscription(replacement, fresh.transportPublicKey));
+  return fresh.vapidPublicKey;
 }
 
-/** The push subscription of this origin's service worker, where there is one. */
-export async function currentPushSubscription(): Promise<PushSubscription | undefined> {
+/** Records the VAPID key this client subscribed with, under `slot`. */
+export async function recordPushKey(slot: string, vapidPublicKey: Uint8Array): Promise<void> {
+  await (await IdbKeyVal.create()).set(slot, vapidPublicKey);
+}
+
+/**
+ * The push subscription this client made, and forgets that it made one.
+ *
+ * Only a subscription made with the key recorded under `slot` is answered: one
+ * with any other key belongs to the application, and none is touched where
+ * nothing is recorded.
+ */
+export async function takeOwnPushSubscription(slot: string): Promise<PushSubscription | undefined> {
+  const db = await IdbKeyVal.create();
+  const recorded = await db.get<Uint8Array>(slot);
+  if (recorded === null) return undefined;
   const container = globalThis.navigator?.serviceWorker;
-  if (container === undefined) return undefined;
-  const registration = await container.getRegistration();
-  return (await registration?.pushManager?.getSubscription()) ?? undefined;
+  const registration = await container?.getRegistration();
+  const subscription = (await registration?.pushManager?.getSubscription()) ?? null;
+  await db.remove(slot);
+  if (subscription === null || !subscribedWith(subscription, recorded)) return undefined;
+  return subscription;
 }
 
 /**
