@@ -24,7 +24,11 @@ describe('handleNotifications', () => {
     const listeners = new Map<string, (event: unknown) => void>();
     const showNotification = vi.fn(async () => undefined);
     const scope = {
-      registration: { showNotification, getNotifications: vi.fn(async () => []) },
+      registration: {
+        showNotification,
+        getNotifications: vi.fn(async () => []),
+        scope: 'https://app.example.com/',
+      },
       location: { origin: 'https://app.example.com', hostname: 'app.example.com' },
       clients: { matchAll: vi.fn(async () => []), openWindow: vi.fn(async () => null) },
       addEventListener: (type: string, listener: (event: unknown) => void) =>
@@ -40,13 +44,34 @@ describe('handleNotifications', () => {
       });
       await work;
     };
-    return { scope: scope as unknown as NotificationWorkerScope, showNotification, push };
+    const click = async (data: unknown) => {
+      let work: Promise<unknown> = Promise.resolve();
+      listeners.get('notificationclick')?.({
+        notification: { data, close: vi.fn() },
+        waitUntil: (promise: Promise<unknown>) => {
+          work = promise;
+        },
+      });
+      await work;
+    };
+    return {
+      scope: scope as unknown as NotificationWorkerScope,
+      showNotification,
+      push,
+      click,
+      openWindow: scope.clients.openWindow,
+    };
   }
 
-  function fakeClient(inbox: () => Promise<PwaNotifications>) {
-    const client = {};
+  function fakeClient(
+    inbox: () => Promise<PwaNotifications>,
+    getIdentity = vi.fn(async () => {
+      throw new SessionGoneError();
+    }),
+  ) {
+    const client = { getIdentity };
     pwaAccess.set(client, { inbox, agentOptions: undefined });
-    return client as Parameters<typeof handleNotifications>[0];
+    return client as unknown as Parameters<typeof handleNotifications>[0];
   }
 
   it('shows the generic notification for a payload it cannot read', async () => {
@@ -110,6 +135,37 @@ describe('handleNotifications', () => {
     await push({ inbox_notification_id: 3 });
 
     expect(showNotification).toHaveBeenCalledTimes(1);
+  });
+
+  it('reports a click on a notification without a url as opened, after opening the app', async () => {
+    const { scope, click, openWindow } = fakeScope();
+    const getIdentity = vi.fn(async () => {
+      throw new SessionGoneError();
+    });
+    handleNotifications(
+      fakeClient(async () => over(fakeService({})), getIdentity),
+      scope,
+    );
+
+    await click({ canisterId: 'aaaaa-aa', id: '5' });
+
+    expect(openWindow).toHaveBeenCalledWith('https://app.example.com/');
+    expect(getIdentity).toHaveBeenCalled();
+  });
+
+  it('reports nothing for a click on the generic notification', async () => {
+    const { scope, click } = fakeScope();
+    const getIdentity = vi.fn(async () => {
+      throw new SessionGoneError();
+    });
+    handleNotifications(
+      fakeClient(async () => over(fakeService({})), getIdentity),
+      scope,
+    );
+
+    await click(null);
+
+    expect(getIdentity).not.toHaveBeenCalled();
   });
 
   it('refuses anything other than an AuthClient', () => {

@@ -299,7 +299,7 @@ export function handleNotifications(
     event.waitUntil(
       (async () => {
         await opening.catch(() => undefined);
-        if (data === undefined || url === undefined) return;
+        if (data === undefined) return;
         const identity = await authClient.getIdentity();
         const app = await appActor(access, identity, Principal.fromText(data.canisterId));
         await app._internet_identity_notification_opened(BigInt(data.id));
