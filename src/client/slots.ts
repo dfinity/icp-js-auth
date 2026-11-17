@@ -47,6 +47,12 @@ const SLOT_NAMES = {
    * shared answer to who is signed in.
    */
   state: 'ic-session-state',
+
+  /**
+   * The application server key this client subscribed the service worker with,
+   * so revoking and signing out unsubscribe only a subscription it made.
+   */
+  pushKey: 'push-key',
 } as const;
 
 /**

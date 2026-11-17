@@ -9,6 +9,7 @@ describe('slotsFor', () => {
       sessionPending: 'session-pending',
       appPending: 'app-pending',
       state: 'ic-session-state',
+      pushKey: 'push-key',
     });
   });
 
@@ -21,6 +22,7 @@ describe('slotsFor', () => {
       sessionPending: 'second:session-pending',
       appPending: 'second:app-pending',
       state: 'second:ic-session-state',
+      pushKey: 'second:push-key',
     });
     expect(Object.values(slots)).toEqual(Object.values(slotsFor()).map((slot) => `second:${slot}`));
   });

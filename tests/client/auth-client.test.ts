@@ -20,6 +20,7 @@ import type {
 import { IdbCredentialStorage } from '../../src/client/credentials/idb-credential-storage.ts';
 import { MemoryCredentialStorage } from '../../src/client/credentials/memory-credential-storage.ts';
 import { IdbKeyVal } from '../../src/client/db.ts';
+import { NotificationsUnsupportedError } from '../../src/client/notification-consent.ts';
 import { SessionGoneError } from '../../src/client/session/app-delegation-source.ts';
 import { stealLock } from '../../src/client/session/app-lock.ts';
 import { InteractionRequiredError } from '../../src/client/session/session-delegation.ts';
@@ -2673,6 +2674,15 @@ describe('AuthClient notification consent', () => {
     await client.requestNotificationConsent();
 
     expect(transport.requests[0].params).toEqual({ installedApp: true });
+  });
+
+  it('should refuse to subscribe outside an installed web app, before asking for permission', async () => {
+    const requestPermission = vi.fn(async () => 'granted');
+    vi.stubGlobal('Notification', { requestPermission });
+    const client = track(new AuthClient());
+
+    await expect(client.subscribeToNotifications()).rejects.toThrow(NotificationsUnsupportedError);
+    expect(requestPermission).not.toHaveBeenCalled();
   });
 
   it('should report a refusal rather than throwing', async () => {
