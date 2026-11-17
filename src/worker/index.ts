@@ -272,10 +272,10 @@ const openAt = async (scope: NotificationWorkerScope, url: string): Promise<void
   await scope.clients.openWindow(url);
 };
 
-/** Focuses any window of this app, or opens its start. */
+/** Focuses a window within the worker's scope, or opens the scope. */
 const openTheApp = async (scope: NotificationWorkerScope): Promise<void> => {
   const windows = await scope.clients.matchAll({ type: 'window', includeUncontrolled: true });
-  const open = windows.find((client) => client.url.startsWith(scope.location.origin));
+  const open = windows.find((client) => client.url.startsWith(scope.registration.scope));
   if (open !== undefined) {
     await open.focus();
     return;
