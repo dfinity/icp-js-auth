@@ -421,3 +421,18 @@ export async function currentPushSubscription(): Promise<PushSubscription | unde
   const registration = await container.getRegistration();
   return (await registration?.pushManager?.getSubscription()) ?? undefined;
 }
+
+/**
+ * What the service worker module reaches an {@link AuthClient} through.
+ *
+ * Kept off the class so its public surface carries nothing only the worker
+ * module uses.
+ */
+export interface PwaAccess {
+  /** The inbox calls, as the session this origin holds. */
+  inbox(): Promise<PwaNotifications>;
+  /** Options for the agent calling the dapp's own canister. */
+  agentOptions: NotificationConsentOptions['agentOptions'];
+}
+
+export const pwaAccess = new WeakMap<object, PwaAccess>();

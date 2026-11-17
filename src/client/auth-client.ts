@@ -29,6 +29,7 @@ import {
   currentPushSubscription,
   isInstalledApp,
   PwaNotifications,
+  pwaAccess,
   subscribeDevice,
 } from './pwa-notifications.js';
 import {
@@ -436,6 +437,10 @@ export class AuthClient {
     this.#credentialStorage = options.credentialStorage ?? new IdbCredentialStorage();
     this.#slots = slotsFor(options.namespace);
     this.#stateStorage = options.stateStorage ?? defaultStateStorage();
+    pwaAccess.set(this, {
+      inbox: () => this.#pwaNotifications(),
+      agentOptions: options.agentOptions,
+    });
 
     // A string or URL is what this option used to be, and a caller still passing
     // one would otherwise be silently ignored — both halves falling back to
