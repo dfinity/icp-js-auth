@@ -80,6 +80,16 @@ describe('requestNotificationConsent', () => {
     });
   });
 
+  it('says so where the application runs as an installed web app', async () => {
+    const { signer, sendRequest } = fakeSigner({ result: { granted: true } });
+
+    await requestNotificationConsent(signer, 'https://app.example.com', true);
+
+    expect(sendRequest.mock.calls[0][0]).toMatchObject({
+      params: { icrc95DerivationOrigin: 'https://app.example.com', installedApp: true },
+    });
+  });
+
   it('reports a refusal as an answer rather than a failure', async () => {
     const { signer } = fakeSigner({ result: { granted: false } });
 

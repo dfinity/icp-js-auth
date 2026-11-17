@@ -19,11 +19,18 @@ import { IdbCredentialStorage } from './credentials/idb-credential-storage.js';
 import { watchActivity, watchForeground } from './foreground-refresh.js';
 import {
   NotificationConsent,
+  type NotificationConsentOptions,
   type NotificationConsentStatus,
   // Aliased: the method below is this library's name for the operation, and this
   // is the request it sends.
   requestNotificationConsent as sendConsentRequest,
 } from './notification-consent.js';
+import {
+  currentPushSubscription,
+  isInstalledApp,
+  PwaNotifications,
+  subscribeDevice,
+} from './pwa-notifications.js';
 import {
   AccountMismatchError,
   chainAuthorisesKey,
@@ -1250,6 +1257,12 @@ export class AuthClient {
    * user's answer and nothing else can stand in for it. Where they agree, the
    * browser they answered on is registered for delivery.
    *
+   * In an installed web app this records consent alone: the provider's window
+   * cannot subscribe the app's own service worker, and iOS grants notification
+   * permission only from a tap in the app itself. Call
+   * {@link subscribeToNotifications} from a second tap once this returns
+   * `granted: true`.
+   *
    * A refusal is an answer rather than a failure: it returns `granted: false`,
    * and an application renders that. Calling it again where consent is already
    * held returns what is recorded without asking a second time.
@@ -1268,7 +1281,11 @@ export class AuthClient {
     // writes nothing anyone else reads.
     this.#beginInteraction();
     try {
-      const response = sendConsentRequest(this.#signer, this.#options.derivationOrigin?.toString());
+      const response = sendConsentRequest(
+        this.#signer,
+        this.#options.derivationOrigin?.toString(),
+        isInstalledApp(),
+      );
       this.#takeChannelLock();
       return await response;
     } finally {
@@ -1283,10 +1300,41 @@ export class AuthClient {
    * nothing: the user already decided, and this records that they changed their
    * mind. Idempotent — consent that is already withdrawn is not an error.
    *
+   * Also unsubscribes this origin's service worker from the push service, once
+   * the consent is withdrawn.
+   *
    * @throws {SessionGoneError} Where this origin holds no live session.
    */
   async revokeNotificationConsent(): Promise<void> {
     await (await this.#consent()).revoke();
+    await (await currentPushSubscription())?.unsubscribe();
+  }
+
+  /**
+   * Subscribes this installed web app's own service worker to the user's
+   * notifications from this application.
+   *
+   * Call it from a tap, after {@link requestNotificationConsent} returned
+   * `granted: true`, and only in an installed web app: iOS asks for notification
+   * permission only from a tap in the page itself, so this asks for it first,
+   * before anything else is awaited. The service worker has to be registered
+   * already and import `handleNotifications` from `@icp-sdk/auth/worker`.
+   *
+   * A permission the user did not grant is an answer: it comes back as is, and
+   * nothing is subscribed.
+   *
+   * @returns The notification permission, which is `'granted'` once subscribed.
+   * @throws {SessionGoneError} Where this origin holds no live session.
+   * @example
+   * const permission = await authClient.subscribeToNotifications();
+   */
+  async subscribeToNotifications(): Promise<NotificationPermission> {
+    const permission = await Notification.requestPermission();
+    if (permission !== 'granted') return permission;
+
+    const inbox = await this.#pwaNotifications();
+    await subscribeDevice(inbox, await navigator.serviceWorker.ready);
+    return permission;
   }
 
   /**
@@ -1314,6 +1362,16 @@ export class AuthClient {
    * is instead of answered from a stale actor.
    */
   async #consent(): Promise<NotificationConsent> {
+    return NotificationConsent.create(await this.#sessionCallOptions());
+  }
+
+  /** Builds the installed app's subscription and inbox calls, as {@link #consent} does. */
+  async #pwaNotifications(): Promise<PwaNotifications> {
+    return PwaNotifications.create(await this.#sessionCallOptions());
+  }
+
+  /** What a call made as the session this origin holds is built from. */
+  async #sessionCallOptions(): Promise<NotificationConsentOptions> {
     // Wait for the constructor's session restore, which is what puts the
     // credential these calls are made with where this can read it.
     await this.#init();
@@ -1326,12 +1384,12 @@ export class AuthClient {
       throw new SessionGoneError();
     }
 
-    return NotificationConsent.create({
+    return {
       sessionKey: session.identity,
       sessionChain: session.chain,
       canisterId: this.#canisterId,
       agentOptions: this.#options.agentOptions,
-    });
+    };
   }
 
   /**
@@ -1383,6 +1441,10 @@ export class AuthClient {
   /**
    * Clears the stored session and resets the client to an anonymous state.
    *
+   * Where this origin's service worker holds a push subscription, this device's
+   * installed-app subscription is removed at Internet Identity while the session
+   * still exists, and the service worker is unsubscribed from the push service.
+   *
    * @param options - Sign-out options.
    * @param options.returnTo - URL to navigate to after sign-out.
    */
@@ -1418,7 +1480,7 @@ export class AuthClient {
     const revoked: Promise<unknown> =
       session?.chain === undefined || !('sign' in session.identity)
         ? Promise.resolve(undefined)
-        : this.#revoke(session.identity, session.chain).then(
+        : this.#endAtCanister(session.identity, session.chain).then(
             () => undefined,
             (error: unknown) => error,
           );
@@ -1486,6 +1548,39 @@ export class AuthClient {
     if (this.#interactions > 0) return;
     const identity = this.#identity;
     if (identity instanceof SessionIdentity) await identity.refresh().catch(() => undefined);
+  }
+
+  /**
+   * Removes this device's installed-app subscription at the canister, then
+   * unsubscribes from the push service.
+   *
+   * Best-effort: the session is revoked next, and a subscription whose session
+   * has ended is not delivered to.
+   */
+  async #removePwaSubscription(key: SignIdentity, sessionChain: DelegationChain): Promise<void> {
+    const subscription = await currentPushSubscription().catch(() => undefined);
+    if (subscription === undefined) return;
+    try {
+      const inbox = await PwaNotifications.create({
+        sessionKey: key,
+        sessionChain,
+        canisterId: this.#canisterId,
+        agentOptions: this.#options.agentOptions,
+      });
+      await inbox.set(null);
+    } catch {
+      // Left to the session's end, which stops delivery to it.
+    }
+    await subscription.unsubscribe().catch(() => undefined);
+  }
+
+  /**
+   * Removes this device's installed-app subscription while the session can still
+   * be called as, then ends the session.
+   */
+  async #endAtCanister(key: SignIdentity, sessionChain: DelegationChain): Promise<void> {
+    await this.#removePwaSubscription(key, sessionChain);
+    await this.#revoke(key, sessionChain);
   }
 
   /** Ends the session at the canister, so nothing more can be minted from it. */

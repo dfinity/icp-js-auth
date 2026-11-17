@@ -2662,6 +2662,19 @@ describe('AuthClient notification consent', () => {
     expect(transport.requests[0].params?.icrc95DerivationOrigin).toBe('https://app.example.com');
   });
 
+  it('should say so where it runs as an installed web app', async () => {
+    vi.stubGlobal('matchMedia', (query: string) => ({
+      matches: query === '(display-mode: standalone)',
+    }));
+    const client = track(new AuthClient());
+    const transport = FakeTransport.last();
+    handleNotificationConsent(transport);
+
+    await client.requestNotificationConsent();
+
+    expect(transport.requests[0].params).toEqual({ installedApp: true });
+  });
+
   it('should report a refusal rather than throwing', async () => {
     const client = track(new AuthClient());
     handleNotificationConsent(FakeTransport.last(), { result: { granted: false } });
