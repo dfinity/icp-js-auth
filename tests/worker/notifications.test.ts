@@ -26,8 +26,8 @@ describe('handleNotifications', () => {
     const scope = {
       registration: {
         showNotification,
-        getNotifications: vi.fn(async () => []),
-        scope: 'https://app.example.com/',
+        getNotifications: vi.fn(async (): Promise<{ tag: string; close(): void }[]> => []),
+        scope: 'https://app.example.com/app/',
       },
       location: { origin: 'https://app.example.com', hostname: 'app.example.com' },
       clients: { matchAll: vi.fn(async () => []), openWindow: vi.fn(async () => null) },
@@ -60,6 +60,8 @@ describe('handleNotifications', () => {
       push,
       click,
       openWindow: scope.clients.openWindow,
+      matchAll: scope.clients.matchAll,
+      getNotifications: scope.registration.getNotifications,
     };
   }
 
@@ -125,16 +127,49 @@ describe('handleNotifications', () => {
     expect(remove).toHaveBeenCalledWith({ inbox_notification_id: BigInt(3), not_shown: [] });
   });
 
-  it('shows the generic notification for an entry that is gone and nothing on screen', async () => {
-    const { scope, showNotification, push } = fakeScope();
+  it('shows the generic notification for an entry that is gone, even with an older one on screen', async () => {
+    const { scope, showNotification, push, getNotifications } = fakeScope();
+    getNotifications.mockResolvedValue([{ tag: 'ii-notification:aaaaa-aa:1', close: vi.fn() }]);
+    const remove = vi.fn(async () => ({ Ok: {} }));
     handleNotifications(
-      fakeClient(async () => over(fakeService({}))),
+      fakeClient(async () => over(fakeService({ app_remove_pwa_notification: remove }))),
       scope,
     );
 
     await push({ inbox_notification_id: 3 });
 
     expect(showNotification).toHaveBeenCalledTimes(1);
+    expect(remove).toHaveBeenCalledWith({ inbox_notification_id: BigInt(3), not_shown: [] });
+  });
+
+  it('shows the generic notification once where reading the session stalls past the deadline', async () => {
+    vi.useFakeTimers();
+    try {
+      const { scope, showNotification, push } = fakeScope();
+      let release: (inbox: PwaNotifications) => void = () => undefined;
+      const remove = vi.fn(async () => ({ Ok: {} }));
+      handleNotifications(
+        fakeClient(
+          () =>
+            new Promise<PwaNotifications>((resolve) => {
+              release = resolve;
+            }),
+        ),
+        scope,
+      );
+
+      const pushing = push({ inbox_notification_id: 3 });
+      await vi.advanceTimersByTimeAsync(8_000);
+      expect(showNotification).toHaveBeenCalledTimes(1);
+
+      // The late answer names an entry, and still shows nothing more.
+      release(over(fakeService({ app_remove_pwa_notification: remove })));
+      await pushing;
+      expect(showNotification).toHaveBeenCalledTimes(1);
+      expect(remove).toHaveBeenCalledWith({ inbox_notification_id: BigInt(3), not_shown: [] });
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('reports a click on a notification without a url as opened, after opening the app', async () => {
@@ -149,7 +184,7 @@ describe('handleNotifications', () => {
 
     await click({ canisterId: 'aaaaa-aa', id: '5' });
 
-    expect(openWindow).toHaveBeenCalledWith('https://app.example.com/');
+    expect(openWindow).toHaveBeenCalledWith('https://app.example.com/app/');
     expect(getIdentity).toHaveBeenCalled();
   });
 
