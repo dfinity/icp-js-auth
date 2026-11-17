@@ -182,7 +182,7 @@ const unwrapNotification = <T>(
   throw new Error(`${failed}${detail === '' ? '' : `: ${detail}`}`);
 };
 
-/** Enough asks to outlast the rounds the canister's own draw of randomness takes. */
+/** Enough asks to outlast Internet Identity fetching its VAPID key or drawing randomness. */
 const PREPARE_ATTEMPTS = 4;
 
 const wait = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
@@ -220,8 +220,8 @@ export class PwaNotifications {
   }
 
   /**
-   * The keys the next subscribe needs, asked for again while the canister is
-   * still drawing the randomness they come from.
+   * The keys the next subscribe needs, asked for again while Internet Identity
+   * answers Pending: it is still fetching its VAPID key or drawing randomness.
    */
   async prepare(): Promise<SubscriptionKeys> {
     for (let attempt = 0; attempt < PREPARE_ATTEMPTS; attempt++) {
@@ -234,7 +234,7 @@ export class PwaNotifications {
         transportPublicKey: new Uint8Array(keys.transport_public_key),
       };
     }
-    throw new Error('Internet Identity is still drawing the keys for this subscription');
+    throw new Error('Internet Identity is not ready to hand out subscription keys yet');
   }
 
   /** Registers this device's subscription, or removes it where `subscription` is `null`. */
