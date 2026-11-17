@@ -234,6 +234,21 @@ describe('subscribeDevice', () => {
     expect(set.mock.calls[0][0].subscription[0].endpoint).toBe('https://push.example/1');
   });
 
+  it("leaves a push subscription bound to another key, which is the application's", async () => {
+    const { inbox, registration, set, subscribe } = await setUp([{ Ok: null }]);
+    const own = await fakeSubscription('https://push.example/own', new Uint8Array([4, 7, 7, 7]));
+    vi.mocked(registration.pushManager.getSubscription).mockResolvedValueOnce(
+      own as unknown as PushSubscription,
+    );
+
+    await expect(subscribeDevice(inbox, registration)).rejects.toThrow(
+      'belongs to the application',
+    );
+    expect(own.unsubscribe).not.toHaveBeenCalled();
+    expect(subscribe).not.toHaveBeenCalled();
+    expect(set).not.toHaveBeenCalled();
+  });
+
   it('moves to a fresh endpoint once where the endpoint is held with other keys', async () => {
     const { inbox, registration, set, first } = await setUp([
       { Err: { EndpointInUse: null } },

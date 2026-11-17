@@ -1320,7 +1320,9 @@ export class AuthClient {
    * permission only from a tap in the page itself, so this asks for it first,
    * before anything else is awaited. The service worker has to be registered
    * already and import `handleNotifications` from `@icp-sdk/auth/worker`. A push
-   * subscription the service worker already holds is reused.
+   * subscription the service worker already holds with Internet Identity's key
+   * is reused; one bound to any other key is the application's own, and this
+   * throws rather than touch it.
    *
    * A permission the user did not grant is an answer: it comes back as is, and
    * nothing is subscribed.
