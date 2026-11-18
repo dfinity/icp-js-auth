@@ -1,4 +1,4 @@
-import { Actor, AnonymousIdentity, HttpAgent } from '@icp-sdk/core/agent';
+import { Actor, AnonymousIdentity, HttpAgent, RejectError } from '@icp-sdk/core/agent';
 import { Principal } from '@icp-sdk/core/principal';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { AuthClient } from '../../src/client/auth-client.ts';
@@ -151,6 +151,21 @@ describe('fetchPushNotification', () => {
     removeOf(remove, 3);
   });
 
+  it('clears an entry that is gone without a reason', async () => {
+    const remove = vi.fn(async () => ({ Ok: {} }));
+    const { scope } = fakeScope();
+
+    const notification = await fetchPushNotification(
+      source(async () => over(fakeService({ app_remove_pwa_notification: remove }))),
+      push({ inbox_notification_id: 3 }),
+      scope,
+    );
+    await notification.acknowledge();
+
+    expect(notification).toMatchObject(GENERIC);
+    removeOf(remove, 3);
+  });
+
   describe("with the app's content", () => {
     const CANISTER = Principal.fromText('aaaaa-aa');
 
@@ -230,7 +245,72 @@ describe('fetchPushNotification', () => {
       expect(close).toHaveBeenCalled();
     });
 
-    it('answers the generic notification, and clears the entry as rejected, where the canister rejects', async () => {
+    it('answers the generic notification, and clears the entry as rejected, where the canister rejects the call', async () => {
+      const { inbox, remove } = fakeApp([]);
+      const { scope } = fakeScope();
+      vi.mocked(Actor.createActor).mockReturnValue({
+        _internet_identity_notification_content: vi.fn(async () => {
+          throw Object.create(RejectError.prototype);
+        }),
+      } as never);
+
+      const notification = await fetchPushNotification(
+        source(async () => inbox),
+        push({ inbox_notification_id: 3 }),
+        scope,
+      );
+      await notification.acknowledge();
+
+      expect(notification).toMatchObject(GENERIC);
+      removeOf(remove, 3, [{ PayloadRejected: null }]);
+    });
+
+    it('closes a dismissed notification on screen, answers the generic one, and clears the entry without a reason', async () => {
+      const { inbox, remove } = fakeApp([]);
+      const { scope, getNotifications } = fakeScope();
+      const close = vi.fn();
+      getNotifications.mockResolvedValue([{ tag: 'ii-notification:aaaaa-aa:5', close }]);
+
+      const notification = await fetchPushNotification(
+        source(async () => inbox),
+        push({ inbox_notification_id: 3 }),
+        scope,
+      );
+      await notification.acknowledge();
+
+      expect(close).toHaveBeenCalled();
+      expect(notification).toMatchObject(GENERIC);
+      removeOf(remove, 3);
+    });
+
+    it('never shows an answer that arrives after the deadline, and clears it as unreachable', async () => {
+      vi.useFakeTimers();
+      const { inbox, received, remove } = fakeApp([{ title: 'Hi', body: 'There', url: [] }]);
+      const { scope } = fakeScope();
+      let release: () => void = () => undefined;
+
+      const fetching = fetchPushNotification(
+        source(
+          () =>
+            new Promise<PwaNotifications>((resolve) => {
+              release = () => resolve(inbox);
+            }),
+        ),
+        push({ inbox_notification_id: 3 }),
+        scope,
+      );
+      await vi.advanceTimersByTimeAsync(8_000);
+      const notification = await fetching;
+      const acknowledging = notification.acknowledge();
+      release();
+      await acknowledging;
+
+      expect(notification).toMatchObject(GENERIC);
+      expect(received).not.toHaveBeenCalled();
+      removeOf(remove, 3, [{ PayloadUnreachable: null }]);
+    });
+
+    it('answers the generic notification, and clears the entry as unreachable, where the canister cannot be reached', async () => {
       const { inbox, remove } = fakeApp([]);
       const { scope } = fakeScope();
       vi.mocked(Actor.createActor).mockReturnValue({
