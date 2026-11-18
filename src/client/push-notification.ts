@@ -55,7 +55,7 @@ export interface PushNotificationSource {
 
 /** The parts of the service worker's global scope a fetch reads. */
 export interface PushNotificationScope {
-  readonly location: { readonly origin: string; readonly hostname: string };
+  readonly location: { readonly origin: string };
   /** Absent outside a service worker, where nothing on screen can be closed. */
   readonly registration?: {
     getNotifications(): Promise<{ readonly tag: string; close(): void }[]>;
@@ -237,7 +237,7 @@ const generic = async (
 ): Promise<FetchedNotification> => {
   await closeTagged(scope, GENERIC_TAG);
   return {
-    title: `New notification from ${scope.location.hostname}`,
+    title: 'New notification',
     options: { tag: GENERIC_TAG },
     acknowledge: once(acknowledge),
   };
