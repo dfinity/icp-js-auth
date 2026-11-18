@@ -14,9 +14,11 @@ const DISPLAY_DEADLINE_MS = 8_000;
 /** The tag of the notification answered where the app's own cannot be, and the prefix of every tag answered here. */
 const GENERIC_TAG = 'ii-notification';
 
-/** The part of a service worker's `push` event {@link AuthClient.fetchNotification} reads. */
+/** The part of a service worker's `push` event {@link AuthClient.fetchNotificationPayload} reads. */
 export interface NotificationPushEvent {
   readonly data: { json(): unknown } | null;
+  /** Keeps the service worker alive until `work` settles. */
+  waitUntil(work: Promise<unknown>): void;
 }
 
 /**
@@ -33,18 +35,18 @@ export interface PushNotificationData {
 }
 
 /** What to show for one push. */
-export interface FetchedNotification {
+export interface NotificationPayload {
   title: string;
   /** Spread these first into `showNotification`'s options; they carry the `tag`, and `data` for the app's notification. */
   options: NotificationOptions;
 }
 
-/** The part of a service worker's `notificationclick` event {@link AuthClient.markNotification} reads. */
+/** The part of a service worker's `notificationclick` event {@link AuthClient.markNotificationOpened} reads. */
 export interface NotificationClickEvent {
   readonly notification: { readonly data: unknown };
 }
 
-/** What {@link fetchPushNotification} reads the session and the app's canister through. */
+/** What {@link fetchPushNotificationPayload} reads the session and the app's canister through. */
 export interface PushNotificationSource {
   /** The inbox calls, as the session this origin holds. */
   inbox(): Promise<PwaNotifications>;
@@ -224,34 +226,20 @@ async function resolvePush(
   };
 }
 
-/** Runs `work` the first time it is called, and answers that same run every time after. */
-const once = (work: () => Promise<unknown>): (() => Promise<void>) => {
-  let running: Promise<void> | undefined;
-  return () => {
-    running ??= work().then(
-      () => undefined,
-      () => undefined,
-    );
-    return running;
-  };
-};
-
-/** What marking each push event shown does, kept by {@link fetchPushNotification} for that event. */
-const shownMarks = new WeakMap<NotificationPushEvent, () => Promise<void>>();
-
-/** What to show for one push, and what marking it shown does. */
+/** What to show for one push, and the reporting that follows it. */
 interface Fetched {
-  notification: FetchedNotification;
-  markShown?: () => Promise<unknown>;
+  payload: NotificationPayload;
+  /** Reports it received and clears its entry, or clears a late answer's entry. */
+  report?: () => Promise<unknown>;
 }
 
 /** What a `userVisibleOnly` subscription owes the user where nothing better can be shown. */
 const generic = async (
   scope: PushNotificationScope,
-  markShown?: () => Promise<unknown>,
+  report?: () => Promise<unknown>,
 ): Promise<Fetched> => {
   await closeTagged(scope, GENERIC_TAG);
-  return { notification: { title: 'New notification', options: { tag: GENERIC_TAG } }, markShown };
+  return { payload: { title: 'New notification', options: { tag: GENERIC_TAG } }, report };
 };
 
 const globalScope = (): PushNotificationScope => globalThis as unknown as PushNotificationScope;
@@ -277,11 +265,11 @@ async function fetchForPush(
     if (outcome.closeTag !== undefined) await closeTagged(scope, outcome.closeTag);
     const { shown, received, clear } = outcome;
     if (shown === undefined) {
-      return await generic(scope, async () => clear?.(outcome.notShown));
+      return await generic(scope, clear === undefined ? undefined : () => clear(outcome.notShown));
     }
     return {
-      notification: { title: shown.title, options: shown.options },
-      markShown: () => Promise.all([received?.(), clear?.()]),
+      payload: { title: shown.title, options: shown.options },
+      report: () => Promise.all([received?.(), clear?.()]),
     };
   } catch (error) {
     if (error instanceof SessionGoneError) throw error;
@@ -296,17 +284,26 @@ async function fetchForPush(
  * push. Rejects only with {@link SessionGoneError}, where no session is held.
  *
  * A copy of the same notification already on screen is closed before this
- * resolves, since iOS ignores `tag` and would show both. What marking it shown
- * does is kept for {@link markPushNotification}, by the event.
+ * resolves, since iOS ignores `tag` and would show both. Reporting it received
+ * and clearing its entry start as it resolves, under `event.waitUntil`, and so
+ * does clearing an answer that arrives after the deadline, which is never
+ * shown.
  */
-export async function fetchPushNotification(
+export async function fetchPushNotificationPayload(
   source: PushNotificationSource,
   event: NotificationPushEvent,
   scope: PushNotificationScope = globalScope(),
-): Promise<FetchedNotification> {
-  const { notification, markShown } = await fetchForPush(source, event, scope);
-  if (markShown !== undefined) shownMarks.set(event, once(markShown));
-  return notification;
+): Promise<NotificationPayload> {
+  const { payload, report } = await fetchForPush(source, event, scope);
+  if (report !== undefined) {
+    const reporting = report().catch(() => undefined);
+    try {
+      event.waitUntil(reporting);
+    } catch {
+      // The event's lifetime already ended; the report runs for as long as the worker does.
+    }
+  }
+  return payload;
 }
 
 /** The app's notification a click names, or `undefined` where its data is not one this library put there. */
@@ -323,8 +320,12 @@ const clickedOf = (data: unknown): { canisterId: Principal; id: bigint } | undef
   }
 };
 
-/** Reports a click on the app's notification to its canister, and ignores any other. */
-async function markOpened(
+/**
+ * Reports a click on the app's notification to its canister, and ignores a
+ * click on any other. A failed report is dropped. Rejects only with
+ * {@link SessionGoneError}, where no session is held.
+ */
+export async function markPushNotificationOpened(
   source: PushNotificationSource,
   event: NotificationClickEvent,
 ): Promise<void> {
@@ -336,21 +337,4 @@ async function markOpened(
   } catch (error) {
     if (error instanceof SessionGoneError) throw error;
   }
-}
-
-/**
- * Marks a push shown, doing what {@link fetchPushNotification} kept for that
- * event, or a click opened. A push it never saw, and a click on any other
- * notification, are ignored; marking twice does it once. Rejects only with
- * {@link SessionGoneError}, where no session is held.
- */
-export async function markPushNotification(
-  source: PushNotificationSource,
-  event: NotificationPushEvent | NotificationClickEvent,
-): Promise<void> {
-  if ('notification' in event) {
-    await markOpened(source, event);
-    return;
-  }
-  await shownMarks.get(event)?.();
 }

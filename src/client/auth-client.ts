@@ -27,10 +27,10 @@ import {
   requestNotificationConsent as sendConsentRequest,
 } from './notification-consent.js';
 import {
-  type FetchedNotification,
-  fetchPushNotification,
-  markPushNotification,
+  fetchPushNotificationPayload,
+  markPushNotificationOpened,
   type NotificationClickEvent,
+  type NotificationPayload,
   type NotificationPushEvent,
   type PushNotificationSource,
 } from './push-notification.js';
@@ -1327,20 +1327,26 @@ export class AuthClient {
   }
 
   /**
-   * Works out what an installed web app's service worker shows for one push.
+   * Works out what an installed web app's service worker shows for one push,
+   * and reports it to Internet Identity and this application's canister.
    *
-   * Call it from the service worker's own `push` listener, with an AuthClient
-   * built with the same options as the page's so it reads the session the page
-   * signed in with. It reads the Internet Identity inbox entry the push names
-   * and fetches the content from this application's canister.
+   * Call it from the service worker's own `push` listener, inside
+   * `event.waitUntil`, with an AuthClient built with the same options as the
+   * page's so it reads the session the page signed in with. It reads the
+   * Internet Identity inbox entry the push names and fetches the content from
+   * this application's canister. Show what it answers; the app's own options go
+   * next to `...payload.options`, which carry the `tag`, and `data` with what the
+   * app's canister sent.
+   *
+   * As it resolves it reports the notification received to the app's canister
+   * and clears the entry at Internet Identity, under `event.waitUntil`, so the
+   * worker stays alive for it. That clear is what answers a repair probe.
    *
    * Where a session is held it always resolves, because iOS requires a
    * notification for every push: to the app's notification, or to a generic one
-   * where the push names no entry, or reading it fails or takes too long. Show
-   * what it answers, then pass the same event to {@link markNotification}, which
-   * records it shown. The `notificationclick` listener is the app's own, and
-   * `options.data` carries what the app's canister sent; pass the click to
-   * {@link markNotification} too, which records it opened.
+   * where the push names no entry, or reading it fails or takes too long. An
+   * answer that arrives after that is never shown; its entry is cleared under
+   * `event.waitUntil` once it arrives.
    *
    * Where no session is held it rejects, and nothing is shown: the rejection
    * fails the push's `waitUntil`, and the next sign-in subscribes again should
@@ -1357,59 +1363,41 @@ export class AuthClient {
    *
    * self.addEventListener('push', (event) => {
    *   event.waitUntil((async () => {
-   *     const notification = await authClient.fetchNotification(event);
-   *     await self.registration.showNotification(notification.title, {
-   *       ...notification.options,
-   *       requireInteraction: true,
-   *     });
-   *     await authClient.markNotification(event);
+   *     const payload = await authClient.fetchNotificationPayload(event);
+   *     await self.registration.showNotification(payload.title, { ...payload.options });
    *   })());
    * });
    */
-  fetchNotification(event: NotificationPushEvent): Promise<FetchedNotification> {
-    return fetchPushNotification(this.#pushNotificationSource(), event);
+  fetchNotificationPayload(event: NotificationPushEvent): Promise<NotificationPayload> {
+    return fetchPushNotificationPayload(this.#pushNotificationSource(), event);
   }
 
   /**
-   * Records what happened to one of this application's notifications in an
-   * installed web app's service worker: shown, for the `push` event
-   * {@link fetchNotification} answered, or opened, for a `notificationclick`.
+   * Reports a click on this application's notification to its canister, as the
+   * session, so the app learns it was opened.
    *
-   * Call it with the push event once `showNotification` resolves. That reports
-   * the notification received to the app's canister and clears its entry at
-   * Internet Identity. Skipping it leaves every push counted unanswered, which
-   * starts a repair of the subscription on the next sign-in.
+   * Call it from the service worker's own `notificationclick` listener, with the
+   * event as it arrived. It reads the canister and id
+   * {@link fetchNotificationPayload} put in `options.data`, and ignores a click
+   * on any other notification, the generic and probe ones included. A report
+   * that fails is dropped. It does not call `event.waitUntil` itself: put it in
+   * the listener's own, after opening the window, which the browser allows only
+   * shortly after the tap.
    *
-   * Call it with the click event in the app's own `notificationclick` listener.
-   * That reports the notification opened to the app's canister.
-   *
-   * A push event {@link fetchNotification} never answered, and a click on a
-   * notification this library did not answer, are ignored. Marking the same
-   * event twice does it once.
-   *
-   * @param event - The `push` or `notificationclick` event, as it arrived.
+   * @param event - The service worker's `notificationclick` event, as it arrived.
    * @throws {SessionGoneError} Where this origin holds no live session.
    * @example
-   * // service-worker.ts, on a push: shown
-   * self.addEventListener('push', (event) => {
+   * // service-worker.ts
+   * self.addEventListener('notificationclick', (event) => {
    *   event.waitUntil((async () => {
-   *     const notification = await authClient.fetchNotification(event);
-   *     await self.registration.showNotification(notification.title, notification.options);
-   *     await authClient.markNotification(event);
+   *     event.notification.close();
+   *     await self.clients.openWindow(event.notification.data.url);
+   *     await authClient.markNotificationOpened(event);
    *   })());
    * });
-   * @example
-   * // service-worker.ts, on a click: opened
-   * self.addEventListener('notificationclick', (event) => {
-   *   event.notification.close();
-   *   const { url } = event.notification.data ?? {};
-   *   event.waitUntil(
-   *     Promise.all([self.clients.openWindow(url ?? '/'), authClient.markNotification(event)]),
-   *   );
-   * });
    */
-  markNotification(event: NotificationPushEvent | NotificationClickEvent): Promise<void> {
-    return markPushNotification(this.#pushNotificationSource(), event);
+  markNotificationOpened(event: NotificationClickEvent): Promise<void> {
+    return markPushNotificationOpened(this.#pushNotificationSource(), event);
   }
 
   /** The session calls a service worker's notification handling is made with. */
@@ -1433,7 +1421,7 @@ export class AuthClient {
    * `granted: true`, and only in an installed web app: iOS asks for notification
    * permission only from a tap in the page itself, so this asks for it first,
    * before anything else is awaited. The service worker has to be registered
-   * already and show each push through {@link fetchNotification}. A push
+   * already and show each push through {@link fetchNotificationPayload}. A push
    * subscription the service worker already holds with Internet Identity's key
    * is reused. A service worker holds one push subscription, so one bound to any
    * other key is unsubscribed and replaced.
