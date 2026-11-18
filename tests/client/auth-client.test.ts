@@ -3285,3 +3285,84 @@ describe('AuthClient re-subscribing an installed app after sign-in', () => {
     });
   });
 });
+
+describe('AuthClient same-device link', () => {
+  const secrets = [
+    '302a300506032b6570032100d1fa89134802051c8b5d4e53c08b87381b87097bca4c4f348611eb8ce6c91809',
+    '4bbff6b476463558d7be318aa342d1a97778d70833038680187950e9e02486c0d1fa89134802051c8b5d4e53c08b87381b87097bca4c4f348611eb8ce6c91809',
+  ];
+
+  async function signedInClient(options: ConstructorParameters<typeof AuthClient>[0] = {}) {
+    const key = Ed25519KeyIdentity.fromJSON(JSON.stringify(secrets));
+    const chain = await createTestDelegation(key, new Date(Date.now() + 24 * 60 * 60 * 1000));
+    const client = track(
+      new AuthClient({
+        credentialStorage: spyStorage({ identity: key, chain }),
+        stateStorage: stateFor(chain),
+        ...options,
+      }),
+    );
+    await client.getIdentity();
+    return client;
+  }
+
+  /** A Home Screen app of Safari whose notification permission is not granted, so loads subscribe nothing. */
+  function safariInstalledApp() {
+    vi.stubGlobal('matchMedia', () => ({ matches: false }));
+    vi.stubGlobal('Notification', { permission: 'default' });
+    Object.defineProperty(navigator, 'standalone', { configurable: true, value: true });
+  }
+
+  afterEach(() => {
+    Reflect.deleteProperty(navigator, 'standalone');
+    vi.restoreAllMocks();
+  });
+
+  it('answers no-other-path without asking Internet Identity outside Safari', async () => {
+    vi.stubGlobal('matchMedia', (query: string) => ({
+      matches: query === '(display-mode: standalone)',
+    }));
+    const create = vi.spyOn(PwaNotifications, 'create');
+    const client = await signedInClient();
+
+    await expect(client.getSameDeviceLinkStatus()).resolves.toBe('no-other-path');
+    expect(create).not.toHaveBeenCalled();
+  });
+
+  it("answers Internet Identity's status in a Home Screen app of Safari", async () => {
+    safariInstalledApp();
+    vi.spyOn(PwaNotifications, 'create').mockResolvedValue({
+      sameDeviceLinkStatus: async () => 'other-path-may-deliver',
+    } as unknown as PwaNotifications);
+    const client = await signedInClient();
+
+    await expect(client.getSameDeviceLinkStatus()).resolves.toBe('other-path-may-deliver');
+  });
+
+  it('refuses to link outside Safari', async () => {
+    vi.stubGlobal('matchMedia', (query: string) => ({
+      matches: query === '(display-mode: standalone)',
+    }));
+    const client = await signedInClient();
+
+    await expect(client.requestSameDeviceLink()).rejects.toThrow(NotificationsUnsupportedError);
+  });
+
+  it("opens the identity provider's link page in Safari once the key is registered", async () => {
+    safariInstalledApp();
+    const prepareSameDeviceLink = vi.fn(async () => undefined);
+    vi.spyOn(PwaNotifications, 'create').mockResolvedValue({
+      prepareSameDeviceLink,
+    } as unknown as PwaNotifications);
+    const location = { href: 'https://app.example/' };
+    const client = await signedInClient({
+      identityProvider: { authorizeUrl: 'https://id.example/authorize', canisterId: II_CANISTER },
+    });
+    vi.stubGlobal('location', location);
+
+    await client.requestSameDeviceLink();
+
+    expect(prepareSameDeviceLink).toHaveBeenCalledTimes(1);
+    expect(location.href).toMatch(/^x-safari-https:\/\/id\.example\/ios-installed-app#key=[\w-]+$/);
+  });
+});

@@ -1,8 +1,10 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   isInstalledApp,
+  isSafariInstalledApp,
   type PwaNotificationService,
   PwaNotifications,
+  prepareSameDeviceLinkUrl,
   sealSubscription,
   subscribeDevice,
 } from '../../src/client/pwa-notifications.ts';
@@ -52,6 +54,31 @@ describe('isInstalledApp', () => {
     vi.stubGlobal('matchMedia', () => ({ matches: false }));
 
     expect(isInstalledApp()).toBe(false);
+  });
+});
+
+describe('isSafariInstalledApp', () => {
+  it('answers no in an installed app of a browser without navigator.standalone', () => {
+    vi.stubGlobal('matchMedia', (query: string) => ({
+      matches: query === '(display-mode: standalone)',
+    }));
+    vi.stubGlobal('navigator', {});
+
+    expect(isSafariInstalledApp()).toBe(false);
+  });
+
+  it('answers no in a Safari tab', () => {
+    vi.stubGlobal('matchMedia', () => ({ matches: false }));
+    vi.stubGlobal('navigator', { standalone: false });
+
+    expect(isSafariInstalledApp()).toBe(false);
+  });
+
+  it('answers yes in a Safari Home Screen app', () => {
+    vi.stubGlobal('matchMedia', () => ({ matches: false }));
+    vi.stubGlobal('navigator', { standalone: true });
+
+    expect(isSafariInstalledApp()).toBe(true);
   });
 });
 
@@ -272,6 +299,77 @@ describe('subscribeDevice', () => {
 
     await expect(subscribeDevice(inbox, registration)).rejects.toThrow(
       'This push endpoint is registered with other keys',
+    );
+  });
+});
+
+describe('same-device link', () => {
+  it.each([
+    [{ Linked: null }, 'linked'],
+    [{ OtherPathMayDeliver: null }, 'other-path-may-deliver'],
+    [{ NoOtherPath: null }, 'no-other-path'],
+  ])('reads %o as %s', async (answer, status) => {
+    const inbox = over(
+      fakeService({ app_get_same_device_link_status: vi.fn(async () => ({ Ok: answer })) }),
+    );
+
+    await expect(inbox.sameDeviceLinkStatus()).resolves.toBe(status);
+  });
+
+  it('registers the public half of the key whose private half the URL carries', async () => {
+    const prepare = vi.fn(async (_: { link_public_key: Uint8Array }) => ({ Ok: null }));
+    const inbox = over(fakeService({ app_prepare_same_device_link: prepare }));
+
+    const url = new URL(await prepareSameDeviceLinkUrl(inbox, 'https://id.example'));
+
+    expect(url.origin + url.pathname).toBe('https://id.example/ios-installed-app');
+    expect(url.search).toBe('');
+    const key = new URLSearchParams(url.hash.slice(1)).get('key') ?? '';
+    const bytes = Uint8Array.from(
+      atob(key.replace(/-/g, '+').replace(/_/g, '/').padEnd(128, '=')),
+      (char) => char.charCodeAt(0),
+    );
+    expect(bytes).toHaveLength(96);
+    const coordinate = (at: number) =>
+      btoa(String.fromCharCode(...bytes.subarray(at * 32, (at + 1) * 32)))
+        .replace(/\+/g, '-')
+        .replace(/\//g, '_')
+        .replace(/=+$/, '');
+    const privateKey = await crypto.subtle.importKey(
+      'jwk',
+      { kty: 'EC', crv: 'P-256', d: coordinate(0), x: coordinate(1), y: coordinate(2) },
+      { name: 'ECDSA', namedCurve: 'P-256' },
+      false,
+      ['sign'],
+    );
+    const registered = await crypto.subtle.importKey(
+      'spki',
+      prepare.mock.calls[0][0].link_public_key as Uint8Array<ArrayBuffer>,
+      { name: 'ECDSA', namedCurve: 'P-256' },
+      false,
+      ['verify'],
+    );
+    const message = new TextEncoder().encode('claim');
+    const signature = await crypto.subtle.sign(
+      { name: 'ECDSA', hash: 'SHA-256' },
+      privateKey,
+      message,
+    );
+
+    await expect(
+      crypto.subtle.verify({ name: 'ECDSA', hash: 'SHA-256' }, registered, signature, message),
+    ).resolves.toBe(true);
+  });
+
+  it('hands out no URL where Internet Identity refuses the key', async () => {
+    const inbox = over(
+      fakeService({
+        app_prepare_same_device_link: vi.fn(async () => ({ Err: { NoSuchSession: null } })),
+      }),
+    );
+
+    await expect(prepareSameDeviceLinkUrl(inbox, 'https://id.example')).rejects.toThrow(
+      SessionGoneError,
     );
   });
 });
