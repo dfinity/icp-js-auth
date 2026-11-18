@@ -424,6 +424,11 @@ describe('same-device link', () => {
 
 describe('repairSubscription', () => {
   const UNANSWERED = { count: 3, first_sent_at_ns: BigInt(1), is_past_limit: true };
+  const REGISTERED = {
+    endpoint: 'https://push.example/1',
+    isPastLimit: true,
+    unansweredSinceNs: BigInt(1),
+  };
 
   async function setUp(statuses: unknown[], probeAnswer: unknown = { Ok: null }) {
     const status = vi.fn();
@@ -450,28 +455,30 @@ describe('repairSubscription', () => {
     );
     const held = await fakeSubscription('https://push.example/1', KEYS.vapid_public_key);
     const fresh = await fakeSubscription('https://push.example/2', KEYS.vapid_public_key);
+    const getSubscription = vi.fn(async (): Promise<typeof held> => held);
     const registration = {
-      pushManager: {
-        getSubscription: vi.fn(async () => held),
-        subscribe: vi.fn(async () => fresh),
-      },
+      pushManager: { getSubscription, subscribe: vi.fn(async () => fresh) },
     } as unknown as ServiceWorkerRegistration;
-    return { inbox, registration, set, probe, held };
+    return { inbox, registration, set, probe, status, held, getSubscription };
   }
 
   const unanswered = {
     Ok: [{ endpoint: 'https://push.example/1', unanswered_pushes: [UNANSWERED] }],
   };
   const answered = { Ok: [{ endpoint: 'https://push.example/1', unanswered_pushes: [] }] };
+  const laterBatch = {
+    Ok: [
+      {
+        endpoint: 'https://push.example/1',
+        unanswered_pushes: [{ ...UNANSWERED, first_sent_at_ns: BigInt(5) }],
+      },
+    ],
+  };
 
   it('reads the unanswered pushes Internet Identity reports', async () => {
     const { inbox } = await setUp([unanswered]);
 
-    await expect(inbox.registeredSubscription()).resolves.toEqual({
-      endpoint: 'https://push.example/1',
-      isPastLimit: true,
-      hasUnansweredPushes: true,
-    });
+    await expect(inbox.registeredSubscription()).resolves.toEqual(REGISTERED);
   });
 
   it('leaves a subscription whose probe the service worker fetched', async () => {
@@ -479,11 +486,24 @@ describe('repairSubscription', () => {
     vi.stubGlobal('Notification', { permission: 'granted' });
     const { inbox, registration, set, probe } = await setUp([unanswered, answered]);
 
-    const repairing = repairSubscription(inbox, registration);
+    const repairing = repairSubscription(inbox, REGISTERED, registration);
     await vi.advanceTimersByTimeAsync(4_000);
     await repairing;
 
     expect(probe).toHaveBeenCalledTimes(1);
+    expect(set).not.toHaveBeenCalled();
+  });
+
+  it('counts the probe fetched where pushes since then started a new batch', async () => {
+    vi.useFakeTimers();
+    vi.stubGlobal('Notification', { permission: 'granted' });
+    const { inbox, registration, set, held } = await setUp(Array(20).fill(laterBatch));
+
+    const repairing = repairSubscription(inbox, REGISTERED, registration);
+    await vi.advanceTimersByTimeAsync(30_000);
+    await repairing;
+
+    expect(held.unsubscribe).not.toHaveBeenCalled();
     expect(set).not.toHaveBeenCalled();
   });
 
@@ -492,7 +512,7 @@ describe('repairSubscription', () => {
     vi.stubGlobal('Notification', { permission: 'granted' });
     const { inbox, registration, set, held } = await setUp(Array(20).fill(unanswered));
 
-    const repairing = repairSubscription(inbox, registration);
+    const repairing = repairSubscription(inbox, REGISTERED, registration);
     await vi.advanceTimersByTimeAsync(28_000);
     expect(held.unsubscribe).not.toHaveBeenCalled();
     await vi.advanceTimersByTimeAsync(2_000);
@@ -505,11 +525,53 @@ describe('repairSubscription', () => {
     ]);
   });
 
+  it('stops at the deadline where a status read stalls', async () => {
+    vi.useFakeTimers();
+    vi.stubGlobal('Notification', { permission: 'granted' });
+    const { inbox, registration, status, held } = await setUp([]);
+    status.mockImplementation(() => new Promise(() => undefined));
+
+    const repairing = repairSubscription(inbox, REGISTERED, registration);
+    await vi.advanceTimersByTimeAsync(30_000);
+    await repairing;
+
+    expect(status).toHaveBeenCalledTimes(1);
+    expect(held.unsubscribe).toHaveBeenCalled();
+  });
+
+  it('stops at the deadline where the probe call stalls', async () => {
+    vi.useFakeTimers();
+    vi.stubGlobal('Notification', { permission: 'granted' });
+    const { inbox, registration, probe, status, held } = await setUp([]);
+    probe.mockImplementation(() => new Promise(() => undefined));
+
+    const repairing = repairSubscription(inbox, REGISTERED, registration);
+    await vi.advanceTimersByTimeAsync(30_000);
+    await repairing;
+
+    expect(status).not.toHaveBeenCalled();
+    expect(held.unsubscribe).toHaveBeenCalled();
+  });
+
+  it('leaves a device subscription another repair already replaced', async () => {
+    vi.stubGlobal('Notification', { permission: 'granted' });
+    const { inbox, registration, set, getSubscription } = await setUp([], {
+      Err: { NotReachable: null },
+    });
+    const replaced = await fakeSubscription('https://push.example/3', KEYS.vapid_public_key);
+    getSubscription.mockResolvedValue(replaced);
+
+    await repairSubscription(inbox, REGISTERED, registration);
+
+    expect(replaced.unsubscribe).not.toHaveBeenCalled();
+    expect(set).not.toHaveBeenCalled();
+  });
+
   it('removes the subscription where the probe cannot reach the device and permission is revoked', async () => {
     vi.stubGlobal('Notification', { permission: 'denied' });
     const { inbox, registration, set } = await setUp([], { Err: { NotReachable: null } });
 
-    await repairSubscription(inbox, registration);
+    await repairSubscription(inbox, REGISTERED, registration);
 
     expect(set).toHaveBeenCalledWith({ subscription: [] });
   });

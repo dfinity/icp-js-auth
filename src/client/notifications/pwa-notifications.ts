@@ -336,8 +336,11 @@ export interface RegisteredSubscription {
   endpoint: string;
   /** Whether pushes went unanswered long enough that this subscription is worth a probe. */
   isPastLimit: boolean;
-  /** Whether any push sent through it has not been followed by a fetch yet. */
-  hasUnansweredPushes: boolean;
+  /**
+   * When the first push not followed by a fetch was sent, in nanoseconds since
+   * the epoch, or `undefined` where every push was fetched.
+   */
+  unansweredSinceNs?: bigint;
 }
 
 /** What a wake-up names: an app's notification, or something Internet Identity says itself. */
@@ -429,7 +432,7 @@ export class PwaNotifications {
     return {
       endpoint: status.endpoint,
       isPastLimit: unanswered?.is_past_limit === true,
-      hasUnansweredPushes: unanswered !== undefined,
+      unansweredSinceNs: unanswered?.first_sent_at_ns,
     };
   }
 
@@ -710,7 +713,10 @@ export async function saveVapidKey(vapidPublicKey: Uint8Array): Promise<void> {
   await db.set(VAPID_KEY, vapidPublicKey);
 }
 
-/** How long a probe has to be fetched by the service worker before its path counts as broken. */
+/**
+ * How long a probe, from the probe call to the last status read, may take
+ * before its path counts as broken.
+ */
 const PROBE_DEADLINE_MS = 30_000;
 
 /** How often Internet Identity is asked whether the probe was fetched. */
@@ -718,37 +724,62 @@ const PROBE_POLL_MS = 2_000;
 
 /**
  * Probes the subscription of the session behind `inbox`, and answers whether
- * the service worker fetched the probe before {@link PROBE_DEADLINE_MS}: its
- * remove resets the subscription's unanswered pushes.
+ * the batch of unanswered pushes that started at `batchSentAtNs` was fetched
+ * within {@link PROBE_DEADLINE_MS}. A fetch resets the batch, so a batch that
+ * is gone or started later counts, whatever pushes arrived since.
  */
-async function probeAnswered(inbox: PwaNotifications): Promise<boolean> {
-  if (!(await inbox.probe())) return false;
-  const deadline = Date.now() + PROBE_DEADLINE_MS;
-  while (Date.now() < deadline) {
-    await wait(PROBE_POLL_MS);
-    const registered = await inbox.registeredSubscription();
-    if (registered === undefined) return false;
-    if (!registered.hasUnansweredPushes) return true;
+async function probeAnswered(inbox: PwaNotifications, batchSentAtNs: bigint): Promise<boolean> {
+  let expired = false;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const deadline = new Promise<false>((resolve) => {
+    timer = setTimeout(() => {
+      expired = true;
+      resolve(false);
+    }, PROBE_DEADLINE_MS);
+  });
+  const polling = (async () => {
+    if (!(await inbox.probe())) return false;
+    while (!expired) {
+      await wait(PROBE_POLL_MS);
+      if (expired) return false;
+      const registered = await inbox.registeredSubscription();
+      if (registered === undefined) return false;
+      const since = registered.unansweredSinceNs;
+      if (since === undefined || since > batchSentAtNs) return true;
+    }
+    return false;
+  })();
+  // A call still pending at the deadline settles later, with nobody to report to.
+  polling.catch(() => undefined);
+  try {
+    return await Promise.race([polling, deadline]);
+  } finally {
+    clearTimeout(timer);
   }
-  return false;
 }
 
 /**
- * Probes the subscription registered for the session behind `inbox`, and
- * repairs it where the service worker does not fetch the probe in time: with a
- * fresh endpoint where notification permission is granted, and by removing it
- * otherwise.
+ * Probes `registered`, the subscription Internet Identity holds for the session
+ * behind `inbox`, and repairs it where the service worker does not fetch the
+ * probe in time: with a fresh endpoint where notification permission is
+ * granted, and by removing it otherwise.
+ *
+ * A device subscription already replaced since the probe, by a repair in
+ * another tab, is left as it is.
  */
 export async function repairSubscription(
   inbox: PwaNotifications,
+  registered: RegisteredSubscription,
   registration: ServiceWorkerRegistration | undefined,
 ): Promise<void> {
-  if (await probeAnswered(inbox)) return;
+  if (await probeAnswered(inbox, registered.unansweredSinceNs ?? BigInt(0))) return;
   if (globalThis.Notification?.permission !== 'granted' || registration === undefined) {
     await inbox.set(null);
     return;
   }
-  await subscribeFresh(inbox, registration, await registration.pushManager.getSubscription());
+  const held = await registration.pushManager.getSubscription();
+  if (held !== null && held.endpoint !== registered.endpoint) return;
+  await subscribeFresh(inbox, registration, held);
 }
 
 /** Internet Identity's page that claims a same-device link from Safari. */
