@@ -3373,10 +3373,12 @@ describe('AuthClient re-subscribing an installed app after sign-in', () => {
 
     it('repairs one subscription at a time across clients sharing the origin', async () => {
       installedApp('granted');
-      const { probe } = fakeCalls(true, 'https://push.example/1', {
+      const { probe, set } = fakeCalls(true, 'https://push.example/1', {
         isPastLimit: true,
         isReachable: false,
       });
+      // Internet Identity keeps the endpoint both clients probe, so each of them probes it.
+      set.mockImplementation(async () => undefined);
       let running = 0;
       let most = 0;
       probe.mockImplementation(async () => {
@@ -3444,6 +3446,19 @@ describe('AuthClient re-subscribing an installed app after sign-in', () => {
       await vi.waitFor(() => expect(set).toHaveBeenCalled());
       expect(set.mock.calls[0]).toEqual([null]);
       expect(subscribe).not.toHaveBeenCalled();
+    });
+
+    it('registers the endpoint this device holds, without a probe, where Internet Identity reports another past the limit', async () => {
+      installedApp('granted');
+      const { probe, set } = fakeCalls(true, 'https://push.example/old', { isPastLimit: true });
+
+      await restoredClient();
+
+      await vi.waitFor(() => expect(set).toHaveBeenCalledTimes(1));
+      expect(set.mock.calls[0]).toEqual([
+        expect.objectContaining({ endpoint: 'https://push.example/1' }),
+      ]);
+      expect(probe).not.toHaveBeenCalled();
     });
 
     it('asks Internet Identity nothing outside an installed app', async () => {
