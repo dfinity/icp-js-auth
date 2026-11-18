@@ -317,6 +317,18 @@ describe('same-device link', () => {
     await expect(inbox.sameDeviceLinkStatus()).resolves.toBe(status);
   });
 
+  it('refuses a status it has no arm for, rather than reading it as nothing to link', async () => {
+    const inbox = over(
+      fakeService({
+        app_get_same_device_link_status: vi.fn(async () => ({
+          Ok: { Unknown: null } as unknown as { Linked: null },
+        })),
+      }),
+    );
+
+    await expect(inbox.sameDeviceLinkStatus()).rejects.toThrow('unknown link status');
+  });
+
   it('registers the public half of the key whose private half the URL carries', async () => {
     const prepare = vi.fn(async (_: { link_public_key: Uint8Array }) => ({ Ok: null }));
     const inbox = over(fakeService({ app_prepare_same_device_link: prepare }));
