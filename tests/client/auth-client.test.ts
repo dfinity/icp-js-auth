@@ -3495,6 +3495,25 @@ describe('AuthClient re-subscribing an installed app after sign-in', () => {
       expect(probe).not.toHaveBeenCalled();
     });
 
+    it('registers a fresh endpoint where Internet Identity drops the subscription during the probe', async () => {
+      const { subscription } = installedApp('granted');
+      const { set, registeredSubscription, status } = fakeCalls(true, 'https://push.example/1', {
+        isPastLimit: true,
+      });
+      const pastLimit = await registeredSubscription();
+      registeredSubscription.mockReset();
+      registeredSubscription.mockResolvedValueOnce(pastLimit).mockResolvedValue(undefined);
+
+      await restoredClient();
+
+      await vi.waitFor(() => expect(set).toHaveBeenCalled(), { timeout: 4_000 });
+      expect(status).toHaveBeenCalled();
+      expect(subscription.unsubscribe).toHaveBeenCalled();
+      expect(set.mock.calls[0]).toEqual([
+        expect.objectContaining({ endpoint: 'https://push.example/fresh' }),
+      ]);
+    });
+
     it('asks Internet Identity nothing outside an installed app', async () => {
       installedApp('granted');
       vi.stubGlobal('matchMedia', () => ({ matches: false }));

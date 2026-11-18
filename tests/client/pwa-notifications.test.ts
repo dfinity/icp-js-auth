@@ -428,14 +428,28 @@ describe('repairSubscription', () => {
   }
 
   const unanswered = {
-    Ok: [{ endpoint: 'https://push.example/1', unanswered_pushes: [UNANSWERED] }],
+    Ok: [
+      { endpoint: 'https://push.example/1', unanswered_pushes: [UNANSWERED], probe_sent_at_ns: [] },
+    ],
   };
-  const answered = { Ok: [{ endpoint: 'https://push.example/1', unanswered_pushes: [] }] };
+  const answered = {
+    Ok: [{ endpoint: 'https://push.example/1', unanswered_pushes: [], probe_sent_at_ns: [] }],
+  };
+  const outstanding = {
+    Ok: [
+      {
+        endpoint: 'https://push.example/1',
+        unanswered_pushes: [],
+        probe_sent_at_ns: [BigInt(9)],
+      },
+    ],
+  };
   const laterBatch = {
     Ok: [
       {
         endpoint: 'https://push.example/1',
         unanswered_pushes: [{ ...UNANSWERED, first_sent_at_ns: BigInt(5) }],
+        probe_sent_at_ns: [],
       },
     ],
   };
@@ -468,6 +482,32 @@ describe('repairSubscription', () => {
     await vi.advanceTimersByTimeAsync(30_000);
     await repairing;
 
+    expect(held.unsubscribe).not.toHaveBeenCalled();
+    expect(set).not.toHaveBeenCalled();
+  });
+
+  it('waits out a probe Internet Identity still reports outstanding, whatever the count', async () => {
+    vi.useFakeTimers();
+    vi.stubGlobal('Notification', { permission: 'granted' });
+    const { inbox, registration, set, held } = await setUp(Array(20).fill(outstanding));
+
+    const repairing = repairSubscription(inbox, REGISTERED, registration);
+    await vi.advanceTimersByTimeAsync(30_000);
+    await repairing;
+
+    expect(held.unsubscribe).toHaveBeenCalled();
+    expect(set).toHaveBeenCalledTimes(1);
+  });
+
+  it('reports a subscription Internet Identity dropped during the probe as gone, not fetched', async () => {
+    vi.useFakeTimers();
+    vi.stubGlobal('Notification', { permission: 'granted' });
+    const { inbox, registration, set, held } = await setUp([{ Ok: [] }]);
+
+    const repairing = repairSubscription(inbox, REGISTERED, registration);
+    await vi.advanceTimersByTimeAsync(2_000);
+
+    await expect(repairing).resolves.toBe('gone');
     expect(held.unsubscribe).not.toHaveBeenCalled();
     expect(set).not.toHaveBeenCalled();
   });

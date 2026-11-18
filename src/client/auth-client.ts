@@ -40,6 +40,7 @@ import {
   PwaNotifications,
   prepareSameDeviceLinkUrl,
   repairSubscription,
+  resubscribeDevice,
   type SameDeviceLinkStatus,
   subscribeDevice,
 } from './pwa-notifications.js';
@@ -1842,7 +1843,18 @@ export class AuthClient {
       registered?.isPastLimit === true &&
       (!canSubscribe || held?.endpoint === registered.endpoint)
     ) {
-      return { repairing: repairSubscription(inbox, registered, registration) };
+      return {
+        repairing: (async () => {
+          if ((await repairSubscription(inbox, registered, registration)) !== 'gone') return;
+          // Dropped after its push service refused the endpoint, so a fresh one is registered.
+          if (globalThis.Notification?.permission !== 'granted' || registration === undefined) {
+            return;
+          }
+          const consent = await NotificationConsent.create(options);
+          if (!(await consent.status()).granted) return;
+          await resubscribeDevice(inbox, registration);
+        })(),
+      };
     }
     if (!canSubscribe) return;
     if (held !== null && held.endpoint === registered?.endpoint) return;
