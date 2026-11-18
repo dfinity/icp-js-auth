@@ -408,6 +408,9 @@ export class AuthClient {
   #disposed = false;
   // Set while a further restore is pending, so a burst of changes is one pass.
   #restoreQueued = false;
+  // One subscribe at a time: each prepare replaces the key the one before it
+  // handed out, so two at once would spend each other's.
+  #subscribing: Promise<void> = Promise.resolve();
   // What `getStatus` answers with, replaced only when the record changes.
   #status: SessionStatus;
   readonly #listeners = new Set<() => void>();
@@ -1090,7 +1093,9 @@ export class AuthClient {
       // Awaited only before navigating away, which would abandon it. Otherwise it
       // is several update calls the user is not waiting for. A failure never fails
       // signIn().
-      const resubscribing = this.#resubscribeAfterSignIn(key, sessionChain).catch(() => undefined);
+      const resubscribing = this.#subscribeWhereUnregistered(key, sessionChain).catch(
+        () => undefined,
+      );
 
       // Best-effort — the user is already signed in, so a cleanup failure must not
       // fail signIn(), and the next ceremony overwrites what is left behind.
@@ -1580,10 +1585,19 @@ export class AuthClient {
 
   /**
    * Registers this installed app's push subscription for the session a sign-in
-   * just created, where the user already granted notification permission and
-   * this application's consent. Asks the user for nothing.
+   * created or a load restored, where the user already granted notification
+   * permission and this application's consent, and Internet Identity does not
+   * already deliver to this device's endpoint for it. Asks the user for nothing.
    */
-  async #resubscribeAfterSignIn(key: SignIdentity, sessionChain: DelegationChain): Promise<void> {
+  #subscribeWhereUnregistered(key: SignIdentity, sessionChain: DelegationChain): Promise<void> {
+    const next = this.#subscribing
+      .catch(() => undefined)
+      .then(() => this.#subscribeIfUnregistered(key, sessionChain));
+    this.#subscribing = next;
+    return next;
+  }
+
+  async #subscribeIfUnregistered(key: SignIdentity, sessionChain: DelegationChain): Promise<void> {
     if (!isInstalledApp()) return;
     if (globalThis.Notification?.permission !== 'granted') return;
     const registration = await globalThis.navigator?.serviceWorker?.getRegistration();
@@ -1595,9 +1609,12 @@ export class AuthClient {
       canisterId: this.#canisterId,
       agentOptions: this.#options.agentOptions,
     };
+    const inbox = await PwaNotifications.create(options);
+    const held = await registration.pushManager.getSubscription();
+    if (held !== null && held.endpoint === (await inbox.registeredEndpoint())) return;
     const consent = await NotificationConsent.create(options);
     if (!(await consent.status()).granted) return;
-    await subscribeDevice(await PwaNotifications.create(options), registration);
+    await subscribeDevice(inbox, registration);
   }
 
   /**
@@ -1901,6 +1918,9 @@ export class AuthClient {
       return;
     }
     this.#installIdentity(identity);
+    // Not awaited: a load must not wait on update calls, and a failure is left
+    // to the next load or sign-in.
+    this.#subscribeWhereUnregistered(key, chain).catch(() => undefined);
   }
 
   /**
