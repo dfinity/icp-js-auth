@@ -1528,6 +1528,10 @@ export class AuthClient {
    * application's notifications to both. Offer {@link requestSameDeviceLink}
    * where this answers `other-path-may-deliver`.
    *
+   * Check it where notifications are turned on: right after
+   * {@link subscribeToNotifications} answers `granted`, and wherever the app
+   * shows its notification settings.
+   *
    * Asks Internet Identity only in an installed web app of Safari, the one
    * browser whose installed apps keep storage of their own. Elsewhere it answers
    * `no-other-path`.
@@ -1548,8 +1552,11 @@ export class AuthClient {
    *
    * Registers a one-shot key with Internet Identity and opens its page in
    * Safari, which claims the link with Safari's sign-in. The page leaves the app
-   * for Safari, so call it from a tap, and read
-   * {@link getSameDeviceLinkStatus} again once the user returns.
+   * for Safari, so call it from a tap. Offer it where
+   * {@link getSameDeviceLinkStatus} answers `other-path-may-deliver`, which is
+   * checked where notifications are turned on: right after
+   * {@link subscribeToNotifications} answers `granted`, and wherever the app
+   * shows its notification settings.
    *
    * @throws {NotificationsUnsupportedError} Outside an installed web app of Safari.
    * @throws {SessionGoneError} Where this origin holds no live session.

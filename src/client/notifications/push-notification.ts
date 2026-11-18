@@ -14,6 +14,9 @@ const TAG_PREFIX = 'ii-notification';
 /** The tag of the notification answered where the app's own cannot be. */
 const GENERIC_TAG = TAG_PREFIX;
 
+/** The tag of Internet Identity's probe notification, so a later probe replaces an earlier one. */
+const PROBE_TAG = `${GENERIC_TAG}:probe`;
+
 /** The part of a service worker's `push` event {@link AuthClient.fetchNotificationPayload} reads. */
 export interface NotificationPushEvent {
   readonly data: { json(): unknown } | null;
@@ -194,13 +197,25 @@ async function resolvePush(
   const clear = (notShown?: NotShownReason): Promise<void> =>
     inbox.remove(inboxNotificationId, notShown).catch(() => undefined);
 
-  const entry = await inbox.get(inboxNotificationId).catch((error: unknown) => {
+  const found = await inbox.get(inboxNotificationId).catch((error: unknown) => {
     if (error instanceof SessionGoneError) throw error;
     return null;
   });
+  const entry = found?.notification;
+  // Internet Identity's probe, which is shown and cleared like any other, so the clear answers it.
+  if (entry === undefined && found?.event !== undefined && 'NotificationsOn' in found.event) {
+    return {
+      shown: {
+        title: 'All set',
+        options: { body: 'Notifications will show up here.', tag: PROBE_TAG },
+      },
+      closeTag: PROBE_TAG,
+      clear,
+    };
+  }
   // Unreadable, expired or already taken. Cleared anyway, so an expired entry is
   // counted as one asked for too late.
-  if (entry === null || entry === undefined) return { clear };
+  if (entry === undefined) return { clear };
 
   const tag = tagOf(entry.canister_id, entry.id);
   let app: AppNotificationService;
