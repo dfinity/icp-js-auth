@@ -3412,6 +3412,40 @@ describe('AuthClient re-subscribing an installed app after sign-in', () => {
       expect(most).toBe(1);
     });
 
+    it('navigates to a returnTo without waiting for a repair the load started', async () => {
+      installedApp('granted');
+      const { probe } = fakeCalls(true, 'https://push.example/1', { isPastLimit: true });
+      const replace = vi.fn();
+      vi.stubGlobal('location', {
+        replace,
+        reload: vi.fn(),
+        href: 'http://localhost/sign-in',
+        origin: 'http://localhost',
+      });
+
+      const client = await restoredClient();
+      // Internet Identity keeps reporting the probe unfetched, so the repair runs to its deadline.
+      await vi.waitFor(() => expect(probe).toHaveBeenCalled());
+      handleSignIn(FakeTransport.last());
+      await client.signIn({ returnTo: '/app' });
+
+      expect(replace).toHaveBeenCalledWith('http://localhost/app');
+    });
+
+    it('removes a subscription the probe cannot reach where permission was reset to ask', async () => {
+      const { subscribe } = installedApp('default');
+      const { set } = fakeCalls(true, 'https://push.example/1', {
+        isPastLimit: true,
+        isReachable: false,
+      });
+
+      await restoredClient();
+
+      await vi.waitFor(() => expect(set).toHaveBeenCalled());
+      expect(set.mock.calls[0]).toEqual([null]);
+      expect(subscribe).not.toHaveBeenCalled();
+    });
+
     it('asks Internet Identity nothing outside an installed app', async () => {
       installedApp('granted');
       vi.stubGlobal('matchMedia', () => ({ matches: false }));
