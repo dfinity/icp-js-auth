@@ -1741,9 +1741,17 @@ export class AuthClient {
    * its limit, probes it first, and where the probe is not fetched in time,
    * subscribes again with a fresh endpoint, or removes the subscription where
    * permission was revoked.
+   *
+   * Resolves once the subscribe part is done. A probe runs on in the
+   * background, still ahead of the next subscribe, and a page left meanwhile
+   * probes again on its next load.
    */
   #subscribeWhereUnregistered(key: SignIdentity, sessionChain: DelegationChain): Promise<void> {
-    return this.#queueSubscribe(() => this.#subscribeIfUnregistered(key, sessionChain));
+    const subscribed = this.#subscribing
+      .catch(() => undefined)
+      .then(() => this.#subscribeIfUnregistered(key, sessionChain));
+    this.#subscribing = subscribed.then((step) => step?.repairing).catch(() => undefined);
+    return subscribed.then(() => undefined);
   }
 
   /** Runs `work` once every subscribe queued before it has settled. */
@@ -1753,7 +1761,11 @@ export class AuthClient {
     return next;
   }
 
-  async #subscribeIfUnregistered(key: SignIdentity, sessionChain: DelegationChain): Promise<void> {
+  /** Wrapped, so the repair is handed back running rather than awaited. */
+  async #subscribeIfUnregistered(
+    key: SignIdentity,
+    sessionChain: DelegationChain,
+  ): Promise<{ repairing: Promise<void> } | undefined> {
     if (!isInstalledApp()) return;
     // Denied still asks: a subscription registered before the user revoked it is removed.
     const permission = globalThis.Notification?.permission;
@@ -1769,8 +1781,7 @@ export class AuthClient {
     const inbox = await PwaNotifications.create(options);
     const registered = await inbox.registeredSubscription();
     if (registered?.isPastLimit === true) {
-      await repairSubscription(inbox, registration);
-      return;
+      return { repairing: repairSubscription(inbox, registration) };
     }
     if (permission !== 'granted' || registration === undefined) return;
     const held = await registration.pushManager.getSubscription();

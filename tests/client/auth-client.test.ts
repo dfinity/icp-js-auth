@@ -3268,6 +3268,27 @@ describe('AuthClient re-subscribing an installed app after sign-in', () => {
     ]);
   });
 
+  it('navigates to a returnTo without waiting for a probe', async () => {
+    installedApp('granted');
+    const { probe, set } = fakeCalls(true, 'https://push.example/1', { isPastLimit: true });
+    const replace = vi.fn();
+    vi.stubGlobal('location', {
+      replace,
+      reload: vi.fn(),
+      href: 'http://localhost/sign-in',
+      origin: 'http://localhost',
+    });
+    const client = track(new AuthClient());
+    handleSignIn(FakeTransport.last());
+
+    // Internet Identity keeps reporting the probe unfetched, so its poll runs to the deadline.
+    await client.signIn({ returnTo: '/app' });
+
+    expect(probe).toHaveBeenCalled();
+    expect(replace).toHaveBeenCalledWith('http://localhost/app');
+    expect(set).not.toHaveBeenCalled();
+  });
+
   it('removes the subscription where the probe goes unanswered and permission was revoked', async () => {
     const { subscribe } = installedApp('denied');
     const { set } = fakeCalls(true, 'https://push.example/1', {
