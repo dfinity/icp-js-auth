@@ -21,11 +21,13 @@ export function isInstalledApp(): boolean {
 /** Why the service worker could not show a notification. */
 export type NotShownReason = { PayloadUnreachable: null } | { PayloadRejected: null };
 
+/** Why Internet Identity handed out no subscription keys. */
 type PrepareError =
   | { NoSuchSession: null }
   | { NotificationsNotAllowed: null }
   | { InternalCanisterError: string };
 
+/** Why Internet Identity did not register or remove a subscription. */
 type SubscriptionError =
   | { NoSuchSession: null }
   | { NotificationsNotAllowed: null }
@@ -33,8 +35,10 @@ type SubscriptionError =
   | { EndpointInUse: null }
   | { InternalCanisterError: string };
 
+/** Why Internet Identity could not answer an inbox or status call. */
 type NotificationError = { NoSuchSession: null } | { InternalCanisterError: string };
 
+/** A push subscription as Internet Identity registers it, with `auth` sealed to its transport key. */
 interface SealedSubscription {
   endpoint: string;
   p256dh: Uint8Array;
@@ -195,6 +199,9 @@ const unwrapNotification = <T>(
   throw new Error(`${failed}${detail === '' ? '' : `: ${detail}`}`);
 };
 
+/** How much longer each ask after the first waits than the one before it. */
+const PREPARE_RETRY_STEP_MS = 1_000;
+
 /** Enough asks to outlast Internet Identity fetching its VAPID key or drawing randomness. */
 const PREPARE_ATTEMPTS = 4;
 
@@ -238,7 +245,7 @@ export class PwaNotifications {
    */
   async prepare(): Promise<SubscriptionKeys> {
     for (let attempt = 0; attempt < PREPARE_ATTEMPTS; attempt++) {
-      if (attempt > 0) await wait(attempt * 1_000);
+      if (attempt > 0) await wait(attempt * PREPARE_RETRY_STEP_MS);
       const response = await this.#service.app_prepare_pwa_webpush_subscription();
       if ('Pending' in response) continue;
       const keys = unwrapSubscription(response);
@@ -298,9 +305,26 @@ export class PwaNotifications {
 const bytesOf = (view: Uint8Array): ArrayBuffer =>
   view.buffer.slice(view.byteOffset, view.byteOffset + view.byteLength) as ArrayBuffer;
 
+/**
+ * What the HKDF info starts with. Must match Internet Identity's transport
+ * module, which is the source of truth: https://github.com/dfinity/internet-identity/blob/main/src/internet_identity/src/notifications/webpush/transport.rs
+ */
 const INFO_PREFIX = new TextEncoder().encode('II webpush transport\0');
+
+/** The HKDF label the AES key is derived under, as in Internet Identity's transport module: https://github.com/dfinity/internet-identity/blob/main/src/internet_identity/src/notifications/webpush/transport.rs */
 const KEY_LABEL = new TextEncoder().encode('key\0');
+
+/** The HKDF label the AES-GCM nonce is derived under, as in Internet Identity's transport module: https://github.com/dfinity/internet-identity/blob/main/src/internet_identity/src/notifications/webpush/transport.rs */
 const IV_LABEL = new TextEncoder().encode('iv\0');
+
+/** The bits of an ECDH P-256 shared secret. */
+const SHARED_SECRET_BITS = 256;
+
+/** The bits of an AES-128-GCM key. */
+const AES_KEY_BITS = 128;
+
+/** The bits of an AES-GCM nonce. */
+const AES_IV_BITS = 96;
 
 const concat = (...parts: Uint8Array[]): Uint8Array => {
   const out = new Uint8Array(parts.reduce((length, part) => length + part.length, 0));
@@ -344,7 +368,7 @@ export async function sealSubscription(
   const shared = await crypto.subtle.deriveBits(
     { name: 'ECDH', public: theirs },
     browser.privateKey,
-    256,
+    SHARED_SECRET_BITS,
   );
   const extracted = await crypto.subtle.importKey('raw', shared, 'HKDF', false, ['deriveBits']);
 
@@ -362,12 +386,16 @@ export async function sealSubscription(
       bits,
     );
 
-  const key = await crypto.subtle.importKey('raw', await derive(KEY_LABEL, 128), 'AES-GCM', false, [
-    'encrypt',
-  ]);
+  const key = await crypto.subtle.importKey(
+    'raw',
+    await derive(KEY_LABEL, AES_KEY_BITS),
+    'AES-GCM',
+    false,
+    ['encrypt'],
+  );
   const sealedAuth = new Uint8Array(
     await crypto.subtle.encrypt(
-      { name: 'AES-GCM', iv: await derive(IV_LABEL, 96) },
+      { name: 'AES-GCM', iv: await derive(IV_LABEL, AES_IV_BITS) },
       key,
       authSecret,
     ),

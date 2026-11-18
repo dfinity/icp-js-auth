@@ -189,6 +189,23 @@ describe('handleNotifications', () => {
     expect(openWindow).toHaveBeenCalledWith('https://app.example.com/app/');
   });
 
+  it('compares a window to the worker scope by its parsed path', async () => {
+    const { scope, click, openWindow, matchAll } = fakeScope();
+    const focus = vi.fn();
+    matchAll.mockResolvedValue([
+      { url: 'https://app.example.com/app/../admin', focus },
+    ] as unknown as never[]);
+    handleNotifications(
+      fakeClient(async () => over(fakeService({}))),
+      scope,
+    );
+
+    await click(null);
+
+    expect(focus).not.toHaveBeenCalled();
+    expect(openWindow).toHaveBeenCalledWith('https://app.example.com/app/');
+  });
+
   it('reports a click on a notification without a url as opened, after opening the app', async () => {
     const { scope, click, openWindow } = fakeScope();
     const getIdentity = vi.fn(async () => {

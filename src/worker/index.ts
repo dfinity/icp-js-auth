@@ -21,6 +21,7 @@ import { type NotShownReason, type PwaAccess, pwaAccess } from '../client/pwa-no
  */
 const DISPLAY_DEADLINE_MS = 8_000;
 
+/** The tag of the notification shown where the app's own cannot be, and the prefix of every tag shown here. */
 const GENERIC_TAG = 'ii-notification';
 
 /** What a push event carries, of the service worker types the DOM library lacks. */
@@ -29,11 +30,13 @@ interface PushEvent extends Event {
   waitUntil(work: Promise<unknown>): void;
 }
 
+/** What a notification click carries, of the service worker types the DOM library lacks. */
 interface NotificationClickEvent extends Event {
   readonly notification: Notification;
   waitUntil(work: Promise<unknown>): void;
 }
 
+/** A window the service worker controls or can see, of the types the DOM library lacks. */
 interface WindowClient {
   readonly url: string;
   focus(): Promise<WindowClient>;
@@ -61,12 +64,14 @@ interface ShownData {
   url?: string;
 }
 
+/** A notification's text, as the app's canister answers for it. */
 interface NotificationContent {
   title: string;
   body: string;
   url: [] | [string];
 }
 
+/** The calls this module makes on the dapp's canister. */
 interface AppNotificationService {
   _internet_identity_notification_content(id: bigint): Promise<[] | [NotificationContent]>;
   _internet_identity_notification_received(id: bigint): Promise<void>;
@@ -272,10 +277,21 @@ const openAt = async (scope: NotificationWorkerScope, url: string): Promise<void
   await scope.clients.openWindow(url);
 };
 
+/** Whether `url` is on the scope's origin and under its path. */
+const isWithinScope = (url: string, scope: string): boolean => {
+  try {
+    const parsed = new URL(url);
+    const within = new URL(scope);
+    return parsed.origin === within.origin && parsed.pathname.startsWith(within.pathname);
+  } catch {
+    return false;
+  }
+};
+
 /** Focuses a window within the worker's scope, or opens the scope. */
 const openTheApp = async (scope: NotificationWorkerScope): Promise<void> => {
   const windows = await scope.clients.matchAll({ type: 'window', includeUncontrolled: true });
-  const open = windows.find((client) => client.url.startsWith(scope.registration.scope));
+  const open = windows.find((client) => isWithinScope(client.url, scope.registration.scope));
   if (open !== undefined) {
     await open.focus();
     return;
