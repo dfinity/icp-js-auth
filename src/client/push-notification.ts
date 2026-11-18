@@ -1,6 +1,6 @@
 import { Actor, HttpAgent, type Identity, RejectError } from '@icp-sdk/core/agent';
 import { IDL } from '@icp-sdk/core/candid';
-import type { Principal } from '@icp-sdk/core/principal';
+import { Principal } from '@icp-sdk/core/principal';
 import type { NotificationConsentOptions } from './notification-consent.js';
 import type { NotShownReason, PwaNotifications } from './pwa-notifications.js';
 import { SessionGoneError } from './session/app-delegation-source.js';
@@ -44,6 +44,11 @@ export interface FetchedNotification {
   acknowledge(): Promise<void>;
 }
 
+/** The part of a service worker's `notificationclick` event {@link AuthClient.reportNotificationOpened} reads. */
+export interface NotificationClickEvent {
+  readonly notification: { readonly data: unknown };
+}
+
 /** What {@link fetchPushNotification} reads the session and the app's canister through. */
 export interface PushNotificationSource {
   /** The inbox calls, as the session this origin holds. */
@@ -74,6 +79,7 @@ interface NotificationContent {
 interface AppNotificationService {
   _internet_identity_notification_content(id: bigint): Promise<[] | [NotificationContent]>;
   _internet_identity_notification_received(id: bigint): Promise<void>;
+  _internet_identity_notification_opened(id: bigint): Promise<void>;
 }
 
 /** The identity-notification library's endpoints on the app's canister. */
@@ -85,6 +91,7 @@ const appIdlFactory: IDL.InterfaceFactory = () =>
       ['query'],
     ),
     _internet_identity_notification_received: IDL.Func([IDL.Nat64], [], []),
+    _internet_identity_notification_opened: IDL.Func([IDL.Nat64], [], []),
   });
 
 const appActor = async (
@@ -289,5 +296,38 @@ export async function fetchPushNotification(
   } catch (error) {
     if (error instanceof SessionGoneError) throw error;
     return generic(scope);
+  }
+}
+
+/** The app's notification a click names, or `undefined` where its data is not one this library put there. */
+const clickedOf = (data: unknown): { canisterId: Principal; id: bigint } | undefined => {
+  if (data === null || typeof data !== 'object') return undefined;
+  const { canisterId, id } = data as Record<string, unknown>;
+  if (typeof canisterId !== 'string' || typeof id !== 'string' || !/^\d+$/.test(id)) {
+    return undefined;
+  }
+  try {
+    return { canisterId: Principal.fromText(canisterId), id: BigInt(id) };
+  } catch {
+    return undefined;
+  }
+};
+
+/**
+ * Reports a click on the app's notification to the app's canister. A click on
+ * any other notification is ignored, and a failed report is dropped. Rejects
+ * only with {@link SessionGoneError}, where no session is held.
+ */
+export async function reportPushNotificationOpened(
+  source: PushNotificationSource,
+  event: NotificationClickEvent,
+): Promise<void> {
+  const clicked = clickedOf(event.notification?.data);
+  if (clicked === undefined) return;
+  try {
+    const app = await appActor(source, clicked.canisterId);
+    await app._internet_identity_notification_opened(clicked.id);
+  } catch (error) {
+    if (error instanceof SessionGoneError) throw error;
   }
 }

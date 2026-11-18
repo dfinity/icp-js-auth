@@ -29,7 +29,10 @@ import {
 import {
   type FetchedNotification,
   fetchPushNotification,
+  type NotificationClickEvent,
   type NotificationPushEvent,
+  type PushNotificationSource,
+  reportPushNotificationOpened,
 } from './push-notification.js';
 import { isInstalledApp, PwaNotifications, subscribeDevice } from './pwa-notifications.js';
 import {
@@ -1336,7 +1339,8 @@ export class AuthClient {
    * where the push names no entry, or reading it fails or takes too long. Show
    * what it answers, then call `acknowledge()`, which reports the notification
    * received and clears its entry. The `notificationclick` listener is the app's
-   * own, and `options.data` carries what the app's canister sent.
+   * own, and `options.data` carries what the app's canister sent; report a click
+   * with {@link reportNotificationOpened}.
    *
    * Where no session is held it rejects, and nothing is shown: the rejection
    * fails the push's `waitUntil`, and the next sign-in subscribes again should
@@ -1363,14 +1367,48 @@ export class AuthClient {
    * });
    */
   fetchNotification(event: NotificationPushEvent): Promise<FetchedNotification> {
-    return fetchPushNotification(
-      {
-        inbox: () => this.#pwaNotifications(),
-        identity: () => this.getIdentity(),
-        agentOptions: this.#options.agentOptions,
+    return fetchPushNotification(this.#pushNotificationSource(), event);
+  }
+
+  /**
+   * Reports a click on this application's notification to its canister, as the
+   * session, so the app learns it was opened.
+   *
+   * Call it from the service worker's own `notificationclick` listener, with the
+   * event as it arrived. It reads the canister and id {@link fetchNotification}
+   * put in `options.data`, and ignores a click on any other notification, the
+   * generic and probe ones included. A report that fails is dropped.
+   *
+   * @param event - The service worker's `notificationclick` event, as it arrived.
+   * @throws {SessionGoneError} Where this origin holds no live session.
+   * @example
+   * // service-worker.ts
+   * self.addEventListener('notificationclick', (event) => {
+   *   event.notification.close();
+   *   const { url } = event.notification.data ?? {};
+   *   event.waitUntil(
+   *     Promise.all([
+   *       self.clients.openWindow(url ?? '/'),
+   *       authClient.reportNotificationOpened(event),
+   *     ]),
+   *   );
+   * });
+   */
+  reportNotificationOpened(event: NotificationClickEvent): Promise<void> {
+    return reportPushNotificationOpened(this.#pushNotificationSource(), event);
+  }
+
+  /** The session calls a service worker's notification handling is made with. */
+  #pushNotificationSource(): PushNotificationSource {
+    return {
+      inbox: () => this.#pwaNotifications(),
+      // Checked first, since `getIdentity()` answers an anonymous identity when signed out.
+      identity: async () => {
+        await this.#sessionCallOptions();
+        return this.getIdentity();
       },
-      event,
-    );
+      agentOptions: this.#options.agentOptions,
+    };
   }
 
   /**
