@@ -435,6 +435,8 @@ export class AuthClient {
   // One subscribe at a time: each prepare replaces the key the one before it
   // handed out, so two at once would spend each other's.
   #subscribing: Promise<void> = Promise.resolve();
+  // Set while a repair holds `#subscribing`, which can be its whole probe deadline.
+  #repairing = false;
   // What `getStatus` answers with, replaced only when the record changes.
   #status: SessionStatus;
   readonly #listeners = new Set<() => void>();
@@ -1796,10 +1798,15 @@ export class AuthClient {
    * Never prompts, and leaves a subscription under another key to a tap. A
    * subscription Internet Identity reports unanswered is probed first, and
    * replaced, or removed where permission was revoked, if the probe goes
-   * unanswered. Resolves without waiting for the probe.
+   * unanswered. Resolves without waiting for the probe, or for a repair already
+   * running.
    */
   #subscribeWhereUnregistered(key: SignIdentity, sessionChain: DelegationChain): Promise<void> {
-    return this.#queueSubscribe(() => this.#subscribeIfUnregistered(key, sessionChain));
+    const queued = this.#queueSubscribe(() => this.#subscribeIfUnregistered(key, sessionChain));
+    if (!this.#repairing) return queued;
+    // Behind a repair, so nothing waits for it: it runs if the page stays, and the next load checks again.
+    queued.catch(() => undefined);
+    return Promise.resolve();
   }
 
   /**
@@ -1822,7 +1829,13 @@ export class AuthClient {
           return undefined;
         });
         done();
-        await step?.repairing;
+        if (step === undefined) return;
+        this.#repairing = true;
+        try {
+          await step.repairing;
+        } finally {
+          this.#repairing = false;
+        }
       }),
     );
     whole.catch(failed);
@@ -1836,9 +1849,9 @@ export class AuthClient {
     sessionChain: DelegationChain,
   ): Promise<SubscribeStep> {
     if (!isInstalledApp()) return;
-    // Denied still asks: a subscription registered before the user revoked it is removed.
+    // Any permission asks: a subscription registered before the user revoked it is removed.
     const permission = globalThis.Notification?.permission;
-    if (permission !== 'granted' && permission !== 'denied') return;
+    if (permission === undefined) return;
     const registration = await globalThis.navigator?.serviceWorker?.getRegistration();
     // A tab whose service worker holds nothing leaves delivery to Internet Identity's.
     const held = (await registration?.pushManager.getSubscription()) ?? null;
