@@ -3136,7 +3136,8 @@ describe('AuthClient re-subscribing an installed app after sign-in', () => {
       href: 'http://localhost/sign-in',
       origin: 'http://localhost',
     });
-    const client = track(new AuthClient());
+    // A namespace of its own, so no client an earlier test left restores this session and takes the held set.
+    const client = track(new AuthClient({ namespace: 'finishes-registering-before-return-to' }));
     handleSignIn(FakeTransport.last());
 
     const signingIn = client.signIn({ returnTo: '/app' });
@@ -3166,7 +3167,8 @@ describe('AuthClient re-subscribing an installed app after sign-in', () => {
       href: 'http://localhost/sign-in',
       origin: 'http://localhost',
     });
-    const client = track(new AuthClient());
+    // A namespace of its own, so no client an earlier test left restores this session and takes the held set.
+    const client = track(new AuthClient({ namespace: 'sign-out-takes-over-registering' }));
     handleSignIn(FakeTransport.last());
 
     const signingIn = client.signIn({ returnTo: '/app' });
