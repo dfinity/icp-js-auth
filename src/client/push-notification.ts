@@ -32,19 +32,14 @@ export interface PushNotificationData {
   url?: string;
 }
 
-/** What to show for one push, and what to call once it is shown. */
+/** What to show for one push. */
 export interface FetchedNotification {
   title: string;
   /** Spread these first into `showNotification`'s options; they carry the `tag`, and `data` for the app's notification. */
   options: NotificationOptions;
-  /**
-   * Reports the notification shown and clears its entry at Internet Identity.
-   * Call it once `showNotification` resolves. Never rejects.
-   */
-  acknowledge(): Promise<void>;
 }
 
-/** The part of a service worker's `notificationclick` event {@link AuthClient.reportNotificationOpened} reads. */
+/** The part of a service worker's `notificationclick` event {@link AuthClient.markNotification} reads. */
 export interface NotificationClickEvent {
   readonly notification: { readonly data: unknown };
 }
@@ -241,35 +236,31 @@ const once = (work: () => Promise<unknown>): (() => Promise<void>) => {
   };
 };
 
+/** What marking each push event shown does, kept by {@link fetchPushNotification} for that event. */
+const shownMarks = new WeakMap<NotificationPushEvent, () => Promise<void>>();
+
+/** What to show for one push, and what marking it shown does. */
+interface Fetched {
+  notification: FetchedNotification;
+  markShown?: () => Promise<unknown>;
+}
+
 /** What a `userVisibleOnly` subscription owes the user where nothing better can be shown. */
 const generic = async (
   scope: PushNotificationScope,
-  acknowledge: () => Promise<unknown> = async () => undefined,
-): Promise<FetchedNotification> => {
+  markShown?: () => Promise<unknown>,
+): Promise<Fetched> => {
   await closeTagged(scope, GENERIC_TAG);
-  return {
-    title: 'New notification',
-    options: { tag: GENERIC_TAG },
-    acknowledge: once(acknowledge),
-  };
+  return { notification: { title: 'New notification', options: { tag: GENERIC_TAG } }, markShown };
 };
 
 const globalScope = (): PushNotificationScope => globalThis as unknown as PushNotificationScope;
 
-/**
- * Works out what to show for one push: the app's notification, or the generic
- * one where the payload names no entry, or reading it fails or takes longer than
- * {@link DISPLAY_DEADLINE_MS}, because iOS requires a notification for every
- * push. Rejects only with {@link SessionGoneError}, where no session is held.
- *
- * A copy of the same notification already on screen is closed before this
- * resolves, since iOS ignores `tag` and would show both.
- */
-export async function fetchPushNotification(
+async function fetchForPush(
   source: PushNotificationSource,
   event: NotificationPushEvent,
-  scope: PushNotificationScope = globalScope(),
-): Promise<FetchedNotification> {
+  scope: PushNotificationScope,
+): Promise<Fetched> {
   try {
     const resolving = resolvePush(source, scope, inboxNotificationIdOf(event.data));
     const outcome = await withinDeadline(resolving, DISPLAY_DEADLINE_MS);
@@ -289,14 +280,33 @@ export async function fetchPushNotification(
       return await generic(scope, async () => clear?.(outcome.notShown));
     }
     return {
-      title: shown.title,
-      options: shown.options,
-      acknowledge: once(() => Promise.all([received?.(), clear?.()])),
+      notification: { title: shown.title, options: shown.options },
+      markShown: () => Promise.all([received?.(), clear?.()]),
     };
   } catch (error) {
     if (error instanceof SessionGoneError) throw error;
     return generic(scope);
   }
+}
+
+/**
+ * Works out what to show for one push: the app's notification, or the generic
+ * one where the payload names no entry, or reading it fails or takes longer than
+ * {@link DISPLAY_DEADLINE_MS}, because iOS requires a notification for every
+ * push. Rejects only with {@link SessionGoneError}, where no session is held.
+ *
+ * A copy of the same notification already on screen is closed before this
+ * resolves, since iOS ignores `tag` and would show both. What marking it shown
+ * does is kept for {@link markPushNotification}, by the event.
+ */
+export async function fetchPushNotification(
+  source: PushNotificationSource,
+  event: NotificationPushEvent,
+  scope: PushNotificationScope = globalScope(),
+): Promise<FetchedNotification> {
+  const { notification, markShown } = await fetchForPush(source, event, scope);
+  if (markShown !== undefined) shownMarks.set(event, once(markShown));
+  return notification;
 }
 
 /** The app's notification a click names, or `undefined` where its data is not one this library put there. */
@@ -313,16 +323,12 @@ const clickedOf = (data: unknown): { canisterId: Principal; id: bigint } | undef
   }
 };
 
-/**
- * Reports a click on the app's notification to the app's canister. A click on
- * any other notification is ignored, and a failed report is dropped. Rejects
- * only with {@link SessionGoneError}, where no session is held.
- */
-export async function reportPushNotificationOpened(
+/** Reports a click on the app's notification to its canister, and ignores any other. */
+async function markOpened(
   source: PushNotificationSource,
   event: NotificationClickEvent,
 ): Promise<void> {
-  const clicked = clickedOf(event.notification?.data);
+  const clicked = clickedOf(event.notification.data);
   if (clicked === undefined) return;
   try {
     const app = await appActor(source, clicked.canisterId);
@@ -330,4 +336,21 @@ export async function reportPushNotificationOpened(
   } catch (error) {
     if (error instanceof SessionGoneError) throw error;
   }
+}
+
+/**
+ * Marks a push shown, doing what {@link fetchPushNotification} kept for that
+ * event, or a click opened. A push it never saw, and a click on any other
+ * notification, are ignored; marking twice does it once. Rejects only with
+ * {@link SessionGoneError}, where no session is held.
+ */
+export async function markPushNotification(
+  source: PushNotificationSource,
+  event: NotificationPushEvent | NotificationClickEvent,
+): Promise<void> {
+  if ('notification' in event) {
+    await markOpened(source, event);
+    return;
+  }
+  await shownMarks.get(event)?.();
 }

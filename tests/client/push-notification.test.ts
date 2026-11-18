@@ -4,7 +4,10 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { AuthClient } from '../../src/client/auth-client.ts';
 import {
   fetchPushNotification,
-  reportPushNotificationOpened,
+  markPushNotification,
+  type NotificationPushEvent,
+  type PushNotificationScope,
+  type PushNotificationSource,
 } from '../../src/client/push-notification.ts';
 import {
   type PwaNotificationService,
@@ -48,6 +51,16 @@ const source = (inbox: () => Promise<PwaNotifications>) => ({
 
 const push = (payload: unknown) => ({ data: { json: () => payload } });
 
+/** Fetches for `event`, and marks that same event shown with `mark()`. */
+const fetchAndMark = async (
+  from: PushNotificationSource,
+  event: NotificationPushEvent,
+  scope: PushNotificationScope,
+) => ({
+  ...(await fetchPushNotification(from, event, scope)),
+  mark: () => markPushNotification(from, event),
+});
+
 const removeOf = (remove: ReturnType<typeof vi.fn>, id: number, notShown: unknown[] = []) =>
   expect(remove).toHaveBeenCalledWith({ inbox_notification_id: BigInt(id), not_shown: notShown });
 
@@ -57,7 +70,7 @@ afterEach(() => {
 });
 
 describe('fetchPushNotification', () => {
-  it('answers the generic notification for a payload it cannot read, with nothing to acknowledge', async () => {
+  it('answers the generic notification for a payload it cannot read, with nothing to mark shown', async () => {
     const remove = vi.fn(async () => ({ Ok: {} }));
     const inbox = vi.fn(async () => over(fakeService({ app_remove_pwa_notification: remove })));
     const { scope } = fakeScope();
@@ -69,8 +82,8 @@ describe('fetchPushNotification', () => {
       },
     };
 
-    const notification = await fetchPushNotification(source(inbox), unreadable, scope);
-    await notification.acknowledge();
+    const notification = await fetchAndMark(source(inbox), unreadable, scope);
+    await notification.mark();
 
     expect(notification).toMatchObject(GENERIC);
     expect(inbox).not.toHaveBeenCalled();
@@ -81,7 +94,7 @@ describe('fetchPushNotification', () => {
     const { scope } = fakeScope();
 
     await expect(
-      fetchPushNotification(
+      fetchAndMark(
         source(async () => {
           throw new SessionGoneError();
         }),
@@ -94,7 +107,7 @@ describe('fetchPushNotification', () => {
   it('answers the generic notification where reading the session fails otherwise', async () => {
     const { scope } = fakeScope();
 
-    const notification = await fetchPushNotification(
+    const notification = await fetchAndMark(
       source(async () => {
         throw new Error('storage unavailable');
       }),
@@ -103,10 +116,10 @@ describe('fetchPushNotification', () => {
     );
 
     expect(notification).toMatchObject(GENERIC);
-    await expect(notification.acknowledge()).resolves.toBeUndefined();
+    await expect(notification.mark()).resolves.toBeUndefined();
   });
 
-  it('answers the generic notification where reading the entry fails, and clears it on acknowledge', async () => {
+  it('answers the generic notification where reading the entry fails, and clears it once marked shown', async () => {
     const remove = vi.fn(async () => ({ Ok: {} }));
     const { scope } = fakeScope();
     const inbox = over(
@@ -116,7 +129,7 @@ describe('fetchPushNotification', () => {
       }),
     );
 
-    const notification = await fetchPushNotification(
+    const notification = await fetchAndMark(
       source(async () => inbox),
       push({ inbox_notification_id: 3 }),
       scope,
@@ -124,7 +137,7 @@ describe('fetchPushNotification', () => {
 
     expect(notification).toMatchObject(GENERIC);
     expect(remove).not.toHaveBeenCalled();
-    await notification.acknowledge();
+    await notification.mark();
     removeOf(remove, 3);
   });
 
@@ -133,7 +146,7 @@ describe('fetchPushNotification', () => {
     const close = vi.fn();
     getNotifications.mockResolvedValue([{ tag: 'ii-notification', close }]);
 
-    await fetchPushNotification(
+    await fetchAndMark(
       source(async () => over(fakeService({}))),
       push({ inbox_notification_id: 3 }),
       scope,
@@ -142,13 +155,13 @@ describe('fetchPushNotification', () => {
     expect(close).toHaveBeenCalled();
   });
 
-  it('answers the generic notification at the deadline, and clears the late entry on acknowledge', async () => {
+  it('answers the generic notification at the deadline, and clears the late entry once marked shown', async () => {
     vi.useFakeTimers();
     const { scope } = fakeScope();
     let release: (inbox: PwaNotifications) => void = () => undefined;
     const remove = vi.fn(async () => ({ Ok: {} }));
 
-    const fetching = fetchPushNotification(
+    const fetching = fetchAndMark(
       source(
         () =>
           new Promise<PwaNotifications>((resolve) => {
@@ -162,7 +175,7 @@ describe('fetchPushNotification', () => {
     const notification = await fetching;
     expect(notification).toMatchObject(GENERIC);
 
-    const acknowledging = notification.acknowledge();
+    const acknowledging = notification.mark();
     release(over(fakeService({ app_remove_pwa_notification: remove })));
     await acknowledging;
     removeOf(remove, 3);
@@ -172,12 +185,12 @@ describe('fetchPushNotification', () => {
     const remove = vi.fn(async () => ({ Ok: {} }));
     const { scope } = fakeScope();
 
-    const notification = await fetchPushNotification(
+    const notification = await fetchAndMark(
       source(async () => over(fakeService({ app_remove_pwa_notification: remove }))),
       push({ inbox_notification_id: 3 }),
       scope,
     );
-    await notification.acknowledge();
+    await notification.mark();
 
     expect(notification).toMatchObject(GENERIC);
     removeOf(remove, 3);
@@ -213,7 +226,7 @@ describe('fetchPushNotification', () => {
       const { inbox } = fakeApp([{ title: 'Hi', body: 'There', url: ['/inbox'] }]);
       const { scope } = fakeScope();
 
-      const notification = await fetchPushNotification(
+      const notification = await fetchAndMark(
         source(async () => inbox),
         push({ inbox_notification_id: 3 }),
         scope,
@@ -227,19 +240,19 @@ describe('fetchPushNotification', () => {
       });
     });
 
-    it('reports it received and clears the entry once acknowledged, and only once', async () => {
+    it('reports it received and clears the entry once marked shown, and only once', async () => {
       const { inbox, received, remove } = fakeApp([{ title: 'Hi', body: 'There', url: [] }]);
       const { scope } = fakeScope();
 
-      const notification = await fetchPushNotification(
+      const notification = await fetchAndMark(
         source(async () => inbox),
         push({ inbox_notification_id: 3 }),
         scope,
       );
       expect(received).not.toHaveBeenCalled();
       expect(remove).not.toHaveBeenCalled();
-      await notification.acknowledge();
-      await notification.acknowledge();
+      await notification.mark();
+      await notification.mark();
 
       expect(received).toHaveBeenCalledTimes(1);
       expect(received).toHaveBeenCalledWith(BigInt(5));
@@ -253,7 +266,7 @@ describe('fetchPushNotification', () => {
       const close = vi.fn();
       getNotifications.mockResolvedValue([{ tag: 'ii-notification:aaaaa-aa:5', close }]);
 
-      await fetchPushNotification(
+      await fetchAndMark(
         source(async () => inbox),
         push({ inbox_notification_id: 3 }),
         scope,
@@ -271,12 +284,12 @@ describe('fetchPushNotification', () => {
         }),
       } as never);
 
-      const notification = await fetchPushNotification(
+      const notification = await fetchAndMark(
         source(async () => inbox),
         push({ inbox_notification_id: 3 }),
         scope,
       );
-      await notification.acknowledge();
+      await notification.mark();
 
       expect(notification).toMatchObject(GENERIC);
       removeOf(remove, 3, [{ PayloadRejected: null }]);
@@ -288,12 +301,12 @@ describe('fetchPushNotification', () => {
       const close = vi.fn();
       getNotifications.mockResolvedValue([{ tag: 'ii-notification:aaaaa-aa:5', close }]);
 
-      const notification = await fetchPushNotification(
+      const notification = await fetchAndMark(
         source(async () => inbox),
         push({ inbox_notification_id: 3 }),
         scope,
       );
-      await notification.acknowledge();
+      await notification.mark();
 
       expect(close).toHaveBeenCalled();
       expect(notification).toMatchObject(GENERIC);
@@ -306,7 +319,7 @@ describe('fetchPushNotification', () => {
       const { scope } = fakeScope();
       let release: () => void = () => undefined;
 
-      const fetching = fetchPushNotification(
+      const fetching = fetchAndMark(
         source(
           () =>
             new Promise<PwaNotifications>((resolve) => {
@@ -318,7 +331,7 @@ describe('fetchPushNotification', () => {
       );
       await vi.advanceTimersByTimeAsync(8_000);
       const notification = await fetching;
-      const acknowledging = notification.acknowledge();
+      const acknowledging = notification.mark();
       release();
       await acknowledging;
 
@@ -336,16 +349,41 @@ describe('fetchPushNotification', () => {
         }),
       } as never);
 
-      const notification = await fetchPushNotification(
+      const notification = await fetchAndMark(
         source(async () => inbox),
         push({ inbox_notification_id: 3 }),
         scope,
       );
-      await notification.acknowledge();
+      await notification.mark();
 
       expect(notification).toMatchObject(GENERIC);
       removeOf(remove, 3, [{ PayloadUnreachable: null }]);
     });
+  });
+});
+
+describe('markPushNotification for a push', () => {
+  it('does nothing for a push it never fetched', async () => {
+    const remove = vi.fn(async () => ({ Ok: {} }));
+    const inbox = vi.fn(async () => over(fakeService({ app_remove_pwa_notification: remove })));
+
+    await expect(
+      markPushNotification(source(inbox), push({ inbox_notification_id: 3 })),
+    ).resolves.toBeUndefined();
+
+    expect(inbox).not.toHaveBeenCalled();
+    expect(remove).not.toHaveBeenCalled();
+  });
+
+  it('marks only the event it fetched for, not another with the same payload', async () => {
+    const remove = vi.fn(async () => ({ Ok: {} }));
+    const from = source(async () => over(fakeService({ app_remove_pwa_notification: remove })));
+    const { scope } = fakeScope();
+    await fetchPushNotification(from, push({ inbox_notification_id: 3 }), scope);
+
+    await markPushNotification(from, push({ inbox_notification_id: 3 }));
+
+    expect(remove).not.toHaveBeenCalled();
   });
 });
 
@@ -370,7 +408,7 @@ describe('AuthClient fetchNotification', () => {
   });
 });
 
-describe('reportPushNotificationOpened', () => {
+describe('markPushNotification for a click', () => {
   const click = (data: unknown) => ({ notification: { data } });
 
   function fakeApp() {
@@ -389,7 +427,7 @@ describe('reportPushNotificationOpened', () => {
   it("reports a click on the app's notification to its canister", async () => {
     const { opened, createActor } = fakeApp();
 
-    await reportPushNotificationOpened(
+    await markPushNotification(
       source(noInbox),
       click({ canisterId: 'aaaaa-aa', id: '5', url: 'https://app.example.com/x' }),
     );
@@ -411,9 +449,7 @@ describe('reportPushNotificationOpened', () => {
   ])('ignores a click on a notification with %s', async (_, data) => {
     const { createActor } = fakeApp();
 
-    await expect(
-      reportPushNotificationOpened(source(noInbox), click(data)),
-    ).resolves.toBeUndefined();
+    await expect(markPushNotification(source(noInbox), click(data))).resolves.toBeUndefined();
     expect(createActor).not.toHaveBeenCalled();
   });
 
@@ -422,7 +458,7 @@ describe('reportPushNotificationOpened', () => {
     opened.mockRejectedValue(new Error('unreachable'));
 
     await expect(
-      reportPushNotificationOpened(source(noInbox), click({ canisterId: 'aaaaa-aa', id: '5' })),
+      markPushNotification(source(noInbox), click({ canisterId: 'aaaaa-aa', id: '5' })),
     ).resolves.toBeUndefined();
   });
 
@@ -430,7 +466,7 @@ describe('reportPushNotificationOpened', () => {
     fakeApp();
 
     await expect(
-      reportPushNotificationOpened(
+      markPushNotification(
         {
           ...source(noInbox),
           identity: async () => {
@@ -443,12 +479,12 @@ describe('reportPushNotificationOpened', () => {
   });
 });
 
-describe('AuthClient reportNotificationOpened', () => {
+describe('AuthClient markNotification', () => {
   it("rejects with SessionGoneError for the app's notification where this origin holds no session", async () => {
     const client = new AuthClient({ disableBrowserActivity: true });
 
     await expect(
-      client.reportNotificationOpened({
+      client.markNotification({
         notification: { data: { canisterId: 'aaaaa-aa', id: '5' } },
       }),
     ).rejects.toThrow(SessionGoneError);
@@ -458,7 +494,7 @@ describe('AuthClient reportNotificationOpened', () => {
     const client = new AuthClient({ disableBrowserActivity: true });
 
     await expect(
-      client.reportNotificationOpened({ notification: { data: { url: '/x' } } }),
+      client.markNotification({ notification: { data: { url: '/x' } } }),
     ).resolves.toBeUndefined();
   });
 });
