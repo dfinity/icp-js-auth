@@ -3514,6 +3514,26 @@ describe('AuthClient re-subscribing an installed app after sign-in', () => {
       ]);
     });
 
+    it('resumes waiting on a probe an interrupted repair left outstanding, without sending another', async () => {
+      installedApp('granted');
+      const { probe, registeredSubscription } = fakeCalls(true, 'https://push.example/1');
+      registeredSubscription.mockResolvedValue({
+        endpoint: 'https://push.example/1',
+        isPastLimit: false,
+        unansweredSinceNs: undefined,
+        probeSentAtNs: BigInt(5),
+      } as never);
+
+      await restoredClient();
+
+      // The load's read, then the poll's.
+      await vi.waitFor(
+        () => expect(registeredSubscription.mock.calls.length).toBeGreaterThanOrEqual(2),
+        { timeout: 4_000 },
+      );
+      expect(probe).not.toHaveBeenCalled();
+    });
+
     it('asks Internet Identity nothing outside an installed app', async () => {
       installedApp('granted');
       vi.stubGlobal('matchMedia', () => ({ matches: false }));
