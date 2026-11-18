@@ -1849,7 +1849,8 @@ export class AuthClient {
     sessionChain: DelegationChain,
   ): Promise<SubscribeStep> {
     if (!isInstalledApp()) return;
-    // Any permission asks: a subscription registered before the user revoked it is removed.
+    // Asked whatever the permission: a subscription the user revoked or reset is removed,
+    // but only once Internet Identity reports it past the unanswered limit and the probe fails.
     const permission = globalThis.Notification?.permission;
     if (permission === undefined) return;
     const registration = await globalThis.navigator?.serviceWorker?.getRegistration();

@@ -32,6 +32,7 @@ export function isSafariInstalledApp(): boolean {
  */
 export type SameDeviceLinkStatus = 'linked' | 'other-path-may-deliver' | 'no-other-path';
 
+/** {@link SameDeviceLinkStatus} as Internet Identity's candid answers it. */
 type CandidSameDeviceLinkStatus =
   | { Linked: null }
   | { OtherPathMayDeliver: null }
@@ -58,10 +59,16 @@ type SubscriptionError =
 /** Why Internet Identity could not answer an inbox or status call. */
 type NotificationError = { NoSuchSession: null } | { InternalCanisterError: string };
 
+/** Why Internet Identity sent no probe; `NotReachable` is the push service refusing it. */
 type ProbeError =
   | { NoSuchSession: null }
   | { NotReachable: null }
   | { InternalCanisterError: string };
+
+/** Fails the build where a {@link CandidSameDeviceLinkStatus} variant has no arm. */
+const unhandledStatus = (status: never): never => {
+  throw new Error(`Internet Identity answered an unknown link status: ${JSON.stringify(status)}`);
+};
 
 /** Pushes Internet Identity sent through this subscription since a notification was last fetched through it. */
 interface CandidUnansweredPushes {
@@ -483,7 +490,8 @@ export class PwaNotifications {
     );
     if ('Linked' in status) return 'linked';
     if ('OtherPathMayDeliver' in status) return 'other-path-may-deliver';
-    return 'no-other-path';
+    if ('NoOtherPath' in status) return 'no-other-path';
+    return unhandledStatus(status);
   }
 
   /** Registers the public half of the one-shot key that Safari's claim is signed with. */
@@ -785,6 +793,7 @@ export async function repairSubscription(
 /** Internet Identity's page that claims a same-device link from Safari. */
 const SAME_DEVICE_LINK_PATH = '/ios-installed-app';
 
+/** The one-shot link key's algorithm, which Internet Identity's Safari page signs the claim with. */
 const LINK_KEY_ALGORITHM = { name: 'ECDSA', namedCurve: 'P-256' } as const;
 
 const fromBase64Url = (value: string | undefined): Uint8Array => {
