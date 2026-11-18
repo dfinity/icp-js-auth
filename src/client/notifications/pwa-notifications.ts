@@ -766,7 +766,11 @@ type ProbeOutcome =
  * replaced by a later one. The unanswered count alone says nothing: a probe
  * still queued, or refused with a server error, leaves it empty.
  */
-async function probeOutcome(inbox: PwaNotifications, batchSentAtNs: bigint): Promise<ProbeOutcome> {
+async function probeOutcome(
+  inbox: PwaNotifications,
+  batchSentAtNs: bigint,
+  isProbeSent: boolean,
+): Promise<ProbeOutcome> {
   let expired = false;
   let timer: ReturnType<typeof setTimeout> | undefined;
   const deadline = new Promise<ProbeOutcome>((resolve) => {
@@ -776,7 +780,7 @@ async function probeOutcome(inbox: PwaNotifications, batchSentAtNs: bigint): Pro
     }, PROBE_DEADLINE_MS);
   });
   const polling = (async (): Promise<ProbeOutcome> => {
-    if (!(await inbox.probe())) return 'unanswered';
+    if (!isProbeSent && !(await inbox.probe())) return 'unanswered';
     while (!expired) {
       await wait(PROBE_POLL_MS);
       if (expired) return 'unanswered';
@@ -799,7 +803,7 @@ async function probeOutcome(inbox: PwaNotifications, batchSentAtNs: bigint): Pro
 
 /**
  * Probes `registered`, the subscription Internet Identity holds for the session
- * behind `inbox`, and repairs it where the service worker does not fetch the
+ * behind `inbox`, or waits on the probe already outstanding for it, and repairs it where the service worker does not fetch the
  * probe in time: with a fresh endpoint where notification permission is
  * granted, and by removing it otherwise.
  *
@@ -814,7 +818,12 @@ export async function repairSubscription(
   registered: RegisteredSubscription,
   registration: ServiceWorkerRegistration | undefined,
 ): Promise<'repaired' | 'gone'> {
-  const outcome = await probeOutcome(inbox, registered.unansweredSinceNs ?? BigInt(0));
+  // A probe an earlier repair sent and nobody saw answered is waited on again, not sent again.
+  const outcome = await probeOutcome(
+    inbox,
+    registered.unansweredSinceNs ?? BigInt(0),
+    registered.probeSentAtNs !== undefined,
+  );
   if (outcome !== 'unanswered') return outcome === 'gone' ? 'gone' : 'repaired';
   if (globalThis.Notification?.permission !== 'granted' || registration === undefined) {
     await inbox.set(null);

@@ -546,6 +546,24 @@ describe('repairSubscription', () => {
     expect(set).toHaveBeenCalledTimes(1);
   });
 
+  it('waits on a probe already outstanding without sending another, and repairs at the deadline', async () => {
+    vi.useFakeTimers();
+    vi.stubGlobal('Notification', { permission: 'granted' });
+    const { inbox, registration, set, held, probe } = await setUp(Array(20).fill(outstanding));
+
+    const repairing = repairSubscription(
+      inbox,
+      { endpoint: 'https://push.example/1', isPastLimit: false, probeSentAtNs: BigInt(9) },
+      registration,
+    );
+    await vi.advanceTimersByTimeAsync(30_000);
+    await repairing;
+
+    expect(probe).not.toHaveBeenCalled();
+    expect(held.unsubscribe).toHaveBeenCalled();
+    expect(set).toHaveBeenCalledTimes(1);
+  });
+
   it('reports a subscription Internet Identity dropped during the probe as gone, not fetched', async () => {
     vi.useFakeTimers();
     vi.stubGlobal('Notification', { permission: 'granted' });

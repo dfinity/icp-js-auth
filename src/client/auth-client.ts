@@ -1884,8 +1884,11 @@ export class AuthClient {
     const canSubscribe = permission === 'granted' && registration !== undefined;
     const held = canSubscribe ? await registration.pushManager.getSubscription() : null;
     // Only the endpoint this device holds is worth probing; another one is replaced below.
+    // An outstanding probe is one an interrupted repair left unresolved.
+    const needsProbe = registered?.isPastLimit === true || registered?.probeSentAtNs !== undefined;
     if (
-      registered?.isPastLimit === true &&
+      registered !== undefined &&
+      needsProbe &&
       (!canSubscribe || held?.endpoint === registered.endpoint)
     ) {
       return {
