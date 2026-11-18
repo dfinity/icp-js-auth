@@ -2,6 +2,7 @@ import { Actor, HttpAgent } from '@icp-sdk/core/agent';
 import type { IDL } from '@icp-sdk/core/candid';
 import { DelegationIdentity } from '@icp-sdk/core/identity';
 import type { Principal } from '@icp-sdk/core/principal';
+import { fromBase64, toBase64 } from '../base64.js';
 import { IdbKeyVal } from '../db.js';
 import { SessionGoneError } from '../session/app-delegation-source.js';
 import { assertChainReaches } from '../session/session-minter.js';
@@ -19,6 +20,22 @@ export function isSafariInstalledApp(): boolean {
   const navigator = globalThis.navigator as (Navigator & { standalone?: boolean }) | undefined;
   return navigator?.standalone === true;
 }
+
+/**
+ * Whether this installed app is linked to the Safari of the same device.
+ *
+ * - `linked`: it is, so Internet Identity delivers this application's
+ *   notifications on this device only to this app.
+ * - `other-path-may-deliver`: it is not, and another path of this identity may
+ *   deliver them too, so linking would stop a second copy.
+ * - `no-other-path`: there is nothing to link.
+ */
+export type SameDeviceLinkStatus = 'linked' | 'other-path-may-deliver' | 'no-other-path';
+
+type CandidSameDeviceLinkStatus =
+  | { Linked: null }
+  | { OtherPathMayDeliver: null }
+  | { NoOtherPath: null };
 
 /** Why the service worker could not show a notification. */
 export type NotShownReason = { PayloadUnreachable: null } | { PayloadRejected: null };
@@ -87,6 +104,12 @@ export interface PwaNotificationService {
       not_shown: [] | [NotShownReason];
     },
   ): Promise<{ Ok: Record<string, never> } | { Err: NotificationError }>;
+  app_get_same_device_link_status(): Promise<
+    { Ok: CandidSameDeviceLinkStatus } | { Err: NotificationError }
+  >;
+  app_prepare_same_device_link(request: {
+    link_public_key: Uint8Array;
+  }): Promise<{ Ok: null } | { Err: NotificationError }>;
 }
 
 /** Written out because this package carries no Internet Identity declarations. */
@@ -172,6 +195,25 @@ const idlFactory: IDL.InterfaceFactory = ({ IDL }) => {
         }),
       ],
       [IDL.Variant({ Ok: IDL.Record({}), Err: NotificationError })],
+      [],
+    ),
+    app_get_same_device_link_status: IDL.Func(
+      [],
+      [
+        IDL.Variant({
+          Ok: IDL.Variant({
+            Linked: IDL.Null,
+            OtherPathMayDeliver: IDL.Null,
+            NoOtherPath: IDL.Null,
+          }),
+          Err: NotificationError,
+        }),
+      ],
+      ['query'],
+    ),
+    app_prepare_same_device_link: IDL.Func(
+      [IDL.Record({ link_public_key: IDL.Vec(IDL.Nat8) })],
+      [IDL.Variant({ Ok: IDL.Null, Err: NotificationError })],
       [],
     ),
   });
@@ -339,6 +381,25 @@ export class PwaNotifications {
         not_shown: notShown === undefined ? [] : [notShown],
       }),
       'Internet Identity could not remove this notification',
+    );
+  }
+
+  /** Whether this installed app is linked to the Safari of the same device. */
+  async sameDeviceLinkStatus(): Promise<SameDeviceLinkStatus> {
+    const status = unwrapNotification(
+      await this.#service.app_get_same_device_link_status(),
+      'Internet Identity could not read this link',
+    );
+    if ('Linked' in status) return 'linked';
+    if ('OtherPathMayDeliver' in status) return 'other-path-may-deliver';
+    return 'no-other-path';
+  }
+
+  /** Registers the public half of the one-shot key that Safari's claim is signed with. */
+  async prepareSameDeviceLink(linkPublicKey: Uint8Array): Promise<void> {
+    unwrapNotification(
+      await this.#service.app_prepare_same_device_link({ link_public_key: linkPublicKey }),
+      'Internet Identity could not prepare this link',
     );
   }
 }
@@ -559,4 +620,45 @@ export async function savedVapidKey(): Promise<Uint8Array | undefined> {
 export async function saveVapidKey(vapidPublicKey: Uint8Array): Promise<void> {
   const db = await IdbKeyVal.create(VAPID_KEY_DB);
   await db.set(VAPID_KEY, vapidPublicKey);
+}
+
+/** Internet Identity's page that claims a same-device link from Safari. */
+const SAME_DEVICE_LINK_PATH = '/ios-installed-app';
+
+const LINK_KEY_ALGORITHM = { name: 'ECDSA', namedCurve: 'P-256' } as const;
+
+const fromBase64Url = (value: string | undefined): Uint8Array => {
+  if (value === undefined) throw new Error('The link key is missing a coordinate');
+  const standard = value.replace(/-/g, '+').replace(/_/g, '/');
+  return fromBase64(standard.padEnd(Math.ceil(standard.length / 4) * 4, '='));
+};
+
+const toBase64Url = (bytes: Uint8Array): string =>
+  toBase64(bytes).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+
+/**
+ * Mints a one-shot P-256 key, registers its public half for the session behind
+ * `inbox`, and answers the URL of Internet Identity's page that claims the link
+ * from Safari with it.
+ *
+ * The private half travels in the fragment, as `d`, `x` and `y` of its JWK one
+ * after the other, as Internet Identity's own install link carries its key: a
+ * fragment is never sent to the gateway.
+ */
+export async function prepareSameDeviceLinkUrl(
+  inbox: PwaNotifications,
+  identityProviderOrigin: string,
+): Promise<string> {
+  const keyPair = (await crypto.subtle.generateKey(LINK_KEY_ALGORITHM, true, [
+    'sign',
+    'verify',
+  ])) as CryptoKeyPair;
+  const publicKey = new Uint8Array(await crypto.subtle.exportKey('spki', keyPair.publicKey));
+  // Registered before the key is handed out, so a URL that exists is one Internet Identity waits for.
+  await inbox.prepareSameDeviceLink(publicKey);
+  const { d, x, y } = await crypto.subtle.exportKey('jwk', keyPair.privateKey);
+  const key = toBase64Url(concat(fromBase64Url(d), fromBase64Url(x), fromBase64Url(y)));
+  const url = new URL(SAME_DEVICE_LINK_PATH, identityProviderOrigin);
+  url.hash = new URLSearchParams({ key }).toString();
+  return url.href;
 }

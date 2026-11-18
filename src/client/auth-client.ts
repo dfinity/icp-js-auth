@@ -38,7 +38,9 @@ import {
   isSafariInstalledApp,
   NotificationsNotAllowedError,
   PwaNotifications,
+  prepareSameDeviceLinkUrl,
   resubscribeDevice,
+  type SameDeviceLinkStatus,
   savedVapidKey,
   saveVapidKey,
   subscribeDevice,
@@ -416,6 +418,7 @@ export class AuthClient {
   #credentialStorage: CredentialStorage;
   readonly #slots: Slots;
   readonly #canisterId: Principal;
+  readonly #identityProviderOrigin: string;
   #unwatchForeground: (() => void) | undefined;
   #unwatchState: (() => void) | undefined;
   #unwatchActivity: (() => void) | undefined;
@@ -486,6 +489,7 @@ export class AuthClient {
     this.#canisterId = Principal.from(provider.canisterId);
 
     const identityProviderUrl = new URL(provider.authorizeUrl.toString());
+    this.#identityProviderOrigin = identityProviderUrl.origin;
     if (!options.disableBrowserActivity) {
       // The identity decides whether a mint is due; these only say the moment is
       // a good one. Nothing is hooked where there is no DOM.
@@ -1496,6 +1500,57 @@ export class AuthClient {
       }
     });
     return permission;
+  }
+
+  /**
+   * Whether this installed web app is linked to Safari on the same device, and
+   * if not, whether linking it would stop a second copy of each notification.
+   *
+   * On iOS a Home Screen app and Safari keep separate storage, so Internet
+   * Identity knows them as two browsers of the identity and may deliver this
+   * application's notifications to both. Offer {@link requestSameDeviceLink}
+   * where this answers `other-path-may-deliver`.
+   *
+   * Asks Internet Identity only in an installed web app of Safari, the one
+   * browser whose installed apps keep storage of their own. Elsewhere it answers
+   * `no-other-path`.
+   *
+   * @returns Whether this app is linked, or there is something to link.
+   * @throws {SessionGoneError} Where this origin holds no live session.
+   * @example
+   * const offer = (await authClient.getSameDeviceLinkStatus()) === 'other-path-may-deliver';
+   */
+  async getSameDeviceLinkStatus(): Promise<SameDeviceLinkStatus> {
+    if (!isSafariInstalledApp()) return 'no-other-path';
+    return (await this.#pwaNotifications()).sameDeviceLinkStatus();
+  }
+
+  /**
+   * Links this installed web app to Safari on the same device, so this
+   * application's notifications on it arrive only here.
+   *
+   * Registers a one-shot key with Internet Identity and opens its page in
+   * Safari, which claims the link with Safari's sign-in. The page leaves the app
+   * for Safari, so call it from a tap, and read
+   * {@link getSameDeviceLinkStatus} again once the user returns.
+   *
+   * @throws {NotificationsUnsupportedError} Outside an installed web app of Safari.
+   * @throws {SessionGoneError} Where this origin holds no live session.
+   * @example
+   * await authClient.requestSameDeviceLink();
+   */
+  async requestSameDeviceLink(): Promise<void> {
+    if (!isSafariInstalledApp()) {
+      throw new NotificationsUnsupportedError(
+        'A same-device link is made only in an installed web app of Safari',
+      );
+    }
+    const url = await prepareSameDeviceLinkUrl(
+      await this.#pwaNotifications(),
+      this.#identityProviderOrigin,
+    );
+    // A link inside the app opens in the app's own view, which holds no Safari sign-in.
+    location.href = url.replace(/^https:/, 'x-safari-https:');
   }
 
   /**
