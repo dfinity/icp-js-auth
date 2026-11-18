@@ -84,6 +84,16 @@ const PUSH_SUBSCRIPTION_LOCK = 'ic-auth-push-subscription';
 
 /** A subscribe's foreground part done, and the repair it leaves running, if any. */
 type SubscribeStep = { repairing: Promise<void> } | undefined;
+
+/** A promise and what settles it, for the start of the next repair. */
+const repairSignal = (): { promise: Promise<void>; resolve: () => void } => {
+  let resolve: () => void = () => undefined;
+  const promise = new Promise<void>((settle) => {
+    resolve = settle;
+  });
+  return { promise, resolve };
+};
+
 /** The lock over one namespace's sign-in, which `signIn` and `signOut` both move. */
 const signInLockFor = (stateSlot: string): string => `${stateSlot}:sign-in`;
 
@@ -437,6 +447,8 @@ export class AuthClient {
   #subscribing: Promise<void> = Promise.resolve();
   // Set while a repair holds `#subscribing`, which can be its whole probe deadline.
   #repairing = false;
+  // Resolved, and replaced, each time a repair starts, so a waiter queued behind it stops waiting.
+  #repairStarted = repairSignal();
   // What `getStatus` answers with, replaced only when the record changes.
   #status: SessionStatus;
   readonly #listeners = new Set<() => void>();
@@ -1803,10 +1815,11 @@ export class AuthClient {
    */
   #subscribeWhereUnregistered(key: SignIdentity, sessionChain: DelegationChain): Promise<void> {
     const queued = this.#queueSubscribe(() => this.#subscribeIfUnregistered(key, sessionChain));
-    if (!this.#repairing) return queued;
-    // Behind a repair, so nothing waits for it: it runs if the page stays, and the next load checks again.
+    // Behind a repair, already running or started by work queued ahead, nothing waits for it:
+    // it runs if the page stays, and the next load checks again.
     queued.catch(() => undefined);
-    return Promise.resolve();
+    if (this.#repairing) return Promise.resolve();
+    return Promise.race([queued, this.#repairStarted.promise]);
   }
 
   /**
@@ -1831,6 +1844,8 @@ export class AuthClient {
         done();
         if (step === undefined) return;
         this.#repairing = true;
+        this.#repairStarted.resolve();
+        this.#repairStarted = repairSignal();
         try {
           await step.repairing;
         } finally {
