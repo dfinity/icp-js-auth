@@ -22,7 +22,7 @@ function fakeService(answers: Partial<PwaNotificationService>): PwaNotificationS
 }
 
 const GENERIC = {
-  title: 'New notification from app.example.com',
+  title: 'New notification',
   options: { tag: 'ii-notification' },
 };
 
@@ -30,7 +30,7 @@ function fakeScope() {
   const getNotifications = vi.fn(async (): Promise<{ tag: string; close(): void }[]> => []);
   return {
     scope: {
-      location: { origin: 'https://app.example.com', hostname: 'app.example.com' },
+      location: { origin: 'https://app.example.com' },
       registration: { getNotifications },
     },
     getNotifications,
