@@ -3059,7 +3059,7 @@ describe('AuthClient re-subscribing an installed app after sign-in', () => {
       registeredSubscription,
       probe,
     } as unknown as PwaNotifications);
-    return { status, set, prepare, probe };
+    return { status, set, prepare, probe, registeredSubscription };
   }
 
   afterEach(() => {
@@ -3431,6 +3431,40 @@ describe('AuthClient re-subscribing an installed app after sign-in', () => {
       handleSignIn(FakeTransport.last());
       await client.signIn({ returnTo: '/app' });
 
+      expect(replace).toHaveBeenCalledWith('http://localhost/app');
+    });
+
+    it('navigates to a returnTo without waiting for a repair the load starts after the sign-in queued', async () => {
+      installedApp('granted');
+      const { probe, registeredSubscription } = fakeCalls(true, 'https://push.example/1', {
+        isPastLimit: true,
+      });
+      const pastLimit = await registeredSubscription();
+      let answer: () => void = () => undefined;
+      registeredSubscription.mockImplementationOnce(
+        () =>
+          new Promise((resolve) => {
+            answer = () => resolve(pastLimit);
+          }),
+      );
+      const replace = vi.fn();
+      vi.stubGlobal('location', {
+        replace,
+        reload: vi.fn(),
+        href: 'http://localhost/sign-in',
+        origin: 'http://localhost',
+      });
+
+      const client = await restoredClient();
+      await vi.waitFor(() => expect(registeredSubscription).toHaveBeenCalledTimes(2));
+      handleSignIn(FakeTransport.last());
+      const signingIn = client.signIn({ returnTo: '/app' });
+      // The sign-in's check is queued behind the load's, whose status read is still pending.
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      answer();
+      await signingIn;
+
+      expect(probe).toHaveBeenCalled();
       expect(replace).toHaveBeenCalledWith('http://localhost/app');
     });
 
