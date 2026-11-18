@@ -3,6 +3,7 @@ import { IDL } from '@icp-sdk/core/candid';
 import type { Principal } from '@icp-sdk/core/principal';
 import type { NotificationConsentOptions } from './notification-consent.js';
 import type { NotShownReason, PwaNotifications } from './pwa-notifications.js';
+import { SessionGoneError } from './session/app-delegation-source.js';
 
 /**
  * How long everything before showing may take, from reading the session to the
@@ -179,8 +180,11 @@ async function resolvePush(
 ): Promise<Outcome> {
   if (inboxNotificationId === undefined) return {};
 
-  // Signed out after the push was sent: nothing can be read.
-  const inbox = await source.inbox().catch(() => undefined);
+  // Signed out after the push was sent: nothing is shown, so the caller hears it.
+  const inbox = await source.inbox().catch((error: unknown) => {
+    if (error instanceof SessionGoneError) throw error;
+    return undefined;
+  });
   if (inbox === undefined) return {};
 
   const clear = (notShown?: NotShownReason): Promise<void> =>
@@ -247,9 +251,9 @@ const globalScope = (): PushNotificationScope => globalThis as unknown as PushNo
 
 /**
  * Works out what to show for one push: the app's notification, or the generic
- * one where the payload names no entry, no session is held, or reading it fails
- * or takes longer than {@link DISPLAY_DEADLINE_MS}. Never rejects, because iOS
- * requires a notification for every push.
+ * one where the payload names no entry, or reading it fails or takes longer than
+ * {@link DISPLAY_DEADLINE_MS}, because iOS requires a notification for every
+ * push. Rejects only with {@link SessionGoneError}, where no session is held.
  *
  * A copy of the same notification already on screen is closed before this
  * resolves, since iOS ignores `tag` and would show both.
@@ -282,7 +286,8 @@ export async function fetchPushNotification(
       options: shown.options,
       acknowledge: once(() => Promise.all([received?.(), clear?.()])),
     };
-  } catch {
+  } catch (error) {
+    if (error instanceof SessionGoneError) throw error;
     return generic(scope);
   }
 }

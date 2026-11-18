@@ -1331,15 +1331,20 @@ export class AuthClient {
    * signed in with. It reads the Internet Identity inbox entry the push names
    * and fetches the content from this application's canister.
    *
-   * It always resolves, because iOS requires a notification for every push: to
-   * the app's notification, or to a generic one where the push names no entry,
-   * no session is held, or reading it fails or takes too long. Show what it
-   * answers, then call `acknowledge()`, which reports the notification received
-   * and clears its entry. The `notificationclick` listener is the app's own, and
-   * `options.data` carries what the app's canister sent.
+   * Where a session is held it always resolves, because iOS requires a
+   * notification for every push: to the app's notification, or to a generic one
+   * where the push names no entry, or reading it fails or takes too long. Show
+   * what it answers, then call `acknowledge()`, which reports the notification
+   * received and clears its entry. The `notificationclick` listener is the app's
+   * own, and `options.data` carries what the app's canister sent.
+   *
+   * Where no session is held it rejects, and nothing is shown: the rejection
+   * fails the push's `waitUntil`, and the next sign-in subscribes again should
+   * the browser drop the subscription for it.
    *
    * @param event - The service worker's `push` event, as it arrived.
    * @returns What to show, and what to call once it is shown.
+   * @throws {SessionGoneError} Where this origin holds no live session.
    * @example
    * // service-worker.ts
    * import { AuthClient } from '@icp-sdk/auth/client';
