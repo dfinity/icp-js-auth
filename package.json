@@ -26,11 +26,6 @@
       "import": "./dist/esm/client/index.js",
       "default": "./dist/esm/client/index.js"
     },
-    "./worker": {
-      "types": "./dist/esm/worker/index.d.ts",
-      "import": "./dist/esm/worker/index.js",
-      "default": "./dist/esm/worker/index.js"
-    },
     "./package.json": "./package.json"
   },
   "files": [

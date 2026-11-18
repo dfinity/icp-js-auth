@@ -21,6 +21,11 @@ export {
   NotificationsUnsupportedError,
   requestNotificationConsent,
 } from './notification-consent.js';
+export type {
+  FetchedNotification,
+  NotificationPushEvent,
+  PushNotificationData,
+} from './push-notification.js';
 export { type AppDelegationSource, SessionGoneError } from './session/app-delegation-source.js';
 export {
   InteractionRequiredError,
