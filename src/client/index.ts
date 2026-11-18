@@ -23,6 +23,7 @@ export {
 } from './notification-consent.js';
 export type {
   FetchedNotification,
+  NotificationClickEvent,
   NotificationPushEvent,
   PushNotificationData,
 } from './push-notification.js';

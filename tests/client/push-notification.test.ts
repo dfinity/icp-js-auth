@@ -2,7 +2,10 @@ import { Actor, AnonymousIdentity, HttpAgent, RejectError } from '@icp-sdk/core/
 import { Principal } from '@icp-sdk/core/principal';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { AuthClient } from '../../src/client/auth-client.ts';
-import { fetchPushNotification } from '../../src/client/push-notification.ts';
+import {
+  fetchPushNotification,
+  reportPushNotificationOpened,
+} from '../../src/client/push-notification.ts';
 import {
   type PwaNotificationService,
   PwaNotifications,
@@ -364,5 +367,98 @@ describe('AuthClient fetchNotification', () => {
     } finally {
       vi.unstubAllGlobals();
     }
+  });
+});
+
+describe('reportPushNotificationOpened', () => {
+  const click = (data: unknown) => ({ notification: { data } });
+
+  function fakeApp() {
+    const opened = vi.fn(async () => undefined);
+    vi.spyOn(HttpAgent, 'create').mockResolvedValue({} as HttpAgent);
+    const createActor = vi
+      .spyOn(Actor, 'createActor')
+      .mockReturnValue({ _internet_identity_notification_opened: opened } as never);
+    return { opened, createActor };
+  }
+
+  const noInbox = async (): Promise<PwaNotifications> => {
+    throw new Error('not read for a click');
+  };
+
+  it("reports a click on the app's notification to its canister", async () => {
+    const { opened, createActor } = fakeApp();
+
+    await reportPushNotificationOpened(
+      source(noInbox),
+      click({ canisterId: 'aaaaa-aa', id: '5', url: 'https://app.example.com/x' }),
+    );
+
+    expect(createActor).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ canisterId: Principal.fromText('aaaaa-aa') }),
+    );
+    expect(opened).toHaveBeenCalledWith(BigInt(5));
+  });
+
+  it.each([
+    ['no data', null],
+    ['the generic notification', undefined],
+    ['data of its own', { action: 'reply' }],
+    ['a canister that is not a principal', { canisterId: 'not a principal', id: '5' }],
+    ['an id that is not a decimal number', { canisterId: 'aaaaa-aa', id: '0x5' }],
+    ['an id that is not text', { canisterId: 'aaaaa-aa', id: 5 }],
+  ])('ignores a click on a notification with %s', async (_, data) => {
+    const { createActor } = fakeApp();
+
+    await expect(
+      reportPushNotificationOpened(source(noInbox), click(data)),
+    ).resolves.toBeUndefined();
+    expect(createActor).not.toHaveBeenCalled();
+  });
+
+  it('drops a report the canister fails', async () => {
+    const { opened } = fakeApp();
+    opened.mockRejectedValue(new Error('unreachable'));
+
+    await expect(
+      reportPushNotificationOpened(source(noInbox), click({ canisterId: 'aaaaa-aa', id: '5' })),
+    ).resolves.toBeUndefined();
+  });
+
+  it('rejects with SessionGoneError where no session is held', async () => {
+    fakeApp();
+
+    await expect(
+      reportPushNotificationOpened(
+        {
+          ...source(noInbox),
+          identity: async () => {
+            throw new SessionGoneError();
+          },
+        },
+        click({ canisterId: 'aaaaa-aa', id: '5' }),
+      ),
+    ).rejects.toThrow(SessionGoneError);
+  });
+});
+
+describe('AuthClient reportNotificationOpened', () => {
+  it("rejects with SessionGoneError for the app's notification where this origin holds no session", async () => {
+    const client = new AuthClient({ disableBrowserActivity: true });
+
+    await expect(
+      client.reportNotificationOpened({
+        notification: { data: { canisterId: 'aaaaa-aa', id: '5' } },
+      }),
+    ).rejects.toThrow(SessionGoneError);
+  });
+
+  it('ignores a click on any other notification, session or not', async () => {
+    const client = new AuthClient({ disableBrowserActivity: true });
+
+    await expect(
+      client.reportNotificationOpened({ notification: { data: { url: '/x' } } }),
+    ).resolves.toBeUndefined();
   });
 });
