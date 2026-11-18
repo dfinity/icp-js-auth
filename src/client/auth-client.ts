@@ -27,11 +27,11 @@ import {
   requestNotificationConsent as sendConsentRequest,
 } from './notification-consent.js';
 import {
-  isInstalledApp,
-  PwaNotifications,
-  pwaAccess,
-  subscribeDevice,
-} from './pwa-notifications.js';
+  type FetchedNotification,
+  fetchPushNotification,
+  type NotificationPushEvent,
+} from './push-notification.js';
+import { isInstalledApp, PwaNotifications, subscribeDevice } from './pwa-notifications.js';
 import {
   AccountMismatchError,
   chainAuthorisesKey,
@@ -440,10 +440,6 @@ export class AuthClient {
     this.#credentialStorage = options.credentialStorage ?? new IdbCredentialStorage();
     this.#slots = slotsFor(options.namespace);
     this.#stateStorage = options.stateStorage ?? defaultStateStorage();
-    pwaAccess.set(this, {
-      inbox: () => this.#pwaNotifications(),
-      agentOptions: options.agentOptions,
-    });
 
     // A string or URL is what this option used to be, and a caller still passing
     // one would otherwise be silently ignored — both halves falling back to
@@ -1328,6 +1324,51 @@ export class AuthClient {
   }
 
   /**
+   * Works out what an installed web app's service worker shows for one push.
+   *
+   * Call it from the service worker's own `push` listener, with an AuthClient
+   * built with the same options as the page's so it reads the session the page
+   * signed in with. It reads the Internet Identity inbox entry the push names
+   * and fetches the content from this application's canister.
+   *
+   * It always resolves, because iOS requires a notification for every push: to
+   * the app's notification, or to a generic one where the push names no entry,
+   * no session is held, or reading it fails or takes too long. Show what it
+   * answers, then call `acknowledge()`, which reports the notification received
+   * and clears its entry. The `notificationclick` listener is the app's own, and
+   * `options.data` carries what the app's canister sent.
+   *
+   * @param event - The service worker's `push` event, as it arrived.
+   * @returns What to show, and what to call once it is shown.
+   * @example
+   * // service-worker.ts
+   * import { AuthClient } from '@icp-sdk/auth/client';
+   *
+   * const authClient = new AuthClient(authClientOptions);
+   *
+   * self.addEventListener('push', (event) => {
+   *   event.waitUntil((async () => {
+   *     const notification = await authClient.fetchNotification(event);
+   *     await self.registration.showNotification(notification.title, {
+   *       ...notification.options,
+   *       requireInteraction: true,
+   *     });
+   *     await notification.acknowledge();
+   *   })());
+   * });
+   */
+  fetchNotification(event: NotificationPushEvent): Promise<FetchedNotification> {
+    return fetchPushNotification(
+      {
+        inbox: () => this.#pwaNotifications(),
+        identity: () => this.getIdentity(),
+        agentOptions: this.#options.agentOptions,
+      },
+      event,
+    );
+  }
+
+  /**
    * Subscribes this installed web app's own service worker to the user's
    * notifications from this application.
    *
@@ -1335,7 +1376,7 @@ export class AuthClient {
    * `granted: true`, and only in an installed web app: iOS asks for notification
    * permission only from a tap in the page itself, so this asks for it first,
    * before anything else is awaited. The service worker has to be registered
-   * already and import `handleNotifications` from `@icp-sdk/auth/worker`. A push
+   * already and show each push through {@link fetchNotification}. A push
    * subscription the service worker already holds with Internet Identity's key
    * is reused. A service worker holds one push subscription, so one bound to any
    * other key is unsubscribed and replaced.
