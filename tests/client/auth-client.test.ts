@@ -3089,13 +3089,15 @@ describe("AuthClient and this origin's push subscription", () => {
         ),
       };
     });
-    const registeredEndpoint = vi.fn(async () => held);
+    const registeredSubscription = vi.fn(async () =>
+      held === undefined ? undefined : { endpoint: held, isPastLimit: false },
+    );
     const create = vi.spyOn(PwaNotifications, 'create').mockResolvedValue({
       prepare,
       set,
-      registeredEndpoint,
+      registeredSubscription,
     } as unknown as PwaNotifications);
-    return { set, prepare, registeredEndpoint, create };
+    return { set, prepare, registeredSubscription, create };
   }
 
   /**

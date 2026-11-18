@@ -58,6 +58,22 @@ type SubscriptionError =
 /** Why Internet Identity could not answer an inbox or status call. */
 type NotificationError = { NoSuchSession: null } | { InternalCanisterError: string };
 
+type ProbeError =
+  | { NoSuchSession: null }
+  | { NotReachable: null }
+  | { InternalCanisterError: string };
+
+/** Pushes Internet Identity sent through this subscription since a notification was last fetched through it. */
+interface CandidUnansweredPushes {
+  count: number;
+  first_sent_at_ns: bigint;
+  /** Decided by Internet Identity, which owns the limit. */
+  is_past_limit: boolean;
+}
+
+/** Something Internet Identity tells the user itself rather than for an app. */
+export type PwaNotificationEvent = { NotificationsOn: null };
+
 /** A push subscription as Internet Identity registers it, with `auth` sealed to its transport key. */
 interface SealedSubscription {
   endpoint: string;
@@ -94,10 +110,20 @@ export interface PwaNotificationService {
   ): Promise<{ Ok: null } | { Err: SubscriptionError }>;
   app_get_pwa_webpush_subscription_status(
     request: [] | [FrontendRequest],
-  ): Promise<{ Ok: [] | [{ endpoint: string }] } | { Err: NotificationError }>;
-  app_get_pwa_notification(request: {
-    inbox_notification_id: bigint;
-  }): Promise<{ Ok: { notification: [] | [PwaNotification] } } | { Err: NotificationError }>;
+  ): Promise<
+    | { Ok: [] | [{ endpoint: string; unanswered_pushes: [] | [CandidUnansweredPushes] }] }
+    | { Err: NotificationError }
+  >;
+  app_probe_pwa_webpush_subscription(): Promise<{ Ok: null } | { Err: ProbeError }>;
+  app_get_pwa_notification(request: { inbox_notification_id: bigint }): Promise<
+    | {
+        Ok: {
+          notification: [] | [PwaNotification];
+          event: [] | [PwaNotificationEvent];
+        };
+      }
+    | { Err: NotificationError }
+  >;
   app_remove_pwa_notification(
     request: FrontendRequest & {
       inbox_notification_id: bigint;
@@ -133,6 +159,12 @@ const idlFactory: IDL.InterfaceFactory = ({ IDL }) => {
     InternalCanisterError: IDL.Text,
   });
   const PwaNotification = IDL.Record({ canister_id: IDL.Principal, id: IDL.Nat64 });
+  const PwaNotificationEvent = IDL.Variant({ NotificationsOn: IDL.Null });
+  const UnansweredPushes = IDL.Record({
+    count: IDL.Nat32,
+    first_sent_at_ns: IDL.Nat64,
+    is_past_limit: IDL.Bool,
+  });
   const NotShownReason = IDL.Variant({ PayloadUnreachable: IDL.Null, PayloadRejected: IDL.Null });
   return IDL.Service({
     app_prepare_pwa_webpush_subscription: IDL.Func(
@@ -170,17 +202,36 @@ const idlFactory: IDL.InterfaceFactory = ({ IDL }) => {
       [IDL.Opt(FrontendRequest)],
       [
         IDL.Variant({
-          Ok: IDL.Opt(IDL.Record({ endpoint: IDL.Text })),
+          Ok: IDL.Opt(
+            IDL.Record({ endpoint: IDL.Text, unanswered_pushes: IDL.Opt(UnansweredPushes) }),
+          ),
           Err: NotificationError,
         }),
       ],
       ['query'],
     ),
+    app_probe_pwa_webpush_subscription: IDL.Func(
+      [],
+      [
+        IDL.Variant({
+          Ok: IDL.Null,
+          Err: IDL.Variant({
+            NoSuchSession: IDL.Null,
+            NotReachable: IDL.Null,
+            InternalCanisterError: IDL.Text,
+          }),
+        }),
+      ],
+      [],
+    ),
     app_get_pwa_notification: IDL.Func(
       [IDL.Record({ inbox_notification_id: IDL.Nat64 })],
       [
         IDL.Variant({
-          Ok: IDL.Record({ notification: IDL.Opt(PwaNotification) }),
+          Ok: IDL.Record({
+            notification: IDL.Opt(PwaNotification),
+            event: IDL.Opt(PwaNotificationEvent),
+          }),
           Err: NotificationError,
         }),
       ],
@@ -280,6 +331,21 @@ const PREPARE_ATTEMPTS = 4;
 
 const wait = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
 
+/** The subscription Internet Identity delivers to for this session's browser and account. */
+export interface RegisteredSubscription {
+  endpoint: string;
+  /** Whether pushes went unanswered long enough that this subscription is worth a probe. */
+  isPastLimit: boolean;
+  /** Whether any push sent through it has not been followed by a fetch yet. */
+  hasUnansweredPushes: boolean;
+}
+
+/** What a wake-up names: an app's notification, or something Internet Identity says itself. */
+export interface PwaInboxEntry {
+  notification?: PwaNotification;
+  event?: PwaNotificationEvent;
+}
+
 /** The keys a subscribe needs. */
 export interface SubscriptionKeys {
   /** Internet Identity's VAPID public key, which the push subscription is bound to. */
@@ -350,26 +416,48 @@ export class PwaNotifications {
   }
 
   /**
-   * The endpoint Internet Identity delivers to for this session's browser,
+   * The subscription Internet Identity delivers to for this session's browser,
    * account and frontend, or `undefined` where it holds none for them.
    */
-  async registeredEndpoint(): Promise<string | undefined> {
-    const status = unwrapNotification(
+  async registeredSubscription(): Promise<RegisteredSubscription | undefined> {
+    const [status] = unwrapNotification(
       await this.#service.app_get_pwa_webpush_subscription_status([this.#frontend]),
       'Internet Identity could not read this subscription',
     );
-    return status[0]?.endpoint;
+    if (status === undefined) return undefined;
+    const [unanswered] = status.unanswered_pushes;
+    return {
+      endpoint: status.endpoint,
+      isPastLimit: unanswered?.is_past_limit === true,
+      hasUnansweredPushes: unanswered !== undefined,
+    };
   }
 
-  /** The entry a wake-up named, or `undefined` where it is gone. */
-  async get(inboxNotificationId: bigint): Promise<PwaNotification | undefined> {
+  /**
+   * Sends Internet Identity's "notifications are working" notification through
+   * this subscription. Answers `false` where the push service would not take it.
+   */
+  async probe(): Promise<boolean> {
+    const result = await this.#service.app_probe_pwa_webpush_subscription();
+    if ('Ok' in result) return true;
+    const error = result.Err;
+    if ('NotReachable' in error) return false;
+    if ('NoSuchSession' in error) throw new SessionGoneError();
+    const detail = error.InternalCanisterError;
+    throw new Error(
+      `Internet Identity could not probe this subscription${detail === '' ? '' : `: ${detail}`}`,
+    );
+  }
+
+  /** The entry a wake-up named, empty where it is gone. */
+  async get(inboxNotificationId: bigint): Promise<PwaInboxEntry> {
     const found = unwrapNotification(
       await this.#service.app_get_pwa_notification({
         inbox_notification_id: inboxNotificationId,
       }),
       'Internet Identity could not read this notification',
     );
-    return found.notification[0];
+    return { notification: found.notification[0], event: found.event[0] };
   }
 
   /** Clears the entry a wake-up named, with why it was not shown where it was not. */
@@ -620,6 +708,47 @@ export async function savedVapidKey(): Promise<Uint8Array | undefined> {
 export async function saveVapidKey(vapidPublicKey: Uint8Array): Promise<void> {
   const db = await IdbKeyVal.create(VAPID_KEY_DB);
   await db.set(VAPID_KEY, vapidPublicKey);
+}
+
+/** How long a probe has to be fetched by the service worker before its path counts as broken. */
+const PROBE_DEADLINE_MS = 30_000;
+
+/** How often Internet Identity is asked whether the probe was fetched. */
+const PROBE_POLL_MS = 2_000;
+
+/**
+ * Probes the subscription of the session behind `inbox`, and answers whether
+ * the service worker fetched the probe before {@link PROBE_DEADLINE_MS}: its
+ * remove resets the subscription's unanswered pushes.
+ */
+async function probeAnswered(inbox: PwaNotifications): Promise<boolean> {
+  if (!(await inbox.probe())) return false;
+  const deadline = Date.now() + PROBE_DEADLINE_MS;
+  while (Date.now() < deadline) {
+    await wait(PROBE_POLL_MS);
+    const registered = await inbox.registeredSubscription();
+    if (registered === undefined) return false;
+    if (!registered.hasUnansweredPushes) return true;
+  }
+  return false;
+}
+
+/**
+ * Probes the subscription registered for the session behind `inbox`, and
+ * repairs it where the service worker does not fetch the probe in time: with a
+ * fresh endpoint where notification permission is granted, and by removing it
+ * otherwise.
+ */
+export async function repairSubscription(
+  inbox: PwaNotifications,
+  registration: ServiceWorkerRegistration | undefined,
+): Promise<void> {
+  if (await probeAnswered(inbox)) return;
+  if (globalThis.Notification?.permission !== 'granted' || registration === undefined) {
+    await inbox.set(null);
+    return;
+  }
+  await subscribeFresh(inbox, registration, await registration.pushManager.getSubscription());
 }
 
 /** Internet Identity's page that claims a same-device link from Safari. */

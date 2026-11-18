@@ -39,6 +39,7 @@ import {
   NotificationsNotAllowedError,
   PwaNotifications,
   prepareSameDeviceLinkUrl,
+  repairSubscription,
   resubscribeDevice,
   type SameDeviceLinkStatus,
   savedVapidKey,
@@ -1486,11 +1487,11 @@ export class AuthClient {
       const inbox = await this.#pwaNotifications();
       try {
         if (permission === 'denied') {
-          if ((await inbox.registeredEndpoint()) !== undefined) await inbox.set(null);
+          if ((await inbox.registeredSubscription()) !== undefined) await inbox.set(null);
           return;
         }
         const held = await registration.pushManager.getSubscription();
-        const registered = await inbox.registeredEndpoint();
+        const registered = (await inbox.registeredSubscription())?.endpoint;
         if (held !== null && subscribedWith(held, savedKey) && held.endpoint === registered) {
           return;
         }
@@ -1798,6 +1799,47 @@ export class AuthClient {
       .then(() => withMintLock(PUSH_SUBSCRIPTION_LOCK, work));
     this.#subscribing = next;
     return next;
+  }
+
+  /**
+   * Registers this origin's push subscription where permission and consent are
+   * granted but Internet Identity does not deliver to it yet: in an installed
+   * app always, in a browser tab only where its service worker holds a
+   * subscription already. Never prompts, and leaves a subscription under another
+   * key to a tap. A subscription Internet Identity reports unanswered is probed
+   * first, and replaced, or removed where permission was revoked, if the probe
+   * goes unanswered.
+   */
+  #subscribeWhereUnregistered(key: SignIdentity, sessionChain: DelegationChain): Promise<void> {
+    return this.#queueSubscribe(() => this.#subscribeIfUnregistered(key, sessionChain));
+  }
+
+  async #subscribeIfUnregistered(key: SignIdentity, sessionChain: DelegationChain): Promise<void> {
+    // Denied still asks: a subscription registered before the user revoked it is removed.
+    const permission = globalThis.Notification?.permission;
+    if (permission !== 'granted' && permission !== 'denied') return;
+    const registration = await globalThis.navigator?.serviceWorker?.getRegistration();
+    // A tab whose service worker holds nothing leaves delivery to Internet Identity's.
+    const held = (await registration?.pushManager.getSubscription()) ?? null;
+    if (!isInstalledApp() && held === null) return;
+
+    const options = {
+      sessionKey: key,
+      sessionChain,
+      canisterId: this.#canisterId,
+      agentOptions: this.#options.agentOptions,
+    };
+    const inbox = await PwaNotifications.create(options, globalThis.location.origin);
+    const registered = await inbox.registeredSubscription();
+    if (registered?.isPastLimit === true) {
+      await repairSubscription(inbox, registration);
+      return;
+    }
+    if (permission !== 'granted' || registration === undefined) return;
+    if (held !== null && held.endpoint === registered?.endpoint) return;
+    const consent = await NotificationConsent.create(options);
+    if (!(await consent.status()).granted) return;
+    await subscribeDevice(inbox, registration);
   }
 
   /**
