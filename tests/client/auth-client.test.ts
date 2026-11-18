@@ -3071,6 +3071,30 @@ describe('AuthClient re-subscribing an installed app after sign-in', () => {
     expect(requestPermission).not.toHaveBeenCalled();
   });
 
+  it('runs one subscribe at a time across taps and the check after sign-in', async () => {
+    installedApp('granted');
+    const { prepare } = fakeCalls(true);
+    let running = 0;
+    let most = 0;
+    const keys = prepare.getMockImplementation();
+    prepare.mockImplementation(async () => {
+      running++;
+      most = Math.max(most, running);
+      await new Promise((resolve) => setTimeout(resolve, 5));
+      running--;
+      return (await keys?.()) as Awaited<ReturnType<NonNullable<typeof keys>>>;
+    });
+    // A namespace of its own, so no client an earlier test left restores this session too.
+    const client = track(new AuthClient({ namespace: 'one-subscribe-at-a-time' }));
+    handleSignIn(FakeTransport.last());
+    await client.signIn();
+
+    await Promise.all([client.subscribeToNotifications(), client.subscribeToNotifications()]);
+
+    expect(prepare.mock.calls.length).toBeGreaterThanOrEqual(2);
+    expect(most).toBe(1);
+  });
+
   it('registers nothing where the identity has not consented', async () => {
     installedApp('granted');
     const { status, set } = fakeCalls(false);
