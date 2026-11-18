@@ -48,7 +48,7 @@ export interface PwaNotification {
   id: bigint;
 }
 
-/** The four Internet Identity methods an installed app's subscription is made of. */
+/** The Internet Identity methods an installed app's subscription is made of. */
 export interface PwaNotificationService {
   app_prepare_pwa_webpush_subscription(): Promise<
     | { Ok: { vapid_public_key: Uint8Array; transport_public_key: Uint8Array } }
@@ -58,6 +58,9 @@ export interface PwaNotificationService {
   app_set_pwa_webpush_subscription(request: {
     subscription: [] | [SealedSubscription];
   }): Promise<{ Ok: null } | { Err: SubscriptionError }>;
+  app_get_pwa_webpush_subscription_status(): Promise<
+    { Ok: [] | [{ endpoint: string }] } | { Err: NotificationError }
+  >;
   app_get_pwa_notification(request: {
     inbox_notification_id: bigint;
   }): Promise<{ Ok: { notification: [] | [PwaNotification] } } | { Err: NotificationError }>;
@@ -117,6 +120,16 @@ const idlFactory: IDL.InterfaceFactory = ({ IDL }) => {
       ],
       [IDL.Variant({ Ok: IDL.Null, Err: SubscriptionError })],
       [],
+    ),
+    app_get_pwa_webpush_subscription_status: IDL.Func(
+      [],
+      [
+        IDL.Variant({
+          Ok: IDL.Opt(IDL.Record({ endpoint: IDL.Text })),
+          Err: NotificationError,
+        }),
+      ],
+      ['query'],
     ),
     app_get_pwa_notification: IDL.Func(
       [IDL.Record({ inbox_notification_id: IDL.Nat64 })],
@@ -244,6 +257,18 @@ export class PwaNotifications {
         subscription: subscription === null ? [] : [subscription],
       }),
     );
+  }
+
+  /**
+   * The endpoint Internet Identity delivers to for this session's browser and
+   * account, or `undefined` where it holds none for them.
+   */
+  async registeredEndpoint(): Promise<string | undefined> {
+    const status = unwrapNotification(
+      await this.#service.app_get_pwa_webpush_subscription_status(),
+      'Internet Identity could not read this subscription',
+    );
+    return status[0]?.endpoint;
   }
 
   /** The entry a wake-up named, or `undefined` where it is gone. */
