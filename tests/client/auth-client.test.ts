@@ -3005,18 +3005,25 @@ describe('AuthClient re-subscribing an installed app after sign-in', () => {
       options: { applicationServerKey: VAPID.buffer },
       getKey: (name: string) =>
         name === 'p256dh' ? new Uint8Array(65).buffer : new Uint8Array(16).buffer,
+      unsubscribe: vi.fn(async () => true),
     };
+    const fresh = { ...subscription, endpoint: 'https://push.example/fresh' };
+    const subscribe = vi.fn(async () => fresh);
     const registration = {
-      pushManager: { getSubscription: async () => subscription, subscribe: vi.fn() },
+      pushManager: { getSubscription: async () => subscription, subscribe },
     };
     Object.defineProperty(navigator, 'serviceWorker', {
       configurable: true,
       value: { getRegistration: async () => registration },
     });
-    return { requestPermission };
+    return { requestPermission, subscription, subscribe };
   }
 
-  function fakeCalls(granted: boolean, registered?: string) {
+  function fakeCalls(
+    granted: boolean,
+    registered?: string,
+    { isPastLimit = false, isReachable = true } = {},
+  ) {
     const status = vi.fn(async () => ({ granted }));
     vi.spyOn(NotificationConsent, 'create').mockResolvedValue({
       status,
@@ -3040,13 +3047,19 @@ describe('AuthClient re-subscribing an installed app after sign-in', () => {
         ),
       };
     });
-    const registeredEndpoint = vi.fn(async () => held);
+    const registeredSubscription = vi.fn(async () =>
+      held === undefined
+        ? undefined
+        : { endpoint: held, isPastLimit, hasUnansweredPushes: isPastLimit },
+    );
+    const probe = vi.fn(async () => isReachable);
     vi.spyOn(PwaNotifications, 'create').mockResolvedValue({
       prepare,
       set,
-      registeredEndpoint,
+      registeredSubscription,
+      probe,
     } as unknown as PwaNotifications);
-    return { status, set, prepare };
+    return { status, set, prepare, probe };
   }
 
   afterEach(() => {
@@ -3222,6 +3235,55 @@ describe('AuthClient re-subscribing an installed app after sign-in', () => {
     expect(status).not.toHaveBeenCalled();
   });
 
+  it('probes nothing where Internet Identity reports no unanswered pushes past the limit', async () => {
+    installedApp('denied');
+    const { probe, set } = fakeCalls(true, 'https://push.example/1');
+    const client = track(new AuthClient());
+    handleSignIn(FakeTransport.last());
+
+    await client.signIn();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(probe).not.toHaveBeenCalled();
+    expect(set).not.toHaveBeenCalled();
+  });
+
+  it('subscribes again with a fresh endpoint where the probe cannot reach this device', async () => {
+    const { subscription, subscribe } = installedApp('granted');
+    const { probe, set } = fakeCalls(true, 'https://push.example/1', {
+      isPastLimit: true,
+      isReachable: false,
+    });
+    const client = track(new AuthClient());
+    handleSignIn(FakeTransport.last());
+
+    await client.signIn();
+
+    await vi.waitFor(() => expect(set).toHaveBeenCalled());
+    expect(probe).toHaveBeenCalled();
+    expect(subscription.unsubscribe).toHaveBeenCalled();
+    expect(subscribe).toHaveBeenCalled();
+    expect(set.mock.calls[0]).toEqual([
+      expect.objectContaining({ endpoint: 'https://push.example/fresh' }),
+    ]);
+  });
+
+  it('removes the subscription where the probe goes unanswered and permission was revoked', async () => {
+    const { subscribe } = installedApp('denied');
+    const { set } = fakeCalls(true, 'https://push.example/1', {
+      isPastLimit: true,
+      isReachable: false,
+    });
+    const client = track(new AuthClient());
+    handleSignIn(FakeTransport.last());
+
+    await client.signIn();
+
+    await vi.waitFor(() => expect(set).toHaveBeenCalled());
+    expect(set.mock.calls[0]).toEqual([null]);
+    expect(subscribe).not.toHaveBeenCalled();
+  });
+
   describe('on a load that restores the session', () => {
     const secrets = [
       '302a300506032b6570032100d1fa89134802051c8b5d4e53c08b87381b87097bca4c4f348611eb8ce6c91809',
@@ -3271,6 +3333,21 @@ describe('AuthClient re-subscribing an installed app after sign-in', () => {
       await restoredClient();
 
       await vi.waitFor(() => expect(set).toHaveBeenCalledTimes(1));
+    });
+
+    it('subscribes again with a fresh endpoint where the probe cannot reach this device', async () => {
+      installedApp('granted');
+      const { set } = fakeCalls(true, 'https://push.example/1', {
+        isPastLimit: true,
+        isReachable: false,
+      });
+
+      await restoredClient();
+
+      await vi.waitFor(() => expect(set).toHaveBeenCalledTimes(1));
+      expect(set.mock.calls[0]).toEqual([
+        expect.objectContaining({ endpoint: 'https://push.example/fresh' }),
+      ]);
     });
 
     it('asks Internet Identity nothing outside an installed app', async () => {

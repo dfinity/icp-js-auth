@@ -5,6 +5,7 @@ import {
   type PwaNotificationService,
   PwaNotifications,
   prepareSameDeviceLinkUrl,
+  repairSubscription,
   sealSubscription,
   subscribeDevice,
 } from '../../src/client/pwa-notifications.ts';
@@ -23,7 +24,7 @@ function fakeService(answers: Partial<PwaNotificationService>): PwaNotificationS
   return {
     app_prepare_pwa_webpush_subscription: vi.fn(async () => ({ Ok: KEYS })),
     app_set_pwa_webpush_subscription: vi.fn(async () => ({ Ok: null })),
-    app_get_pwa_notification: vi.fn(async () => ({ Ok: { notification: [] } })),
+    app_get_pwa_notification: vi.fn(async () => ({ Ok: { notification: [], event: [] } })),
     app_remove_pwa_notification: vi.fn(async () => ({ Ok: {} })),
     ...answers,
   } as PwaNotificationService;
@@ -371,5 +372,98 @@ describe('same-device link', () => {
     await expect(prepareSameDeviceLinkUrl(inbox, 'https://id.example')).rejects.toThrow(
       SessionGoneError,
     );
+  });
+});
+
+describe('repairSubscription', () => {
+  const UNANSWERED = { count: 3, first_sent_at_ns: BigInt(1), is_past_limit: true };
+
+  async function setUp(statuses: unknown[], probeAnswer: unknown = { Ok: null }) {
+    const status = vi.fn();
+    for (const answer of statuses) status.mockResolvedValueOnce(answer);
+    const set = vi.fn(async () => ({ Ok: null }));
+    const probe = vi.fn(async () => probeAnswer as { Ok: null });
+    const transport = await crypto.subtle.generateKey({ name: 'ECDH', namedCurve: 'P-256' }, true, [
+      'deriveBits',
+    ]);
+    const inbox = over(
+      fakeService({
+        app_get_pwa_webpush_subscription_status: status,
+        app_probe_pwa_webpush_subscription: probe,
+        app_set_pwa_webpush_subscription: set,
+        app_prepare_pwa_webpush_subscription: vi.fn(async () => ({
+          Ok: {
+            vapid_public_key: KEYS.vapid_public_key,
+            transport_public_key: new Uint8Array(
+              await crypto.subtle.exportKey('raw', transport.publicKey),
+            ),
+          },
+        })),
+      }),
+    );
+    const held = await fakeSubscription('https://push.example/1', KEYS.vapid_public_key);
+    const fresh = await fakeSubscription('https://push.example/2', KEYS.vapid_public_key);
+    const registration = {
+      pushManager: {
+        getSubscription: vi.fn(async () => held),
+        subscribe: vi.fn(async () => fresh),
+      },
+    } as unknown as ServiceWorkerRegistration;
+    return { inbox, registration, set, probe, held };
+  }
+
+  const unanswered = {
+    Ok: [{ endpoint: 'https://push.example/1', unanswered_pushes: [UNANSWERED] }],
+  };
+  const answered = { Ok: [{ endpoint: 'https://push.example/1', unanswered_pushes: [] }] };
+
+  it('reads the unanswered pushes Internet Identity reports', async () => {
+    const { inbox } = await setUp([unanswered]);
+
+    await expect(inbox.registeredSubscription()).resolves.toEqual({
+      endpoint: 'https://push.example/1',
+      isPastLimit: true,
+      hasUnansweredPushes: true,
+    });
+  });
+
+  it('leaves a subscription whose probe the service worker fetched', async () => {
+    vi.useFakeTimers();
+    vi.stubGlobal('Notification', { permission: 'granted' });
+    const { inbox, registration, set, probe } = await setUp([unanswered, answered]);
+
+    const repairing = repairSubscription(inbox, registration);
+    await vi.advanceTimersByTimeAsync(4_000);
+    await repairing;
+
+    expect(probe).toHaveBeenCalledTimes(1);
+    expect(set).not.toHaveBeenCalled();
+  });
+
+  it('subscribes again with a fresh endpoint where the probe is not fetched by the deadline', async () => {
+    vi.useFakeTimers();
+    vi.stubGlobal('Notification', { permission: 'granted' });
+    const { inbox, registration, set, held } = await setUp(Array(20).fill(unanswered));
+
+    const repairing = repairSubscription(inbox, registration);
+    await vi.advanceTimersByTimeAsync(28_000);
+    expect(held.unsubscribe).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(2_000);
+    await repairing;
+
+    expect(held.unsubscribe).toHaveBeenCalled();
+    expect(set).toHaveBeenCalledTimes(1);
+    expect(set.mock.calls[0]).toEqual([
+      { subscription: [expect.objectContaining({ endpoint: 'https://push.example/2' })] },
+    ]);
+  });
+
+  it('removes the subscription where the probe cannot reach the device and permission is revoked', async () => {
+    vi.stubGlobal('Notification', { permission: 'denied' });
+    const { inbox, registration, set } = await setUp([], { Err: { NotReachable: null } });
+
+    await repairSubscription(inbox, registration);
+
+    expect(set).toHaveBeenCalledWith({ subscription: [] });
   });
 });

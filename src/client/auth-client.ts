@@ -39,6 +39,7 @@ import {
   isSafariInstalledApp,
   PwaNotifications,
   prepareSameDeviceLinkUrl,
+  repairSubscription,
   type SameDeviceLinkStatus,
   subscribeDevice,
 } from './pwa-notifications.js';
@@ -1735,6 +1736,11 @@ export class AuthClient {
    * created or a load restored, where the user already granted notification
    * permission and this application's consent, and Internet Identity does not
    * already deliver to this device's endpoint for it. Asks the user for nothing.
+   *
+   * Where Internet Identity reports pushes to this subscription unanswered past
+   * its limit, probes it first, and where the probe is not fetched in time,
+   * subscribes again with a fresh endpoint, or removes the subscription where
+   * permission was revoked.
    */
   #subscribeWhereUnregistered(key: SignIdentity, sessionChain: DelegationChain): Promise<void> {
     return this.#queueSubscribe(() => this.#subscribeIfUnregistered(key, sessionChain));
@@ -1749,9 +1755,10 @@ export class AuthClient {
 
   async #subscribeIfUnregistered(key: SignIdentity, sessionChain: DelegationChain): Promise<void> {
     if (!isInstalledApp()) return;
-    if (globalThis.Notification?.permission !== 'granted') return;
+    // Denied still asks: a subscription registered before the user revoked it is removed.
+    const permission = globalThis.Notification?.permission;
+    if (permission !== 'granted' && permission !== 'denied') return;
     const registration = await globalThis.navigator?.serviceWorker?.getRegistration();
-    if (registration === undefined) return;
 
     const options = {
       sessionKey: key,
@@ -1760,8 +1767,14 @@ export class AuthClient {
       agentOptions: this.#options.agentOptions,
     };
     const inbox = await PwaNotifications.create(options);
+    const registered = await inbox.registeredSubscription();
+    if (registered?.isPastLimit === true) {
+      await repairSubscription(inbox, registration);
+      return;
+    }
+    if (permission !== 'granted' || registration === undefined) return;
     const held = await registration.pushManager.getSubscription();
-    if (held !== null && held.endpoint === (await inbox.registeredEndpoint())) return;
+    if (held !== null && held.endpoint === registered?.endpoint) return;
     const consent = await NotificationConsent.create(options);
     if (!(await consent.status()).granted) return;
     await subscribeDevice(inbox, registration);
