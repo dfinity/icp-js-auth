@@ -55,6 +55,9 @@ export class NotificationsUnsupportedError extends Error {
  * @param signer - The channel to the identity provider.
  * @param derivationOrigin - The origin the account is derived for, where the
  *   application signs in under one other than its own.
+ * @param installedApp - Whether the application runs as an installed web app.
+ *   The provider then records consent alone, and the application subscribes its
+ *   own service worker afterwards.
  * @returns What the provider recorded, read back rather than reported from the
  *   screen.
  * @throws {InteractionRequiredError} Where the request asked not to render.
@@ -63,14 +66,18 @@ export class NotificationsUnsupportedError extends Error {
 export async function requestNotificationConsent(
   signer: Signer,
   derivationOrigin?: string,
+  installedApp = false,
 ): Promise<NotificationConsentStatus> {
+  // Every member is optional, so an application with nothing to pass sends an
+  // empty object rather than no `params` at all.
+  const params: Record<string, string | boolean> = {};
+  if (derivationOrigin !== undefined) params.icrc95DerivationOrigin = derivationOrigin;
+  if (installedApp) params.installedApp = true;
   const response = await signer.sendRequest({
     jsonrpc: '2.0' as const,
     id: globalThis.crypto.randomUUID(),
     method: NOTIFICATION_CONSENT_METHOD,
-    // Every member is optional, so an application with nothing to pass sends an
-    // empty object rather than no `params` at all.
-    params: derivationOrigin === undefined ? {} : { icrc95DerivationOrigin: derivationOrigin },
+    params,
   });
 
   if ('error' in response) {
