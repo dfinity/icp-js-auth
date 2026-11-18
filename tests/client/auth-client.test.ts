@@ -3050,7 +3050,7 @@ describe('AuthClient re-subscribing an installed app after sign-in', () => {
     const registeredSubscription = vi.fn(async () =>
       held === undefined
         ? undefined
-        : { endpoint: held, isPastLimit, hasUnansweredPushes: isPastLimit },
+        : { endpoint: held, isPastLimit, unansweredSinceNs: isPastLimit ? BigInt(1) : undefined },
     );
     const probe = vi.fn(async () => isReachable);
     vi.spyOn(PwaNotifications, 'create').mockResolvedValue({
@@ -3369,6 +3369,47 @@ describe('AuthClient re-subscribing an installed app after sign-in', () => {
       expect(set.mock.calls[0]).toEqual([
         expect.objectContaining({ endpoint: 'https://push.example/fresh' }),
       ]);
+    });
+
+    it('repairs one subscription at a time across clients sharing the origin', async () => {
+      installedApp('granted');
+      const { probe } = fakeCalls(true, 'https://push.example/1', {
+        isPastLimit: true,
+        isReachable: false,
+      });
+      let running = 0;
+      let most = 0;
+      probe.mockImplementation(async () => {
+        running++;
+        most = Math.max(most, running);
+        await new Promise((resolve) => setTimeout(resolve, 5));
+        running--;
+        return false;
+      });
+      // Exclusive and queued, as the platform's is, for this lock alone.
+      let queue: Promise<unknown> = Promise.resolve();
+      Object.defineProperty(navigator, 'locks', {
+        configurable: true,
+        value: {
+          request: (name: string, ...rest: unknown[]) => {
+            const run = rest.at(-1) as () => Promise<unknown>;
+            if (name !== 'ic-auth-push-subscription') return run();
+            const next = queue.then(run);
+            queue = next.catch(() => undefined);
+            return next;
+          },
+        },
+      });
+
+      try {
+        await Promise.all([restoredClient(), restoredClient()]);
+        await vi.waitFor(() => expect(probe.mock.calls.length).toBeGreaterThanOrEqual(2));
+        await queue;
+      } finally {
+        Reflect.deleteProperty(navigator, 'locks');
+      }
+
+      expect(most).toBe(1);
     });
 
     it('asks Internet Identity nothing outside an installed app', async () => {

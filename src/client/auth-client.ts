@@ -48,7 +48,7 @@ import {
   chainAuthorisesKey,
   SessionGoneError,
 } from './session/app-delegation-source.js';
-import { type HeldLock, stealLock, stealMintLock } from './session/app-lock.js';
+import { type HeldLock, stealLock, stealMintLock, withMintLock } from './session/app-lock.js';
 import { requestSessionDelegation } from './session/session-delegation.js';
 import { SessionIdentity } from './session/session-identity.js';
 import { SessionMinter } from './session/session-minter.js';
@@ -71,6 +71,15 @@ import type { SessionState, StateStorage } from './state/state-storage.js';
  * sign-ins, and they still cannot both have the window.
  */
 const CHANNEL_LOCK = 'ic-auth-signer-channel';
+
+/**
+ * The lock over this origin's push subscription. Not namespaced: every client
+ * and tab of the origin shares one service worker registration.
+ */
+const PUSH_SUBSCRIPTION_LOCK = 'ic-auth-push-subscription';
+
+/** A subscribe's foreground part done, and the repair it leaves running, if any. */
+type SubscribeStep = { repairing: Promise<void> } | undefined;
 
 /** The lock over one namespace's sign-in, which `signIn` and `signOut` both move. */
 const signInLockFor = (stateSlot: string): string => `${stateSlot}:sign-in`;
@@ -1463,6 +1472,7 @@ export class AuthClient {
     }
     await this.#queueSubscribe(async () => {
       await subscribeDevice(await this.#pwaNotifications(), registration);
+      return undefined;
     });
     return permission;
   }
@@ -1747,25 +1757,42 @@ export class AuthClient {
    * probes again on its next load.
    */
   #subscribeWhereUnregistered(key: SignIdentity, sessionChain: DelegationChain): Promise<void> {
-    const subscribed = this.#subscribing
-      .catch(() => undefined)
-      .then(() => this.#subscribeIfUnregistered(key, sessionChain));
-    this.#subscribing = subscribed.then((step) => step?.repairing).catch(() => undefined);
-    return subscribed.then(() => undefined);
+    return this.#queueSubscribe(() => this.#subscribeIfUnregistered(key, sessionChain));
   }
 
-  /** Runs `work` once every subscribe queued before it has settled. */
-  #queueSubscribe(work: () => Promise<void>): Promise<void> {
-    const next = this.#subscribing.catch(() => undefined).then(work);
-    this.#subscribing = next;
-    return next;
+  /**
+   * Runs `work` once every subscribe queued before it has settled, holding the
+   * lock every client and tab of this origin takes around its push subscription.
+   * Resolves once `work` does; a repair it hands back keeps the queue and the
+   * lock until it settles.
+   */
+  #queueSubscribe(work: () => Promise<SubscribeStep>): Promise<void> {
+    let done: () => void = () => undefined;
+    let failed: (error: unknown) => void = () => undefined;
+    const subscribed = new Promise<void>((resolve, reject) => {
+      done = resolve;
+      failed = reject;
+    });
+    const whole = this.#subscribing.then(() =>
+      withMintLock(PUSH_SUBSCRIPTION_LOCK, async () => {
+        const step = await work().catch((error: unknown) => {
+          failed(error);
+          return undefined;
+        });
+        done();
+        await step?.repairing;
+      }),
+    );
+    whole.catch(failed);
+    this.#subscribing = whole.catch(() => undefined);
+    return subscribed;
   }
 
   /** Wrapped, so the repair is handed back running rather than awaited. */
   async #subscribeIfUnregistered(
     key: SignIdentity,
     sessionChain: DelegationChain,
-  ): Promise<{ repairing: Promise<void> } | undefined> {
+  ): Promise<SubscribeStep> {
     if (!isInstalledApp()) return;
     // Denied still asks: a subscription registered before the user revoked it is removed.
     const permission = globalThis.Notification?.permission;
@@ -1781,7 +1808,7 @@ export class AuthClient {
     const inbox = await PwaNotifications.create(options);
     const registered = await inbox.registeredSubscription();
     if (registered?.isPastLimit === true) {
-      return { repairing: repairSubscription(inbox, registration) };
+      return { repairing: repairSubscription(inbox, registered, registration) };
     }
     if (permission !== 'granted' || registration === undefined) return;
     const held = await registration.pushManager.getSubscription();
