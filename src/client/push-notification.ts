@@ -294,9 +294,9 @@ async function fetchForPush(
 
 /**
  * Works out what to show for one push: the app's notification, Internet
- * Identity's probe, or the generic one where the payload names no entry, or reading it fails or takes longer than
- * {@link DISPLAY_DEADLINE_MS}, because iOS requires a notification for every
- * push. Rejects only with {@link SessionGoneError}, where no session is held.
+ * Identity's probe, or the generic one where the payload names no entry, or
+ * reading it fails or takes longer than {@link DISPLAY_DEADLINE_MS}, because iOS
+ * requires a notification for every push. Rejects only with {@link SessionGoneError}, where no session is held.
  *
  * A copy of the same notification already on screen is closed before this
  * resolves, since iOS ignores `tag` and would show both. Reporting it received
