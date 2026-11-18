@@ -74,12 +74,26 @@ describe('fetchPushNotification', () => {
     expect(remove).not.toHaveBeenCalled();
   });
 
-  it('answers the generic notification where no session is held', async () => {
+  it('rejects with SessionGoneError where no session is held', async () => {
+    const { scope } = fakeScope();
+
+    await expect(
+      fetchPushNotification(
+        source(async () => {
+          throw new SessionGoneError();
+        }),
+        push({ inbox_notification_id: 3 }),
+        scope,
+      ),
+    ).rejects.toThrow(SessionGoneError);
+  });
+
+  it('answers the generic notification where reading the session fails otherwise', async () => {
     const { scope } = fakeScope();
 
     const notification = await fetchPushNotification(
       source(async () => {
-        throw new SessionGoneError();
+        throw new Error('storage unavailable');
       }),
       push({ inbox_notification_id: 3 }),
       scope,
@@ -333,14 +347,20 @@ describe('fetchPushNotification', () => {
 });
 
 describe('AuthClient fetchNotification', () => {
-  it('resolves to the generic notification where this origin holds no session', async () => {
-    vi.stubGlobal('location', { origin: 'https://app.example.com', hostname: 'app.example.com' });
+  it('rejects with SessionGoneError where this origin holds no session', async () => {
+    const client = new AuthClient({ disableBrowserActivity: true });
+
+    await expect(client.fetchNotification(push({ inbox_notification_id: 3 }))).rejects.toThrow(
+      SessionGoneError,
+    );
+  });
+
+  it('resolves to the generic notification for a push that names no entry, session or not', async () => {
+    vi.stubGlobal('location', { origin: 'https://app.example.com' });
     try {
       const client = new AuthClient({ disableBrowserActivity: true });
 
-      const notification = await client.fetchNotification(push({ inbox_notification_id: 3 }));
-
-      expect(notification).toMatchObject(GENERIC);
+      await expect(client.fetchNotification(push({}))).resolves.toMatchObject(GENERIC);
     } finally {
       vi.unstubAllGlobals();
     }
