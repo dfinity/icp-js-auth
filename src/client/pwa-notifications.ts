@@ -2,6 +2,7 @@ import { Actor, HttpAgent } from '@icp-sdk/core/agent';
 import type { IDL } from '@icp-sdk/core/candid';
 import { DelegationIdentity } from '@icp-sdk/core/identity';
 import type { Principal } from '@icp-sdk/core/principal';
+import { fromBase64, toBase64 } from './base64.js';
 import type { NotificationConsentOptions } from './notification-consent.js';
 import { SessionGoneError } from './session/app-delegation-source.js';
 import { assertChainReaches } from './session/session-minter.js';
@@ -17,6 +18,34 @@ export function isInstalledApp(): boolean {
   const navigator = globalThis.navigator as (Navigator & { standalone?: boolean }) | undefined;
   return navigator?.standalone === true;
 }
+
+/**
+ * Whether this page runs as an installed web app whose storage is separate from
+ * Safari's, which is where a same-device link applies.
+ *
+ * Only Safari defines `navigator.standalone`, so Chrome and Android answer no.
+ */
+export function isSafariInstalledApp(): boolean {
+  const navigator = globalThis.navigator as (Navigator & { standalone?: boolean }) | undefined;
+  return typeof navigator?.standalone === 'boolean' && isInstalledApp();
+}
+
+/**
+ * Whether this installed app is linked to the Safari of the same device.
+ *
+ * - `linked`: it is, so Internet Identity delivers this application's
+ *   notifications on this device only to this app.
+ * - `other-path-may-deliver`: it is not, and another path of this identity may
+ *   deliver them too, so linking would stop a second copy.
+ * - `no-other-path`: there is nothing to link.
+ */
+export type SameDeviceLinkStatus = 'linked' | 'other-path-may-deliver' | 'no-other-path';
+
+/** {@link SameDeviceLinkStatus} as Internet Identity's candid answers it. */
+type CandidSameDeviceLinkStatus =
+  | { Linked: null }
+  | { OtherPathMayDeliver: null }
+  | { NoOtherPath: null };
 
 /** Why the service worker could not show a notification. */
 export type NotShownReason = { PayloadUnreachable: null } | { PayloadRejected: null };
@@ -37,6 +66,28 @@ type SubscriptionError =
 
 /** Why Internet Identity could not answer an inbox or status call. */
 type NotificationError = { NoSuchSession: null } | { InternalCanisterError: string };
+
+/** Why Internet Identity sent no probe; `NotReachable` is the push service refusing it. */
+type ProbeError =
+  | { NoSuchSession: null }
+  | { NotReachable: null }
+  | { InternalCanisterError: string };
+
+/** Fails the build where a {@link CandidSameDeviceLinkStatus} variant has no arm. */
+const unhandledStatus = (status: never): never => {
+  throw new Error(`Internet Identity answered an unknown link status: ${JSON.stringify(status)}`);
+};
+
+/** Pushes Internet Identity sent through this subscription since a notification was last fetched through it. */
+interface CandidUnansweredPushes {
+  count: number;
+  first_sent_at_ns: bigint;
+  /** Decided by Internet Identity, which owns the limit. */
+  is_past_limit: boolean;
+}
+
+/** Something Internet Identity tells the user itself rather than for an app. */
+export type PwaNotificationEvent = { NotificationsOn: null };
 
 /** A push subscription as Internet Identity registers it, with `auth` sealed to its transport key. */
 interface SealedSubscription {
@@ -63,15 +114,39 @@ export interface PwaNotificationService {
     subscription: [] | [SealedSubscription];
   }): Promise<{ Ok: null } | { Err: SubscriptionError }>;
   app_get_pwa_webpush_subscription_status(): Promise<
-    { Ok: [] | [{ endpoint: string }] } | { Err: NotificationError }
+    | {
+        Ok:
+          | []
+          | [
+              {
+                endpoint: string;
+                unanswered_pushes: [] | [CandidUnansweredPushes];
+                probe_sent_at_ns: [] | [bigint];
+              },
+            ];
+      }
+    | { Err: NotificationError }
   >;
-  app_get_pwa_notification(request: {
-    inbox_notification_id: bigint;
-  }): Promise<{ Ok: { notification: [] | [PwaNotification] } } | { Err: NotificationError }>;
+  app_probe_pwa_webpush_subscription(): Promise<{ Ok: null } | { Err: ProbeError }>;
+  app_get_pwa_notification(request: { inbox_notification_id: bigint }): Promise<
+    | {
+        Ok: {
+          notification: [] | [PwaNotification];
+          event: [] | [PwaNotificationEvent];
+        };
+      }
+    | { Err: NotificationError }
+  >;
   app_remove_pwa_notification(request: {
     inbox_notification_id: bigint;
     not_shown: [] | [NotShownReason];
   }): Promise<{ Ok: Record<string, never> } | { Err: NotificationError }>;
+  app_get_same_device_link_status(): Promise<
+    { Ok: CandidSameDeviceLinkStatus } | { Err: NotificationError }
+  >;
+  app_prepare_same_device_link(request: {
+    link_public_key: Uint8Array;
+  }): Promise<{ Ok: null } | { Err: NotificationError }>;
 }
 
 /** Written out because this package carries no Internet Identity declarations. */
@@ -93,6 +168,12 @@ const idlFactory: IDL.InterfaceFactory = ({ IDL }) => {
     InternalCanisterError: IDL.Text,
   });
   const PwaNotification = IDL.Record({ canister_id: IDL.Principal, id: IDL.Nat64 });
+  const PwaNotificationEvent = IDL.Variant({ NotificationsOn: IDL.Null });
+  const UnansweredPushes = IDL.Record({
+    count: IDL.Nat32,
+    first_sent_at_ns: IDL.Nat64,
+    is_past_limit: IDL.Bool,
+  });
   const NotShownReason = IDL.Variant({ PayloadUnreachable: IDL.Null, PayloadRejected: IDL.Null });
   return IDL.Service({
     app_prepare_pwa_webpush_subscription: IDL.Func(
@@ -129,17 +210,40 @@ const idlFactory: IDL.InterfaceFactory = ({ IDL }) => {
       [],
       [
         IDL.Variant({
-          Ok: IDL.Opt(IDL.Record({ endpoint: IDL.Text })),
+          Ok: IDL.Opt(
+            IDL.Record({
+              endpoint: IDL.Text,
+              unanswered_pushes: IDL.Opt(UnansweredPushes),
+              probe_sent_at_ns: IDL.Opt(IDL.Nat64),
+            }),
+          ),
           Err: NotificationError,
         }),
       ],
       ['query'],
     ),
+    app_probe_pwa_webpush_subscription: IDL.Func(
+      [],
+      [
+        IDL.Variant({
+          Ok: IDL.Null,
+          Err: IDL.Variant({
+            NoSuchSession: IDL.Null,
+            NotReachable: IDL.Null,
+            InternalCanisterError: IDL.Text,
+          }),
+        }),
+      ],
+      [],
+    ),
     app_get_pwa_notification: IDL.Func(
       [IDL.Record({ inbox_notification_id: IDL.Nat64 })],
       [
         IDL.Variant({
-          Ok: IDL.Record({ notification: IDL.Opt(PwaNotification) }),
+          Ok: IDL.Record({
+            notification: IDL.Opt(PwaNotification),
+            event: IDL.Opt(PwaNotificationEvent),
+          }),
           Err: NotificationError,
         }),
       ],
@@ -153,6 +257,25 @@ const idlFactory: IDL.InterfaceFactory = ({ IDL }) => {
         }),
       ],
       [IDL.Variant({ Ok: IDL.Record({}), Err: NotificationError })],
+      [],
+    ),
+    app_get_same_device_link_status: IDL.Func(
+      [],
+      [
+        IDL.Variant({
+          Ok: IDL.Variant({
+            Linked: IDL.Null,
+            OtherPathMayDeliver: IDL.Null,
+            NoOtherPath: IDL.Null,
+          }),
+          Err: NotificationError,
+        }),
+      ],
+      ['query'],
+    ),
+    app_prepare_same_device_link: IDL.Func(
+      [IDL.Record({ link_public_key: IDL.Vec(IDL.Nat8) })],
+      [IDL.Variant({ Ok: IDL.Null, Err: NotificationError })],
       [],
     ),
   });
@@ -206,6 +329,29 @@ const PREPARE_RETRY_STEP_MS = 1_000;
 const PREPARE_ATTEMPTS = 4;
 
 const wait = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
+
+/** The subscription Internet Identity delivers to for this session's browser and account. */
+export interface RegisteredSubscription {
+  endpoint: string;
+  /** Whether pushes went unanswered long enough that this subscription is worth a probe. */
+  isPastLimit: boolean;
+  /**
+   * When the first push not followed by a fetch was sent, in nanoseconds since
+   * the epoch, or `undefined` where every push was fetched.
+   */
+  unansweredSinceNs?: bigint;
+  /**
+   * When Internet Identity sent a probe through it that no fetch has answered
+   * yet, in nanoseconds since the epoch.
+   */
+  probeSentAtNs?: bigint;
+}
+
+/** What a wake-up names: an app's notification, or something Internet Identity says itself. */
+export interface PwaInboxEntry {
+  notification?: PwaNotification;
+  event?: PwaNotificationEvent;
+}
 
 /** The keys a subscribe needs. */
 export interface SubscriptionKeys {
@@ -267,26 +413,49 @@ export class PwaNotifications {
   }
 
   /**
-   * The endpoint Internet Identity delivers to for this session's browser and
-   * account, or `undefined` where it holds none for them.
+   * The subscription Internet Identity delivers to for this session's browser
+   * and account, or `undefined` where it holds none for them.
    */
-  async registeredEndpoint(): Promise<string | undefined> {
-    const status = unwrapNotification(
+  async registeredSubscription(): Promise<RegisteredSubscription | undefined> {
+    const [status] = unwrapNotification(
       await this.#service.app_get_pwa_webpush_subscription_status(),
       'Internet Identity could not read this subscription',
     );
-    return status[0]?.endpoint;
+    if (status === undefined) return undefined;
+    const [unanswered] = status.unanswered_pushes;
+    return {
+      endpoint: status.endpoint,
+      isPastLimit: unanswered?.is_past_limit === true,
+      unansweredSinceNs: unanswered?.first_sent_at_ns,
+      probeSentAtNs: status.probe_sent_at_ns[0],
+    };
   }
 
-  /** The entry a wake-up named, or `undefined` where it is gone. */
-  async get(inboxNotificationId: bigint): Promise<PwaNotification | undefined> {
+  /**
+   * Sends Internet Identity's "notifications are working" notification through
+   * this subscription. Answers `false` where the push service would not take it.
+   */
+  async probe(): Promise<boolean> {
+    const result = await this.#service.app_probe_pwa_webpush_subscription();
+    if ('Ok' in result) return true;
+    const error = result.Err;
+    if ('NotReachable' in error) return false;
+    if ('NoSuchSession' in error) throw new SessionGoneError();
+    const detail = error.InternalCanisterError;
+    throw new Error(
+      `Internet Identity could not probe this subscription${detail === '' ? '' : `: ${detail}`}`,
+    );
+  }
+
+  /** The entry a wake-up named, empty where it is gone. */
+  async get(inboxNotificationId: bigint): Promise<PwaInboxEntry> {
     const found = unwrapNotification(
       await this.#service.app_get_pwa_notification({
         inbox_notification_id: inboxNotificationId,
       }),
       'Internet Identity could not read this notification',
     );
-    return found.notification[0];
+    return { notification: found.notification[0], event: found.event[0] };
   }
 
   /** Clears the entry a wake-up named, with why it was not shown where it was not. */
@@ -297,6 +466,26 @@ export class PwaNotifications {
         not_shown: notShown === undefined ? [] : [notShown],
       }),
       'Internet Identity could not remove this notification',
+    );
+  }
+
+  /** Whether this installed app is linked to the Safari of the same device. */
+  async sameDeviceLinkStatus(): Promise<SameDeviceLinkStatus> {
+    const status = unwrapNotification(
+      await this.#service.app_get_same_device_link_status(),
+      'Internet Identity could not read this link',
+    );
+    if ('Linked' in status) return 'linked';
+    if ('OtherPathMayDeliver' in status) return 'other-path-may-deliver';
+    if ('NoOtherPath' in status) return 'no-other-path';
+    return unhandledStatus(status);
+  }
+
+  /** Registers the public half of the one-shot key that Safari's claim is signed with. */
+  async prepareSameDeviceLink(linkPublicKey: Uint8Array): Promise<void> {
+    unwrapNotification(
+      await this.#service.app_prepare_same_device_link({ link_public_key: linkPublicKey }),
+      'Internet Identity could not prepare this link',
     );
   }
 }
@@ -460,12 +649,170 @@ export async function subscribeDevice(
     if (!(error instanceof EndpointInUseError)) throw error;
   }
 
-  await subscription.unsubscribe();
-  // A fresh prepare: the transport key the refused call was sealed to is spent.
-  const fresh = await inbox.prepare();
+  // A fresh prepare follows: the transport key the refused call was sealed to is spent.
+  await subscribeFresh(inbox, registration, subscription);
+}
+
+/**
+ * Replaces the push subscription `registration` holds with a fresh endpoint,
+ * and registers it for the session behind `inbox`.
+ */
+export async function resubscribeDevice(
+  inbox: PwaNotifications,
+  registration: ServiceWorkerRegistration,
+): Promise<void> {
+  await subscribeFresh(inbox, registration, await registration.pushManager.getSubscription());
+}
+
+/** Unsubscribes `held`, subscribes `registration` anew, and registers the new endpoint. */
+async function subscribeFresh(
+  inbox: PwaNotifications,
+  registration: ServiceWorkerRegistration,
+  held: PushSubscription | null,
+): Promise<void> {
+  await held?.unsubscribe();
+  const keys = await inbox.prepare();
   const replacement = await registration.pushManager.subscribe({
     userVisibleOnly: true,
-    applicationServerKey: bytesOf(fresh.vapidPublicKey),
+    applicationServerKey: bytesOf(keys.vapidPublicKey),
   });
-  await inbox.set(await sealSubscription(replacement, fresh.transportPublicKey));
+  await inbox.set(await sealSubscription(replacement, keys.transportPublicKey));
+}
+
+/**
+ * How long a probe, from the probe call to the last status read, may take
+ * before its path counts as broken.
+ */
+const PROBE_DEADLINE_MS = 30_000;
+
+/** How often Internet Identity is asked whether the probe was fetched. */
+const PROBE_POLL_MS = 2_000;
+
+/** How a probe ended. */
+type ProbeOutcome =
+  /** The service worker fetched it. */
+  | 'answered'
+  /** Not fetched by the deadline, or the push service would not take it. */
+  | 'unanswered'
+  /** Internet Identity dropped the subscription meanwhile, as it does on a 404 or 410 from the push service. */
+  | 'gone';
+
+/**
+ * Probes the subscription of the session behind `inbox`, and answers whether
+ * the service worker fetched the probe within {@link PROBE_DEADLINE_MS}.
+ *
+ * Fetched means Internet Identity no longer reports the probe outstanding, and
+ * the batch of unanswered pushes that started at `batchSentAtNs` is gone or
+ * replaced by a later one. The unanswered count alone says nothing: a probe
+ * still queued, or refused with a server error, leaves it empty.
+ */
+async function probeOutcome(
+  inbox: PwaNotifications,
+  batchSentAtNs: bigint,
+  isProbeSent: boolean,
+): Promise<ProbeOutcome> {
+  let expired = false;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const deadline = new Promise<ProbeOutcome>((resolve) => {
+    timer = setTimeout(() => {
+      expired = true;
+      resolve('unanswered');
+    }, PROBE_DEADLINE_MS);
+  });
+  const polling = (async (): Promise<ProbeOutcome> => {
+    if (!isProbeSent && !(await inbox.probe())) return 'unanswered';
+    while (!expired) {
+      await wait(PROBE_POLL_MS);
+      if (expired) return 'unanswered';
+      const registered = await inbox.registeredSubscription();
+      if (registered === undefined) return 'gone';
+      if (registered.probeSentAtNs !== undefined) continue;
+      const since = registered.unansweredSinceNs;
+      if (since === undefined || since > batchSentAtNs) return 'answered';
+    }
+    return 'unanswered';
+  })();
+  // A call still pending at the deadline settles later, with nobody to report to.
+  polling.catch(() => undefined);
+  try {
+    return await Promise.race([polling, deadline]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/**
+ * Probes `registered`, the subscription Internet Identity holds for the session
+ * behind `inbox`, or waits on the probe already outstanding for it, and repairs it where the service worker does not fetch the
+ * probe in time: with a fresh endpoint where notification permission is
+ * granted, and by removing it otherwise.
+ *
+ * A device subscription already replaced since the probe, by a repair in
+ * another tab, is left as it is.
+ *
+ * @returns `gone` where Internet Identity dropped the subscription during the
+ *   probe, which leaves registering one again to the caller.
+ */
+export async function repairSubscription(
+  inbox: PwaNotifications,
+  registered: RegisteredSubscription,
+  registration: ServiceWorkerRegistration | undefined,
+): Promise<'repaired' | 'gone'> {
+  // A probe an earlier repair sent and nobody saw answered is waited on again, not sent again.
+  const outcome = await probeOutcome(
+    inbox,
+    registered.unansweredSinceNs ?? BigInt(0),
+    registered.probeSentAtNs !== undefined,
+  );
+  if (outcome !== 'unanswered') return outcome === 'gone' ? 'gone' : 'repaired';
+  if (globalThis.Notification?.permission !== 'granted' || registration === undefined) {
+    await inbox.set(null);
+    return 'repaired';
+  }
+  const held = await registration.pushManager.getSubscription();
+  if (held !== null && held.endpoint !== registered.endpoint) return 'repaired';
+  await subscribeFresh(inbox, registration, held);
+  return 'repaired';
+}
+
+/** Internet Identity's page that claims a same-device link from Safari. */
+const SAME_DEVICE_LINK_PATH = '/ios-installed-app';
+
+/** The one-shot link key's algorithm, which Internet Identity's Safari page signs the claim with. */
+const LINK_KEY_ALGORITHM = { name: 'ECDSA', namedCurve: 'P-256' } as const;
+
+const fromBase64Url = (value: string | undefined): Uint8Array => {
+  if (value === undefined) throw new Error('The link key is missing a coordinate');
+  const standard = value.replace(/-/g, '+').replace(/_/g, '/');
+  return fromBase64(standard.padEnd(Math.ceil(standard.length / 4) * 4, '='));
+};
+
+const toBase64Url = (bytes: Uint8Array): string =>
+  toBase64(bytes).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+
+/**
+ * Mints a one-shot P-256 key, registers its public half for the session behind
+ * `inbox`, and answers the URL of Internet Identity's page that claims the link
+ * from Safari with it.
+ *
+ * The private half travels in the fragment, as `d`, `x` and `y` of its JWK one
+ * after the other, as Internet Identity's own install link carries its key: a
+ * fragment is never sent to the gateway.
+ */
+export async function prepareSameDeviceLinkUrl(
+  inbox: PwaNotifications,
+  identityProviderOrigin: string,
+): Promise<string> {
+  const keyPair = (await crypto.subtle.generateKey(LINK_KEY_ALGORITHM, true, [
+    'sign',
+    'verify',
+  ])) as CryptoKeyPair;
+  const publicKey = new Uint8Array(await crypto.subtle.exportKey('spki', keyPair.publicKey));
+  // Registered before the key is handed out, so a URL that exists is one Internet Identity waits for.
+  await inbox.prepareSameDeviceLink(publicKey);
+  const { d, x, y } = await crypto.subtle.exportKey('jwk', keyPair.privateKey);
+  const key = toBase64Url(concat(fromBase64Url(d), fromBase64Url(x), fromBase64Url(y)));
+  const url = new URL(SAME_DEVICE_LINK_PATH, identityProviderOrigin);
+  url.hash = new URLSearchParams({ key }).toString();
+  return url.href;
 }

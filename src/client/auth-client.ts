@@ -34,13 +34,22 @@ import {
   type NotificationPushEvent,
   type PushNotificationSource,
 } from './push-notification.js';
-import { isInstalledApp, PwaNotifications, subscribeDevice } from './pwa-notifications.js';
+import {
+  isInstalledApp,
+  isSafariInstalledApp,
+  PwaNotifications,
+  prepareSameDeviceLinkUrl,
+  repairSubscription,
+  resubscribeDevice,
+  type SameDeviceLinkStatus,
+  subscribeDevice,
+} from './pwa-notifications.js';
 import {
   AccountMismatchError,
   chainAuthorisesKey,
   SessionGoneError,
 } from './session/app-delegation-source.js';
-import { type HeldLock, stealLock, stealMintLock } from './session/app-lock.js';
+import { type HeldLock, stealLock, stealMintLock, withMintLock } from './session/app-lock.js';
 import { requestSessionDelegation } from './session/session-delegation.js';
 import { SessionIdentity } from './session/session-identity.js';
 import { SessionMinter } from './session/session-minter.js';
@@ -63,6 +72,24 @@ import type { SessionState, StateStorage } from './state/state-storage.js';
  * sign-ins, and they still cannot both have the window.
  */
 const CHANNEL_LOCK = 'ic-auth-signer-channel';
+
+/**
+ * The lock over this origin's push subscription. Not namespaced: every client
+ * and tab of the origin shares one service worker registration.
+ */
+const PUSH_SUBSCRIPTION_LOCK = 'ic-auth-push-subscription';
+
+/** A subscribe's foreground part done, and the repair it leaves running, if any. */
+type SubscribeStep = { repairing: Promise<void> } | undefined;
+
+/** A promise and what settles it, for the start of the next repair. */
+const repairSignal = (): { promise: Promise<void>; resolve: () => void } => {
+  let resolve: () => void = () => undefined;
+  const promise = new Promise<void>((settle) => {
+    resolve = settle;
+  });
+  return { promise, resolve };
+};
 
 /** The lock over one namespace's sign-in, which `signIn` and `signOut` both move. */
 const signInLockFor = (stateSlot: string): string => `${stateSlot}:sign-in`;
@@ -401,6 +428,7 @@ export class AuthClient {
   #credentialStorage: CredentialStorage;
   readonly #slots: Slots;
   readonly #canisterId: Principal;
+  readonly #identityProviderOrigin: string;
   #unwatchForeground: (() => void) | undefined;
   #unwatchState: (() => void) | undefined;
   #unwatchActivity: (() => void) | undefined;
@@ -414,6 +442,10 @@ export class AuthClient {
   // One subscribe at a time: each prepare replaces the key the one before it
   // handed out, so two at once would spend each other's.
   #subscribing: Promise<void> = Promise.resolve();
+  // Set while a repair holds `#subscribing`, which can be its whole probe deadline.
+  #repairing = false;
+  // Resolved, and replaced, each time a repair starts, so a waiter queued behind it stops waiting.
+  #repairStarted = repairSignal();
   // What `getStatus` answers with, replaced only when the record changes.
   #status: SessionStatus;
   readonly #listeners = new Set<() => void>();
@@ -471,6 +503,7 @@ export class AuthClient {
     this.#canisterId = Principal.from(provider.canisterId);
 
     const identityProviderUrl = new URL(provider.authorizeUrl.toString());
+    this.#identityProviderOrigin = identityProviderUrl.origin;
     if (!options.disableBrowserActivity) {
       // The identity decides whether a mint is due; these only say the moment is
       // a good one. Nothing is hooked where there is no DOM.
@@ -1453,8 +1486,67 @@ export class AuthClient {
     }
     await this.#queueSubscribe(async () => {
       await subscribeDevice(await this.#pwaNotifications(), registration);
+      return undefined;
     });
     return permission;
+  }
+
+  /**
+   * Whether this installed web app is linked to Safari on the same device, and
+   * if not, whether linking it would stop a second copy of each notification.
+   *
+   * On iOS a Home Screen app and Safari keep separate storage, so Internet
+   * Identity knows them as two browsers of the identity and may deliver this
+   * application's notifications to both. Offer {@link requestSameDeviceLink}
+   * where this answers `other-path-may-deliver`.
+   *
+   * Check it where notifications are turned on: right after
+   * {@link subscribeToNotifications} answers `granted`, and wherever the app
+   * shows its notification settings.
+   *
+   * Asks Internet Identity only in an installed web app of Safari, the one
+   * browser whose installed apps keep storage of their own. Elsewhere it answers
+   * `no-other-path`.
+   *
+   * @returns Whether this app is linked, or there is something to link.
+   * @throws {SessionGoneError} Where this origin holds no live session.
+   * @example
+   * const offer = (await authClient.getSameDeviceLinkStatus()) === 'other-path-may-deliver';
+   */
+  async getSameDeviceLinkStatus(): Promise<SameDeviceLinkStatus> {
+    if (!isSafariInstalledApp()) return 'no-other-path';
+    return (await this.#pwaNotifications()).sameDeviceLinkStatus();
+  }
+
+  /**
+   * Links this installed web app to Safari on the same device, so this
+   * application's notifications on it arrive only here.
+   *
+   * Registers a one-shot key with Internet Identity and opens its page in
+   * Safari, which claims the link with Safari's sign-in. The page leaves the app
+   * for Safari, so call it from a tap. Offer it where
+   * {@link getSameDeviceLinkStatus} answers `other-path-may-deliver`, which is
+   * checked where notifications are turned on: right after
+   * {@link subscribeToNotifications} answers `granted`, and wherever the app
+   * shows its notification settings.
+   *
+   * @throws {NotificationsUnsupportedError} Outside an installed web app of Safari.
+   * @throws {SessionGoneError} Where this origin holds no live session.
+   * @example
+   * await authClient.requestSameDeviceLink();
+   */
+  async requestSameDeviceLink(): Promise<void> {
+    if (!isSafariInstalledApp()) {
+      throw new NotificationsUnsupportedError(
+        'A same-device link is made only in an installed web app of Safari',
+      );
+    }
+    const url = await prepareSameDeviceLinkUrl(
+      await this.#pwaNotifications(),
+      this.#identityProviderOrigin,
+    );
+    // A link inside the app opens in the app's own view, which holds no Safari sign-in.
+    location.href = url.replace(/^https:/, 'x-safari-https:');
   }
 
   /**
@@ -1675,23 +1767,73 @@ export class AuthClient {
    * created or a load restored, where the user already granted notification
    * permission and this application's consent, and Internet Identity does not
    * already deliver to this device's endpoint for it. Asks the user for nothing.
+   *
+   * Where Internet Identity reports pushes to this subscription unanswered past
+   * its limit, probes it first, and where the probe is not fetched in time,
+   * subscribes again with a fresh endpoint, or removes the subscription where
+   * permission was revoked.
+   *
+   * Resolves once the subscribe part is done, or at once where a repair is
+   * already running ahead of it. A probe runs on in the background, still ahead
+   * of the next subscribe, and a page left meanwhile probes again on its next
+   * load.
    */
   #subscribeWhereUnregistered(key: SignIdentity, sessionChain: DelegationChain): Promise<void> {
-    return this.#queueSubscribe(() => this.#subscribeIfUnregistered(key, sessionChain));
+    const queued = this.#queueSubscribe(() => this.#subscribeIfUnregistered(key, sessionChain));
+    // Behind a repair, already running or started by work queued ahead, nothing waits for it:
+    // it runs if the page stays, and the next load checks again.
+    queued.catch(() => undefined);
+    if (this.#repairing) return Promise.resolve();
+    return Promise.race([queued, this.#repairStarted.promise]);
   }
 
-  /** Runs `work` once every subscribe queued before it has settled. */
-  #queueSubscribe(work: () => Promise<void>): Promise<void> {
-    const next = this.#subscribing.catch(() => undefined).then(work);
-    this.#subscribing = next;
-    return next;
+  /**
+   * Runs `work` once every subscribe queued before it has settled, holding the
+   * lock every client and tab of this origin takes around its push subscription.
+   * Resolves once `work` does; a repair it hands back keeps the queue and the
+   * lock until it settles.
+   */
+  #queueSubscribe(work: () => Promise<SubscribeStep>): Promise<void> {
+    let done: () => void = () => undefined;
+    let failed: (error: unknown) => void = () => undefined;
+    const subscribed = new Promise<void>((resolve, reject) => {
+      done = resolve;
+      failed = reject;
+    });
+    const whole = this.#subscribing.then(() =>
+      withMintLock(PUSH_SUBSCRIPTION_LOCK, async () => {
+        const step = await work().catch((error: unknown) => {
+          failed(error);
+          return undefined;
+        });
+        done();
+        if (step === undefined) return;
+        this.#repairing = true;
+        this.#repairStarted.resolve();
+        this.#repairStarted = repairSignal();
+        try {
+          await step.repairing;
+        } finally {
+          this.#repairing = false;
+        }
+      }),
+    );
+    whole.catch(failed);
+    this.#subscribing = whole.catch(() => undefined);
+    return subscribed;
   }
 
-  async #subscribeIfUnregistered(key: SignIdentity, sessionChain: DelegationChain): Promise<void> {
+  /** Wrapped, so the repair is handed back running rather than awaited. */
+  async #subscribeIfUnregistered(
+    key: SignIdentity,
+    sessionChain: DelegationChain,
+  ): Promise<SubscribeStep> {
     if (!isInstalledApp()) return;
-    if (globalThis.Notification?.permission !== 'granted') return;
+    // Asked whatever the permission: a subscription the user revoked or reset is removed,
+    // but only once Internet Identity reports it past the unanswered limit and the probe fails.
+    const permission = globalThis.Notification?.permission;
+    if (permission === undefined) return;
     const registration = await globalThis.navigator?.serviceWorker?.getRegistration();
-    if (registration === undefined) return;
 
     const options = {
       sessionKey: key,
@@ -1700,8 +1842,32 @@ export class AuthClient {
       agentOptions: this.#options.agentOptions,
     };
     const inbox = await PwaNotifications.create(options);
-    const held = await registration.pushManager.getSubscription();
-    if (held !== null && held.endpoint === (await inbox.registeredEndpoint())) return;
+    const registered = await inbox.registeredSubscription();
+    const canSubscribe = permission === 'granted' && registration !== undefined;
+    const held = canSubscribe ? await registration.pushManager.getSubscription() : null;
+    // Only the endpoint this device holds is worth probing; another one is replaced below.
+    // An outstanding probe is one an interrupted repair left unresolved.
+    const needsProbe = registered?.isPastLimit === true || registered?.probeSentAtNs !== undefined;
+    if (
+      registered !== undefined &&
+      needsProbe &&
+      (!canSubscribe || held?.endpoint === registered.endpoint)
+    ) {
+      return {
+        repairing: (async () => {
+          if ((await repairSubscription(inbox, registered, registration)) !== 'gone') return;
+          // Dropped after its push service refused the endpoint, so a fresh one is registered.
+          if (globalThis.Notification?.permission !== 'granted' || registration === undefined) {
+            return;
+          }
+          const consent = await NotificationConsent.create(options);
+          if (!(await consent.status()).granted) return;
+          await resubscribeDevice(inbox, registration);
+        })(),
+      };
+    }
+    if (!canSubscribe) return;
+    if (held !== null && held.endpoint === registered?.endpoint) return;
     const consent = await NotificationConsent.create(options);
     if (!(await consent.status()).granted) return;
     await subscribeDevice(inbox, registration);

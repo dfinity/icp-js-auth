@@ -1,8 +1,11 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   isInstalledApp,
+  isSafariInstalledApp,
   type PwaNotificationService,
   PwaNotifications,
+  prepareSameDeviceLinkUrl,
+  repairSubscription,
   sealSubscription,
   subscribeDevice,
 } from '../../src/client/pwa-notifications.ts';
@@ -21,7 +24,7 @@ function fakeService(answers: Partial<PwaNotificationService>): PwaNotificationS
   return {
     app_prepare_pwa_webpush_subscription: vi.fn(async () => ({ Ok: KEYS })),
     app_set_pwa_webpush_subscription: vi.fn(async () => ({ Ok: null })),
-    app_get_pwa_notification: vi.fn(async () => ({ Ok: { notification: [] } })),
+    app_get_pwa_notification: vi.fn(async () => ({ Ok: { notification: [], event: [] } })),
     app_remove_pwa_notification: vi.fn(async () => ({ Ok: {} })),
     ...answers,
   } as PwaNotificationService;
@@ -52,6 +55,31 @@ describe('isInstalledApp', () => {
     vi.stubGlobal('matchMedia', () => ({ matches: false }));
 
     expect(isInstalledApp()).toBe(false);
+  });
+});
+
+describe('isSafariInstalledApp', () => {
+  it('answers no in an installed app of a browser without navigator.standalone', () => {
+    vi.stubGlobal('matchMedia', (query: string) => ({
+      matches: query === '(display-mode: standalone)',
+    }));
+    vi.stubGlobal('navigator', {});
+
+    expect(isSafariInstalledApp()).toBe(false);
+  });
+
+  it('answers no in a Safari tab', () => {
+    vi.stubGlobal('matchMedia', () => ({ matches: false }));
+    vi.stubGlobal('navigator', { standalone: false });
+
+    expect(isSafariInstalledApp()).toBe(false);
+  });
+
+  it('answers yes in a Safari Home Screen app', () => {
+    vi.stubGlobal('matchMedia', () => ({ matches: false }));
+    vi.stubGlobal('navigator', { standalone: true });
+
+    expect(isSafariInstalledApp()).toBe(true);
   });
 });
 
@@ -273,5 +301,301 @@ describe('subscribeDevice', () => {
     await expect(subscribeDevice(inbox, registration)).rejects.toThrow(
       'This push endpoint is registered with other keys',
     );
+  });
+});
+
+describe('same-device link', () => {
+  it.each([
+    [{ Linked: null }, 'linked'],
+    [{ OtherPathMayDeliver: null }, 'other-path-may-deliver'],
+    [{ NoOtherPath: null }, 'no-other-path'],
+  ])('reads %o as %s', async (answer, status) => {
+    const inbox = over(
+      fakeService({ app_get_same_device_link_status: vi.fn(async () => ({ Ok: answer })) }),
+    );
+
+    await expect(inbox.sameDeviceLinkStatus()).resolves.toBe(status);
+  });
+
+  it('refuses a status it has no arm for, rather than reading it as nothing to link', async () => {
+    const inbox = over(
+      fakeService({
+        app_get_same_device_link_status: vi.fn(async () => ({
+          Ok: { Unknown: null } as unknown as { Linked: null },
+        })),
+      }),
+    );
+
+    await expect(inbox.sameDeviceLinkStatus()).rejects.toThrow('unknown link status');
+  });
+
+  it('registers the public half of the key whose private half the URL carries', async () => {
+    const prepare = vi.fn(async (_: { link_public_key: Uint8Array }) => ({ Ok: null }));
+    const inbox = over(fakeService({ app_prepare_same_device_link: prepare }));
+
+    const url = new URL(await prepareSameDeviceLinkUrl(inbox, 'https://id.example'));
+
+    expect(url.origin + url.pathname).toBe('https://id.example/ios-installed-app');
+    expect(url.search).toBe('');
+    const key = new URLSearchParams(url.hash.slice(1)).get('key') ?? '';
+    const bytes = Uint8Array.from(
+      atob(key.replace(/-/g, '+').replace(/_/g, '/').padEnd(128, '=')),
+      (char) => char.charCodeAt(0),
+    );
+    expect(bytes).toHaveLength(96);
+    const coordinate = (at: number) =>
+      btoa(String.fromCharCode(...bytes.subarray(at * 32, (at + 1) * 32)))
+        .replace(/\+/g, '-')
+        .replace(/\//g, '_')
+        .replace(/=+$/, '');
+    const privateKey = await crypto.subtle.importKey(
+      'jwk',
+      { kty: 'EC', crv: 'P-256', d: coordinate(0), x: coordinate(1), y: coordinate(2) },
+      { name: 'ECDSA', namedCurve: 'P-256' },
+      false,
+      ['sign'],
+    );
+    const registered = await crypto.subtle.importKey(
+      'spki',
+      prepare.mock.calls[0][0].link_public_key as Uint8Array<ArrayBuffer>,
+      { name: 'ECDSA', namedCurve: 'P-256' },
+      false,
+      ['verify'],
+    );
+    const message = new TextEncoder().encode('claim');
+    const signature = await crypto.subtle.sign(
+      { name: 'ECDSA', hash: 'SHA-256' },
+      privateKey,
+      message,
+    );
+
+    await expect(
+      crypto.subtle.verify({ name: 'ECDSA', hash: 'SHA-256' }, registered, signature, message),
+    ).resolves.toBe(true);
+  });
+
+  it('hands out no URL where Internet Identity refuses the key', async () => {
+    const inbox = over(
+      fakeService({
+        app_prepare_same_device_link: vi.fn(async () => ({ Err: { NoSuchSession: null } })),
+      }),
+    );
+
+    await expect(prepareSameDeviceLinkUrl(inbox, 'https://id.example')).rejects.toThrow(
+      SessionGoneError,
+    );
+  });
+});
+
+describe('repairSubscription', () => {
+  const UNANSWERED = { count: 3, first_sent_at_ns: BigInt(1), is_past_limit: true };
+  const REGISTERED = {
+    endpoint: 'https://push.example/1',
+    isPastLimit: true,
+    unansweredSinceNs: BigInt(1),
+  };
+
+  async function setUp(statuses: unknown[], probeAnswer: unknown = { Ok: null }) {
+    const status = vi.fn();
+    for (const answer of statuses) status.mockResolvedValueOnce(answer);
+    const set = vi.fn(async () => ({ Ok: null }));
+    const probe = vi.fn(async () => probeAnswer as { Ok: null });
+    const transport = await crypto.subtle.generateKey({ name: 'ECDH', namedCurve: 'P-256' }, true, [
+      'deriveBits',
+    ]);
+    const inbox = over(
+      fakeService({
+        app_get_pwa_webpush_subscription_status: status,
+        app_probe_pwa_webpush_subscription: probe,
+        app_set_pwa_webpush_subscription: set,
+        app_prepare_pwa_webpush_subscription: vi.fn(async () => ({
+          Ok: {
+            vapid_public_key: KEYS.vapid_public_key,
+            transport_public_key: new Uint8Array(
+              await crypto.subtle.exportKey('raw', transport.publicKey),
+            ),
+          },
+        })),
+      }),
+    );
+    const held = await fakeSubscription('https://push.example/1', KEYS.vapid_public_key);
+    const fresh = await fakeSubscription('https://push.example/2', KEYS.vapid_public_key);
+    const getSubscription = vi.fn(async (): Promise<typeof held> => held);
+    const registration = {
+      pushManager: { getSubscription, subscribe: vi.fn(async () => fresh) },
+    } as unknown as ServiceWorkerRegistration;
+    return { inbox, registration, set, probe, status, held, getSubscription };
+  }
+
+  const unanswered = {
+    Ok: [
+      { endpoint: 'https://push.example/1', unanswered_pushes: [UNANSWERED], probe_sent_at_ns: [] },
+    ],
+  };
+  const answered = {
+    Ok: [{ endpoint: 'https://push.example/1', unanswered_pushes: [], probe_sent_at_ns: [] }],
+  };
+  const outstanding = {
+    Ok: [
+      {
+        endpoint: 'https://push.example/1',
+        unanswered_pushes: [],
+        probe_sent_at_ns: [BigInt(9)],
+      },
+    ],
+  };
+  const laterBatch = {
+    Ok: [
+      {
+        endpoint: 'https://push.example/1',
+        unanswered_pushes: [{ ...UNANSWERED, first_sent_at_ns: BigInt(5) }],
+        probe_sent_at_ns: [],
+      },
+    ],
+  };
+
+  it('reads the unanswered pushes Internet Identity reports', async () => {
+    const { inbox } = await setUp([unanswered]);
+
+    await expect(inbox.registeredSubscription()).resolves.toEqual(REGISTERED);
+  });
+
+  it('leaves a subscription whose probe the service worker fetched', async () => {
+    vi.useFakeTimers();
+    vi.stubGlobal('Notification', { permission: 'granted' });
+    const { inbox, registration, set, probe } = await setUp([unanswered, answered]);
+
+    const repairing = repairSubscription(inbox, REGISTERED, registration);
+    await vi.advanceTimersByTimeAsync(4_000);
+    await repairing;
+
+    expect(probe).toHaveBeenCalledTimes(1);
+    expect(set).not.toHaveBeenCalled();
+  });
+
+  it('counts the probe fetched where pushes since then started a new batch', async () => {
+    vi.useFakeTimers();
+    vi.stubGlobal('Notification', { permission: 'granted' });
+    const { inbox, registration, set, held } = await setUp(Array(20).fill(laterBatch));
+
+    const repairing = repairSubscription(inbox, REGISTERED, registration);
+    await vi.advanceTimersByTimeAsync(30_000);
+    await repairing;
+
+    expect(held.unsubscribe).not.toHaveBeenCalled();
+    expect(set).not.toHaveBeenCalled();
+  });
+
+  it('waits out a probe Internet Identity still reports outstanding, whatever the count', async () => {
+    vi.useFakeTimers();
+    vi.stubGlobal('Notification', { permission: 'granted' });
+    const { inbox, registration, set, held } = await setUp(Array(20).fill(outstanding));
+
+    const repairing = repairSubscription(inbox, REGISTERED, registration);
+    await vi.advanceTimersByTimeAsync(30_000);
+    await repairing;
+
+    expect(held.unsubscribe).toHaveBeenCalled();
+    expect(set).toHaveBeenCalledTimes(1);
+  });
+
+  it('waits on a probe already outstanding without sending another, and repairs at the deadline', async () => {
+    vi.useFakeTimers();
+    vi.stubGlobal('Notification', { permission: 'granted' });
+    const { inbox, registration, set, held, probe } = await setUp(Array(20).fill(outstanding));
+
+    const repairing = repairSubscription(
+      inbox,
+      { endpoint: 'https://push.example/1', isPastLimit: false, probeSentAtNs: BigInt(9) },
+      registration,
+    );
+    await vi.advanceTimersByTimeAsync(30_000);
+    await repairing;
+
+    expect(probe).not.toHaveBeenCalled();
+    expect(held.unsubscribe).toHaveBeenCalled();
+    expect(set).toHaveBeenCalledTimes(1);
+  });
+
+  it('reports a subscription Internet Identity dropped during the probe as gone, not fetched', async () => {
+    vi.useFakeTimers();
+    vi.stubGlobal('Notification', { permission: 'granted' });
+    const { inbox, registration, set, held } = await setUp([{ Ok: [] }]);
+
+    const repairing = repairSubscription(inbox, REGISTERED, registration);
+    await vi.advanceTimersByTimeAsync(2_000);
+
+    await expect(repairing).resolves.toBe('gone');
+    expect(held.unsubscribe).not.toHaveBeenCalled();
+    expect(set).not.toHaveBeenCalled();
+  });
+
+  it('subscribes again with a fresh endpoint where the probe is not fetched by the deadline', async () => {
+    vi.useFakeTimers();
+    vi.stubGlobal('Notification', { permission: 'granted' });
+    const { inbox, registration, set, held } = await setUp(Array(20).fill(unanswered));
+
+    const repairing = repairSubscription(inbox, REGISTERED, registration);
+    await vi.advanceTimersByTimeAsync(28_000);
+    expect(held.unsubscribe).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(2_000);
+    await repairing;
+
+    expect(held.unsubscribe).toHaveBeenCalled();
+    expect(set).toHaveBeenCalledTimes(1);
+    expect(set.mock.calls[0]).toEqual([
+      { subscription: [expect.objectContaining({ endpoint: 'https://push.example/2' })] },
+    ]);
+  });
+
+  it('stops at the deadline where a status read stalls', async () => {
+    vi.useFakeTimers();
+    vi.stubGlobal('Notification', { permission: 'granted' });
+    const { inbox, registration, status, held } = await setUp([]);
+    status.mockImplementation(() => new Promise(() => undefined));
+
+    const repairing = repairSubscription(inbox, REGISTERED, registration);
+    await vi.advanceTimersByTimeAsync(30_000);
+    await repairing;
+
+    expect(status).toHaveBeenCalledTimes(1);
+    expect(held.unsubscribe).toHaveBeenCalled();
+  });
+
+  it('stops at the deadline where the probe call stalls', async () => {
+    vi.useFakeTimers();
+    vi.stubGlobal('Notification', { permission: 'granted' });
+    const { inbox, registration, probe, status, held } = await setUp([]);
+    probe.mockImplementation(() => new Promise(() => undefined));
+
+    const repairing = repairSubscription(inbox, REGISTERED, registration);
+    await vi.advanceTimersByTimeAsync(30_000);
+    await repairing;
+
+    expect(status).not.toHaveBeenCalled();
+    expect(held.unsubscribe).toHaveBeenCalled();
+  });
+
+  it('leaves a device subscription another repair already replaced', async () => {
+    vi.stubGlobal('Notification', { permission: 'granted' });
+    const { inbox, registration, set, getSubscription } = await setUp([], {
+      Err: { NotReachable: null },
+    });
+    const replaced = await fakeSubscription('https://push.example/3', KEYS.vapid_public_key);
+    getSubscription.mockResolvedValue(replaced);
+
+    await repairSubscription(inbox, REGISTERED, registration);
+
+    expect(replaced.unsubscribe).not.toHaveBeenCalled();
+    expect(set).not.toHaveBeenCalled();
+  });
+
+  it('removes the subscription where the probe cannot reach the device and permission is revoked', async () => {
+    vi.stubGlobal('Notification', { permission: 'denied' });
+    const { inbox, registration, set } = await setUp([], { Err: { NotReachable: null } });
+
+    await repairSubscription(inbox, REGISTERED, registration);
+
+    expect(set).toHaveBeenCalledWith({ subscription: [] });
   });
 });

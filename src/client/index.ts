@@ -27,6 +27,7 @@ export type {
   NotificationPushEvent,
   PushNotificationData,
 } from './push-notification.js';
+export type { SameDeviceLinkStatus } from './pwa-notifications.js';
 export { type AppDelegationSource, SessionGoneError } from './session/app-delegation-source.js';
 export {
   InteractionRequiredError,

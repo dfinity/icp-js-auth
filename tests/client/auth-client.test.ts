@@ -3005,18 +3005,25 @@ describe('AuthClient re-subscribing an installed app after sign-in', () => {
       options: { applicationServerKey: VAPID.buffer },
       getKey: (name: string) =>
         name === 'p256dh' ? new Uint8Array(65).buffer : new Uint8Array(16).buffer,
+      unsubscribe: vi.fn(async () => true),
     };
+    const fresh = { ...subscription, endpoint: 'https://push.example/fresh' };
+    const subscribe = vi.fn(async () => fresh);
     const registration = {
-      pushManager: { getSubscription: async () => subscription, subscribe: vi.fn() },
+      pushManager: { getSubscription: async () => subscription, subscribe },
     };
     Object.defineProperty(navigator, 'serviceWorker', {
       configurable: true,
       value: { getRegistration: async () => registration },
     });
-    return { requestPermission };
+    return { requestPermission, subscription, subscribe };
   }
 
-  function fakeCalls(granted: boolean, registered?: string) {
+  function fakeCalls(
+    granted: boolean,
+    registered?: string,
+    { isPastLimit = false, isReachable = true } = {},
+  ) {
     const status = vi.fn(async () => ({ granted }));
     vi.spyOn(NotificationConsent, 'create').mockResolvedValue({
       status,
@@ -3040,13 +3047,19 @@ describe('AuthClient re-subscribing an installed app after sign-in', () => {
         ),
       };
     });
-    const registeredEndpoint = vi.fn(async () => held);
+    const registeredSubscription = vi.fn(async () =>
+      held === undefined
+        ? undefined
+        : { endpoint: held, isPastLimit, unansweredSinceNs: isPastLimit ? BigInt(1) : undefined },
+    );
+    const probe = vi.fn(async () => isReachable);
     vi.spyOn(PwaNotifications, 'create').mockResolvedValue({
       prepare,
       set,
-      registeredEndpoint,
+      registeredSubscription,
+      probe,
     } as unknown as PwaNotifications);
-    return { status, set, prepare };
+    return { status, set, prepare, probe, registeredSubscription };
   }
 
   afterEach(() => {
@@ -3222,6 +3235,76 @@ describe('AuthClient re-subscribing an installed app after sign-in', () => {
     expect(status).not.toHaveBeenCalled();
   });
 
+  it('probes nothing where Internet Identity reports no unanswered pushes past the limit', async () => {
+    installedApp('denied');
+    const { probe, set } = fakeCalls(true, 'https://push.example/1');
+    const client = track(new AuthClient());
+    handleSignIn(FakeTransport.last());
+
+    await client.signIn();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(probe).not.toHaveBeenCalled();
+    expect(set).not.toHaveBeenCalled();
+  });
+
+  it('subscribes again with a fresh endpoint where the probe cannot reach this device', async () => {
+    const { subscription, subscribe } = installedApp('granted');
+    const { probe, set } = fakeCalls(true, 'https://push.example/1', {
+      isPastLimit: true,
+      isReachable: false,
+    });
+    const client = track(new AuthClient());
+    handleSignIn(FakeTransport.last());
+
+    await client.signIn();
+
+    await vi.waitFor(() => expect(set).toHaveBeenCalled());
+    expect(probe).toHaveBeenCalled();
+    expect(subscription.unsubscribe).toHaveBeenCalled();
+    expect(subscribe).toHaveBeenCalled();
+    expect(set.mock.calls[0]).toEqual([
+      expect.objectContaining({ endpoint: 'https://push.example/fresh' }),
+    ]);
+  });
+
+  it('navigates to a returnTo without waiting for a probe', async () => {
+    installedApp('granted');
+    const { probe, set } = fakeCalls(true, 'https://push.example/1', { isPastLimit: true });
+    const replace = vi.fn();
+    vi.stubGlobal('location', {
+      replace,
+      reload: vi.fn(),
+      href: 'http://localhost/sign-in',
+      origin: 'http://localhost',
+    });
+    const client = track(new AuthClient());
+    handleSignIn(FakeTransport.last());
+
+    // Internet Identity keeps reporting the probe unfetched, so its poll runs to the deadline.
+    await client.signIn({ returnTo: '/app' });
+
+    expect(probe).toHaveBeenCalled();
+    expect(replace).toHaveBeenCalledWith('http://localhost/app');
+    expect(set).not.toHaveBeenCalled();
+  });
+
+  it('removes the subscription where the probe goes unanswered and permission was revoked', async () => {
+    const { subscribe } = installedApp('denied');
+    const { set } = fakeCalls(true, 'https://push.example/1', {
+      isPastLimit: true,
+      isReachable: false,
+    });
+    const client = track(new AuthClient());
+    handleSignIn(FakeTransport.last());
+
+    await client.signIn();
+
+    await vi.waitFor(() => expect(set).toHaveBeenCalled());
+    expect(set.mock.calls[0]).toEqual([null]);
+    expect(subscribe).not.toHaveBeenCalled();
+  });
+
   describe('on a load that restores the session', () => {
     const secrets = [
       '302a300506032b6570032100d1fa89134802051c8b5d4e53c08b87381b87097bca4c4f348611eb8ce6c91809',
@@ -3273,6 +3356,184 @@ describe('AuthClient re-subscribing an installed app after sign-in', () => {
       await vi.waitFor(() => expect(set).toHaveBeenCalledTimes(1));
     });
 
+    it('subscribes again with a fresh endpoint where the probe cannot reach this device', async () => {
+      installedApp('granted');
+      const { set } = fakeCalls(true, 'https://push.example/1', {
+        isPastLimit: true,
+        isReachable: false,
+      });
+
+      await restoredClient();
+
+      await vi.waitFor(() => expect(set).toHaveBeenCalledTimes(1));
+      expect(set.mock.calls[0]).toEqual([
+        expect.objectContaining({ endpoint: 'https://push.example/fresh' }),
+      ]);
+    });
+
+    it('repairs one subscription at a time across clients sharing the origin', async () => {
+      installedApp('granted');
+      const { probe, set } = fakeCalls(true, 'https://push.example/1', {
+        isPastLimit: true,
+        isReachable: false,
+      });
+      // Internet Identity keeps the endpoint both clients probe, so each of them probes it.
+      set.mockImplementation(async () => undefined);
+      let running = 0;
+      let most = 0;
+      probe.mockImplementation(async () => {
+        running++;
+        most = Math.max(most, running);
+        await new Promise((resolve) => setTimeout(resolve, 5));
+        running--;
+        return false;
+      });
+      // Exclusive and queued, as the platform's is, for this lock alone.
+      let queue: Promise<unknown> = Promise.resolve();
+      Object.defineProperty(navigator, 'locks', {
+        configurable: true,
+        value: {
+          request: (name: string, ...rest: unknown[]) => {
+            const run = rest.at(-1) as () => Promise<unknown>;
+            if (name !== 'ic-auth-push-subscription') return run();
+            const next = queue.then(run);
+            queue = next.catch(() => undefined);
+            return next;
+          },
+        },
+      });
+
+      try {
+        await Promise.all([restoredClient(), restoredClient()]);
+        await vi.waitFor(() => expect(probe.mock.calls.length).toBeGreaterThanOrEqual(2));
+        await queue;
+      } finally {
+        Reflect.deleteProperty(navigator, 'locks');
+      }
+
+      expect(most).toBe(1);
+    });
+
+    it('navigates to a returnTo without waiting for a repair the load started', async () => {
+      installedApp('granted');
+      const { probe } = fakeCalls(true, 'https://push.example/1', { isPastLimit: true });
+      const replace = vi.fn();
+      vi.stubGlobal('location', {
+        replace,
+        reload: vi.fn(),
+        href: 'http://localhost/sign-in',
+        origin: 'http://localhost',
+      });
+
+      const client = await restoredClient();
+      // Internet Identity keeps reporting the probe unfetched, so the repair runs to its deadline.
+      await vi.waitFor(() => expect(probe).toHaveBeenCalled());
+      handleSignIn(FakeTransport.last());
+      await client.signIn({ returnTo: '/app' });
+
+      expect(replace).toHaveBeenCalledWith('http://localhost/app');
+    });
+
+    it('navigates to a returnTo without waiting for a repair the load starts after the sign-in queued', async () => {
+      installedApp('granted');
+      const { probe, registeredSubscription } = fakeCalls(true, 'https://push.example/1', {
+        isPastLimit: true,
+      });
+      const pastLimit = await registeredSubscription();
+      let answer: () => void = () => undefined;
+      registeredSubscription.mockImplementationOnce(
+        () =>
+          new Promise((resolve) => {
+            answer = () => resolve(pastLimit);
+          }),
+      );
+      const replace = vi.fn();
+      vi.stubGlobal('location', {
+        replace,
+        reload: vi.fn(),
+        href: 'http://localhost/sign-in',
+        origin: 'http://localhost',
+      });
+
+      const client = await restoredClient();
+      await vi.waitFor(() => expect(registeredSubscription).toHaveBeenCalledTimes(2));
+      handleSignIn(FakeTransport.last());
+      const signingIn = client.signIn({ returnTo: '/app' });
+      // The sign-in's check is queued behind the load's, whose status read is still pending.
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      answer();
+      await signingIn;
+
+      expect(probe).toHaveBeenCalled();
+      expect(replace).toHaveBeenCalledWith('http://localhost/app');
+    });
+
+    it('removes a subscription the probe cannot reach where permission was reset to ask', async () => {
+      const { subscribe } = installedApp('default');
+      const { set } = fakeCalls(true, 'https://push.example/1', {
+        isPastLimit: true,
+        isReachable: false,
+      });
+
+      await restoredClient();
+
+      await vi.waitFor(() => expect(set).toHaveBeenCalled());
+      expect(set.mock.calls[0]).toEqual([null]);
+      expect(subscribe).not.toHaveBeenCalled();
+    });
+
+    it('registers the endpoint this device holds, without a probe, where Internet Identity reports another past the limit', async () => {
+      installedApp('granted');
+      const { probe, set } = fakeCalls(true, 'https://push.example/old', { isPastLimit: true });
+
+      await restoredClient();
+
+      await vi.waitFor(() => expect(set).toHaveBeenCalledTimes(1));
+      expect(set.mock.calls[0]).toEqual([
+        expect.objectContaining({ endpoint: 'https://push.example/1' }),
+      ]);
+      expect(probe).not.toHaveBeenCalled();
+    });
+
+    it('registers a fresh endpoint where Internet Identity drops the subscription during the probe', async () => {
+      const { subscription } = installedApp('granted');
+      const { set, registeredSubscription, status } = fakeCalls(true, 'https://push.example/1', {
+        isPastLimit: true,
+      });
+      const pastLimit = await registeredSubscription();
+      registeredSubscription.mockReset();
+      registeredSubscription.mockResolvedValueOnce(pastLimit).mockResolvedValue(undefined);
+
+      await restoredClient();
+
+      await vi.waitFor(() => expect(set).toHaveBeenCalled(), { timeout: 4_000 });
+      expect(status).toHaveBeenCalled();
+      expect(subscription.unsubscribe).toHaveBeenCalled();
+      expect(set.mock.calls[0]).toEqual([
+        expect.objectContaining({ endpoint: 'https://push.example/fresh' }),
+      ]);
+    });
+
+    it('resumes waiting on a probe an interrupted repair left outstanding, without sending another', async () => {
+      installedApp('granted');
+      const { probe, registeredSubscription } = fakeCalls(true, 'https://push.example/1');
+      registeredSubscription.mockResolvedValue({
+        endpoint: 'https://push.example/1',
+        isPastLimit: false,
+        unansweredSinceNs: undefined,
+        probeSentAtNs: BigInt(5),
+      } as never);
+
+      await restoredClient();
+
+      // The load's read, then the poll's.
+      await vi.waitFor(
+        () => expect(registeredSubscription.mock.calls.length).toBeGreaterThanOrEqual(2),
+        { timeout: 4_000 },
+      );
+      expect(probe).not.toHaveBeenCalled();
+    });
+
     it('asks Internet Identity nothing outside an installed app', async () => {
       installedApp('granted');
       vi.stubGlobal('matchMedia', () => ({ matches: false }));
@@ -3283,5 +3544,86 @@ describe('AuthClient re-subscribing an installed app after sign-in', () => {
 
       expect(create).not.toHaveBeenCalled();
     });
+  });
+});
+
+describe('AuthClient same-device link', () => {
+  const secrets = [
+    '302a300506032b6570032100d1fa89134802051c8b5d4e53c08b87381b87097bca4c4f348611eb8ce6c91809',
+    '4bbff6b476463558d7be318aa342d1a97778d70833038680187950e9e02486c0d1fa89134802051c8b5d4e53c08b87381b87097bca4c4f348611eb8ce6c91809',
+  ];
+
+  async function signedInClient(options: ConstructorParameters<typeof AuthClient>[0] = {}) {
+    const key = Ed25519KeyIdentity.fromJSON(JSON.stringify(secrets));
+    const chain = await createTestDelegation(key, new Date(Date.now() + 24 * 60 * 60 * 1000));
+    const client = track(
+      new AuthClient({
+        credentialStorage: spyStorage({ identity: key, chain }),
+        stateStorage: stateFor(chain),
+        ...options,
+      }),
+    );
+    await client.getIdentity();
+    return client;
+  }
+
+  /** A Home Screen app of Safari whose notification permission is not granted, so loads subscribe nothing. */
+  function safariInstalledApp() {
+    vi.stubGlobal('matchMedia', () => ({ matches: false }));
+    vi.stubGlobal('Notification', { permission: 'default' });
+    Object.defineProperty(navigator, 'standalone', { configurable: true, value: true });
+  }
+
+  afterEach(() => {
+    Reflect.deleteProperty(navigator, 'standalone');
+    vi.restoreAllMocks();
+  });
+
+  it('answers no-other-path without asking Internet Identity outside Safari', async () => {
+    vi.stubGlobal('matchMedia', (query: string) => ({
+      matches: query === '(display-mode: standalone)',
+    }));
+    const create = vi.spyOn(PwaNotifications, 'create');
+    const client = await signedInClient();
+
+    await expect(client.getSameDeviceLinkStatus()).resolves.toBe('no-other-path');
+    expect(create).not.toHaveBeenCalled();
+  });
+
+  it("answers Internet Identity's status in a Home Screen app of Safari", async () => {
+    safariInstalledApp();
+    vi.spyOn(PwaNotifications, 'create').mockResolvedValue({
+      sameDeviceLinkStatus: async () => 'other-path-may-deliver',
+    } as unknown as PwaNotifications);
+    const client = await signedInClient();
+
+    await expect(client.getSameDeviceLinkStatus()).resolves.toBe('other-path-may-deliver');
+  });
+
+  it('refuses to link outside Safari', async () => {
+    vi.stubGlobal('matchMedia', (query: string) => ({
+      matches: query === '(display-mode: standalone)',
+    }));
+    const client = await signedInClient();
+
+    await expect(client.requestSameDeviceLink()).rejects.toThrow(NotificationsUnsupportedError);
+  });
+
+  it("opens the identity provider's link page in Safari once the key is registered", async () => {
+    safariInstalledApp();
+    const prepareSameDeviceLink = vi.fn(async () => undefined);
+    vi.spyOn(PwaNotifications, 'create').mockResolvedValue({
+      prepareSameDeviceLink,
+    } as unknown as PwaNotifications);
+    const location = { href: 'https://app.example/' };
+    const client = await signedInClient({
+      identityProvider: { authorizeUrl: 'https://id.example/authorize', canisterId: II_CANISTER },
+    });
+    vi.stubGlobal('location', location);
+
+    await client.requestSameDeviceLink();
+
+    expect(prepareSameDeviceLink).toHaveBeenCalledTimes(1);
+    expect(location.href).toMatch(/^x-safari-https:\/\/id\.example\/ios-installed-app#key=[\w-]+$/);
   });
 });
