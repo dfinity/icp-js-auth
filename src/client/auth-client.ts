@@ -1802,19 +1802,27 @@ export class AuthClient {
   }
 
   /**
-   * Registers this origin's push subscription where permission and consent are
-   * granted but Internet Identity does not deliver to it yet: in an installed
-   * app always, in a browser tab only where its service worker holds a
-   * subscription already. Never prompts, and leaves a subscription under another
-   * key to a tap. A subscription Internet Identity reports unanswered is probed
-   * first, and replaced, or removed where permission was revoked, if the probe
-   * goes unanswered.
+   * Registers this installed app's push subscription where permission and
+   * consent are granted but Internet Identity does not deliver to it yet.
+   * Never prompts, and leaves a subscription under another key to a tap. A
+   * subscription Internet Identity reports unanswered is probed first, and
+   * replaced, or removed where permission was revoked, if the probe goes
+   * unanswered. Resolves without waiting for the probe.
    */
   #subscribeWhereUnregistered(key: SignIdentity, sessionChain: DelegationChain): Promise<void> {
-    return this.#queueSubscribe(() => this.#subscribeIfUnregistered(key, sessionChain));
+    const subscribed = this.#subscribing
+      .catch(() => undefined)
+      .then(() => this.#subscribeIfUnregistered(key, sessionChain));
+    this.#subscribing = subscribed.then((step) => step?.repairing).catch(() => undefined);
+    return subscribed.then(() => undefined);
   }
 
-  async #subscribeIfUnregistered(key: SignIdentity, sessionChain: DelegationChain): Promise<void> {
+  /** Wrapped, so the repair is handed back running rather than awaited. */
+  async #subscribeIfUnregistered(
+    key: SignIdentity,
+    sessionChain: DelegationChain,
+  ): Promise<{ repairing: Promise<void> } | undefined> {
+    if (!isInstalledApp()) return;
     // Denied still asks: a subscription registered before the user revoked it is removed.
     const permission = globalThis.Notification?.permission;
     if (permission !== 'granted' && permission !== 'denied') return;
@@ -1832,8 +1840,7 @@ export class AuthClient {
     const inbox = await PwaNotifications.create(options, globalThis.location.origin);
     const registered = await inbox.registeredSubscription();
     if (registered?.isPastLimit === true) {
-      await repairSubscription(inbox, registration);
-      return;
+      return { repairing: repairSubscription(inbox, registration) };
     }
     if (permission !== 'granted' || registration === undefined) return;
     if (held !== null && held.endpoint === registered?.endpoint) return;
