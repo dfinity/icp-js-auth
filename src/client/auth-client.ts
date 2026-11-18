@@ -1365,8 +1365,9 @@ export class AuthClient {
     if (registration === undefined) {
       throw new Error('This origin has no service worker registered to receive notifications');
     }
-    const inbox = await this.#pwaNotifications();
-    await subscribeDevice(inbox, registration);
+    await this.#queueSubscribe(async () => {
+      await subscribeDevice(await this.#pwaNotifications(), registration);
+    });
     return permission;
   }
 
@@ -1590,9 +1591,12 @@ export class AuthClient {
    * already deliver to this device's endpoint for it. Asks the user for nothing.
    */
   #subscribeWhereUnregistered(key: SignIdentity, sessionChain: DelegationChain): Promise<void> {
-    const next = this.#subscribing
-      .catch(() => undefined)
-      .then(() => this.#subscribeIfUnregistered(key, sessionChain));
+    return this.#queueSubscribe(() => this.#subscribeIfUnregistered(key, sessionChain));
+  }
+
+  /** Runs `work` once every subscribe queued before it has settled. */
+  #queueSubscribe(work: () => Promise<void>): Promise<void> {
+    const next = this.#subscribing.catch(() => undefined).then(work);
     this.#subscribing = next;
     return next;
   }
