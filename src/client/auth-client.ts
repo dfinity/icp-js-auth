@@ -1865,10 +1865,16 @@ export class AuthClient {
     };
     const inbox = await PwaNotifications.create(options, globalThis.location.origin);
     const registered = await inbox.registeredSubscription();
-    if (registered?.isPastLimit === true) {
+    const canSubscribe = permission === 'granted' && registration !== undefined;
+    const held = canSubscribe ? await registration.pushManager.getSubscription() : null;
+    // Only the endpoint this device holds is worth probing; another one is replaced below.
+    if (
+      registered?.isPastLimit === true &&
+      (!canSubscribe || held?.endpoint === registered.endpoint)
+    ) {
       return { repairing: repairSubscription(inbox, registered, registration) };
     }
-    if (permission !== 'granted' || registration === undefined) return;
+    if (!canSubscribe) return;
     if (held !== null && held.endpoint === registered?.endpoint) return;
     const consent = await NotificationConsent.create(options);
     if (!(await consent.status()).granted) return;
