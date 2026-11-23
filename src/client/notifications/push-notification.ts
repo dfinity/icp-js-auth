@@ -15,7 +15,7 @@ const TAG_PREFIX = 'ii-notification';
 const GENERIC_TAG = TAG_PREFIX;
 
 /** The tag of Internet Identity's probe notification, so a later probe replaces an earlier one. */
-const PROBE_TAG = `${GENERIC_TAG}:probe`;
+const PROBE_TAG = `${TAG_PREFIX}:probe`;
 
 /** The part of a service worker's `push` event {@link AuthClient.fetchNotificationPayload} reads. */
 export interface NotificationPushEvent {
