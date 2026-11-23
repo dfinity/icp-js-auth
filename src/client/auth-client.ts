@@ -447,6 +447,8 @@ export class AuthClient {
   #subscribing: Promise<void> = Promise.resolve();
   // Each prepare replaces the link key before it, so concurrent taps share one.
   #linking: Promise<void> | undefined;
+  // Stops a background repair, which would otherwise hold the push subscription lock past dispose().
+  readonly #disposal = new AbortController();
   // Set while a repair holds `#subscribing`, which can be its whole probe deadline.
   #repairing = false;
   // Resolved, and replaced, each time a repair starts, so a waiter queued behind it stops waiting.
@@ -853,6 +855,7 @@ export class AuthClient {
     // a client disposed while one is in flight would otherwise have an identity
     // installed afterwards, scheduling refreshes nobody can stop.
     this.#disposed = true;
+    this.#disposal.abort();
     if (this.#identity instanceof SessionIdentity) this.#identity.dispose();
     // Its own interaction and no one else's: the locks it holds are released
     // rather than taken, its own channel is closed, and nothing shared is
@@ -1909,13 +1912,14 @@ export class AuthClient {
     ) {
       return {
         repairing: (async () => {
-          if ((await repairSubscription(inbox, registered, registration)) !== 'gone') return;
+          const stop = this.#disposal.signal;
+          if ((await repairSubscription(inbox, registered, registration, stop)) !== 'gone') return;
           // Dropped after its push service refused the endpoint, so a fresh one is registered.
           if (globalThis.Notification?.permission !== 'granted' || registration === undefined) {
             return;
           }
           const consent = await NotificationConsent.create(options);
-          if (!(await consent.status()).granted) return;
+          if (!(await consent.status()).granted || stop.aborted) return;
           await resubscribeDevice(inbox, registration);
         })(),
       };

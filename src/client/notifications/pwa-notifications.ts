@@ -755,7 +755,9 @@ type ProbeOutcome =
   /** Not fetched by the deadline, or the push service would not take it. */
   | 'unanswered'
   /** Internet Identity dropped the subscription meanwhile, as it does on a 404 or 410 from the push service. */
-  | 'gone';
+  | 'gone'
+  /** `stop` fired first. */
+  | 'stopped';
 
 /**
  * Probes the subscription of the session behind `inbox`, and answers whether
@@ -770,14 +772,20 @@ async function probeOutcome(
   inbox: PwaNotifications,
   batchSentAtNs: bigint,
   isProbeSent: boolean,
+  stop: AbortSignal,
 ): Promise<ProbeOutcome> {
   let expired = false;
   let timer: ReturnType<typeof setTimeout> | undefined;
+  let onStop: () => void = () => undefined;
   const deadline = new Promise<ProbeOutcome>((resolve) => {
-    timer = setTimeout(() => {
+    const end = (outcome: ProbeOutcome) => {
       expired = true;
-      resolve('unanswered');
-    }, PROBE_DEADLINE_MS);
+      resolve(outcome);
+    };
+    timer = setTimeout(() => end('unanswered'), PROBE_DEADLINE_MS);
+    onStop = () => end('stopped');
+    if (stop.aborted) onStop();
+    else stop.addEventListener('abort', onStop, { once: true });
   });
   const polling = (async (): Promise<ProbeOutcome> => {
     if (!isProbeSent && !(await inbox.probe())) return 'unanswered';
@@ -798,6 +806,7 @@ async function probeOutcome(
     return await Promise.race([polling, deadline]);
   } finally {
     clearTimeout(timer);
+    stop.removeEventListener('abort', onStop);
   }
 }
 
@@ -810,6 +819,8 @@ async function probeOutcome(
  * A device subscription already replaced since the probe, by a repair in
  * another tab, is left as it is.
  *
+ * Once `stop` fires, polling ends and nothing more is changed.
+ *
  * @returns `gone` where Internet Identity dropped the subscription during the
  *   probe, which leaves registering one again to the caller.
  */
@@ -817,19 +828,23 @@ export async function repairSubscription(
   inbox: PwaNotifications,
   registered: RegisteredSubscription,
   registration: ServiceWorkerRegistration | undefined,
-): Promise<'repaired' | 'gone'> {
+  stop: AbortSignal,
+): Promise<'repaired' | 'gone' | 'stopped'> {
   // A probe an earlier repair sent and nobody saw answered is waited on again, not sent again.
   const outcome = await probeOutcome(
     inbox,
     registered.unansweredSinceNs ?? BigInt(0),
     registered.probeSentAtNs !== undefined,
+    stop,
   );
-  if (outcome !== 'unanswered') return outcome === 'gone' ? 'gone' : 'repaired';
+  if (outcome === 'answered') return 'repaired';
+  if (outcome !== 'unanswered') return outcome;
   if (globalThis.Notification?.permission !== 'granted' || registration === undefined) {
     await inbox.set(null);
     return 'repaired';
   }
   const held = await registration.pushManager.getSubscription();
+  if (stop.aborted) return 'stopped';
   if (held !== null && held.endpoint !== registered.endpoint) return 'repaired';
   await subscribeFresh(inbox, registration, held);
   return 'repaired';

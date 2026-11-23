@@ -436,6 +436,8 @@ describe('same-device link', () => {
 
 describe('repairSubscription', () => {
   const UNANSWERED = { count: 3, first_sent_at_ns: BigInt(1), is_past_limit: true };
+  /** A repair nothing stops. */
+  const running = new AbortController().signal;
   const REGISTERED = {
     endpoint: 'https://push.example/1',
     isPastLimit: true,
@@ -512,7 +514,7 @@ describe('repairSubscription', () => {
     vi.stubGlobal('Notification', { permission: 'granted' });
     const { inbox, registration, set, probe } = await setUp([unanswered, answered]);
 
-    const repairing = repairSubscription(inbox, REGISTERED, registration);
+    const repairing = repairSubscription(inbox, REGISTERED, registration, running);
     await vi.advanceTimersByTimeAsync(4_000);
     await repairing;
 
@@ -525,7 +527,7 @@ describe('repairSubscription', () => {
     vi.stubGlobal('Notification', { permission: 'granted' });
     const { inbox, registration, set, held } = await setUp(Array(20).fill(laterBatch));
 
-    const repairing = repairSubscription(inbox, REGISTERED, registration);
+    const repairing = repairSubscription(inbox, REGISTERED, registration, running);
     await vi.advanceTimersByTimeAsync(30_000);
     await repairing;
 
@@ -538,12 +540,30 @@ describe('repairSubscription', () => {
     vi.stubGlobal('Notification', { permission: 'granted' });
     const { inbox, registration, set, held } = await setUp(Array(20).fill(outstanding));
 
-    const repairing = repairSubscription(inbox, REGISTERED, registration);
+    const repairing = repairSubscription(inbox, REGISTERED, registration, running);
     await vi.advanceTimersByTimeAsync(30_000);
     await repairing;
 
     expect(held.unsubscribe).toHaveBeenCalled();
     expect(set).toHaveBeenCalledTimes(1);
+  });
+
+  it('stops polling and changes nothing once stopped mid-probe', async () => {
+    vi.useFakeTimers();
+    vi.stubGlobal('Notification', { permission: 'granted' });
+    const { inbox, registration, set, held, status } = await setUp(Array(20).fill(outstanding));
+    const stop = new AbortController();
+
+    const repairing = repairSubscription(inbox, REGISTERED, registration, stop.signal);
+    await vi.advanceTimersByTimeAsync(4_000);
+    const polled = status.mock.calls.length;
+    stop.abort();
+
+    await expect(repairing).resolves.toBe('stopped');
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(status.mock.calls.length).toBe(polled);
+    expect(held.unsubscribe).not.toHaveBeenCalled();
+    expect(set).not.toHaveBeenCalled();
   });
 
   it('keeps the held subscription where keys for its replacement cannot be had', async () => {
@@ -552,7 +572,9 @@ describe('repairSubscription', () => {
     const { inbox, registration, set, held } = await setUp(Array(20).fill(outstanding));
     vi.spyOn(inbox, 'prepare').mockRejectedValue(new Error('offline'));
 
-    const repairing = repairSubscription(inbox, REGISTERED, registration).catch(() => undefined);
+    const repairing = repairSubscription(inbox, REGISTERED, registration, running).catch(
+      () => undefined,
+    );
     await vi.advanceTimersByTimeAsync(30_000);
     await repairing;
 
@@ -569,6 +591,7 @@ describe('repairSubscription', () => {
       inbox,
       { endpoint: 'https://push.example/1', isPastLimit: false, probeSentAtNs: BigInt(9) },
       registration,
+      running,
     );
     await vi.advanceTimersByTimeAsync(30_000);
     await repairing;
@@ -583,7 +606,7 @@ describe('repairSubscription', () => {
     vi.stubGlobal('Notification', { permission: 'granted' });
     const { inbox, registration, set, held } = await setUp([{ Ok: [] }]);
 
-    const repairing = repairSubscription(inbox, REGISTERED, registration);
+    const repairing = repairSubscription(inbox, REGISTERED, registration, running);
     await vi.advanceTimersByTimeAsync(2_000);
 
     await expect(repairing).resolves.toBe('gone');
@@ -596,7 +619,7 @@ describe('repairSubscription', () => {
     vi.stubGlobal('Notification', { permission: 'granted' });
     const { inbox, registration, set, held } = await setUp(Array(20).fill(unanswered));
 
-    const repairing = repairSubscription(inbox, REGISTERED, registration);
+    const repairing = repairSubscription(inbox, REGISTERED, registration, running);
     await vi.advanceTimersByTimeAsync(28_000);
     expect(held.unsubscribe).not.toHaveBeenCalled();
     await vi.advanceTimersByTimeAsync(2_000);
@@ -615,7 +638,7 @@ describe('repairSubscription', () => {
     const { inbox, registration, status, held } = await setUp([]);
     status.mockImplementation(() => new Promise(() => undefined));
 
-    const repairing = repairSubscription(inbox, REGISTERED, registration);
+    const repairing = repairSubscription(inbox, REGISTERED, registration, running);
     await vi.advanceTimersByTimeAsync(30_000);
     await repairing;
 
@@ -629,7 +652,7 @@ describe('repairSubscription', () => {
     const { inbox, registration, probe, status, held } = await setUp([]);
     probe.mockImplementation(() => new Promise(() => undefined));
 
-    const repairing = repairSubscription(inbox, REGISTERED, registration);
+    const repairing = repairSubscription(inbox, REGISTERED, registration, running);
     await vi.advanceTimersByTimeAsync(30_000);
     await repairing;
 
@@ -645,7 +668,7 @@ describe('repairSubscription', () => {
     const replaced = await fakeSubscription('https://push.example/3', KEYS.vapid_public_key);
     getSubscription.mockResolvedValue(replaced);
 
-    await repairSubscription(inbox, REGISTERED, registration);
+    await repairSubscription(inbox, REGISTERED, registration, running);
 
     expect(replaced.unsubscribe).not.toHaveBeenCalled();
     expect(set).not.toHaveBeenCalled();
@@ -655,7 +678,7 @@ describe('repairSubscription', () => {
     vi.stubGlobal('Notification', { permission: 'denied' });
     const { inbox, registration, set } = await setUp([], { Err: { NotReachable: null } });
 
-    await repairSubscription(inbox, REGISTERED, registration);
+    await repairSubscription(inbox, REGISTERED, registration, running);
 
     expect(set).toHaveBeenCalledWith({ subscription: [] });
   });
