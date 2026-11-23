@@ -693,7 +693,8 @@ export async function resubscribeDevice(
 
 /**
  * Unsubscribes `held`, subscribes `registration` anew, and registers the new
- * endpoint. Keys come first, so `held` survives where they cannot be had.
+ * endpoint. Keys come first, so `held` survives where they cannot be had. A
+ * `held` under another key is the app's own, and is left alone.
  */
 async function subscribeFresh(
   inbox: PwaNotifications,
@@ -701,6 +702,7 @@ async function subscribeFresh(
   held: PushSubscription | null,
 ): Promise<Uint8Array> {
   const keys = await inbox.prepare();
+  if (held !== null && !subscribedWith(held, keys.vapidPublicKey)) return;
   await held?.unsubscribe();
   const replacement = await registration.pushManager.subscribe({
     userVisibleOnly: true,

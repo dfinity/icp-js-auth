@@ -279,6 +279,22 @@ describe('subscribeDevice', () => {
     expect(set.mock.calls[0][0].subscription[0].endpoint).toBe('https://push.example/1');
   });
 
+  it('leaves a push subscription bound to another key alone when moving to a fresh endpoint', async () => {
+    const { inbox, registration, set, subscribe } = await setUp([{ Ok: null }]);
+    const other = await fakeSubscription(
+      'https://push.example/other',
+      new Uint8Array([4, 7, 7, 7]),
+    );
+    vi.mocked(registration.pushManager.getSubscription).mockResolvedValueOnce(
+      other as unknown as PushSubscription,
+    );
+
+    await resubscribeDevice(inbox, registration);
+
+    expect(other.unsubscribe).not.toHaveBeenCalled();
+    expect(subscribe).not.toHaveBeenCalled();
+    expect(set).not.toHaveBeenCalled();
+  });
   it('moves to a fresh endpoint once where the endpoint is held with other keys', async () => {
     const { inbox, registration, set, first } = await setUp([
       { Err: { EndpointInUse: null } },
