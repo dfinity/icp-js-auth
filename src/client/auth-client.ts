@@ -1365,7 +1365,7 @@ export class AuthClient {
    * self.addEventListener('notificationclick', (event) => {
    *   event.waitUntil((async () => {
    *     event.notification.close();
-   *     await self.clients.openWindow(event.notification.data.url);
+   *     await self.clients.openWindow(event.notification.data?.url ?? self.registration.scope);
    *     await authClient.markNotificationOpened(event);
    *   })());
    * });
