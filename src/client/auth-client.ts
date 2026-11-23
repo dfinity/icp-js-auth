@@ -1280,7 +1280,8 @@ export class AuthClient {
    *
    * In an installed web app this records consent only: call
    * {@link subscribeToNotifications} from a second tap once it returns
-   * `granted: true`.
+   * `granted: true`. A browser tab may call it too, to have its own service
+   * worker deliver instead of Internet Identity's.
    *
    * A refusal is an answer rather than a failure: it returns `granted: false`,
    * and an application renders that. Calling it again where consent is already
@@ -1326,7 +1327,7 @@ export class AuthClient {
   }
 
   /**
-   * Fetches what an installed web app's service worker shows for one push.
+   * Fetches what this application's service worker shows for one push.
    *
    * Call it from the service worker's `push` listener, with an AuthClient built
    * with the page's options. Where the content cannot be read in time, it
@@ -1388,8 +1389,10 @@ export class AuthClient {
   }
 
   /**
-   * Subscribes this installed web app's service worker to the user's
-   * notifications from this application.
+   * Subscribes this origin's service worker to the user's notifications from
+   * this application, so it delivers them instead of Internet Identity's. In an
+   * installed web app it is the only way they arrive; in a browser tab it is an
+   * option.
    *
    * Call it from a tap once {@link requestNotificationConsent} returned
    * `granted: true`. The service worker must already be registered. A push
@@ -1399,16 +1402,14 @@ export class AuthClient {
    *
    * @returns The notification permission; nothing is subscribed unless it is
    *   `'granted'`.
-   * @throws {NotificationsUnsupportedError} Outside an installed web app.
+   * @throws {NotificationsUnsupportedError} Where this browser has no Web Push.
    * @throws {SessionGoneError} Where this origin holds no live session.
    * @example
    * const permission = await authClient.subscribeToNotifications();
    */
   async subscribeToNotifications(): Promise<NotificationPermission> {
-    if (!isInstalledApp()) {
-      throw new NotificationsUnsupportedError(
-        'Notifications are subscribed to only in an installed web app',
-      );
+    if (globalThis.PushManager === undefined || globalThis.Notification === undefined) {
+      throw new NotificationsUnsupportedError('This browser has no Web Push');
     }
     const permission = await globalThis.Notification.requestPermission();
     if (permission !== 'granted') return permission;
@@ -1527,7 +1528,7 @@ export class AuthClient {
   /**
    * Clears the stored session and resets the client to an anonymous state.
    *
-   * In an installed web app, also removes this device's notification
+   * Where this origin's service worker delivers notifications, also removes its
    * subscription at Internet Identity.
    *
    * @param options - Sign-out options.
@@ -1636,9 +1637,11 @@ export class AuthClient {
   }
 
   /**
-   * Registers this installed app's push subscription where permission and
-   * consent are granted but Internet Identity does not deliver to it yet.
-   * Never prompts, and leaves a subscription under another key to a tap.
+   * Registers this origin's push subscription where permission and consent are
+   * granted but Internet Identity does not deliver to it yet: in an installed
+   * app always, in a browser tab only where its service worker holds a
+   * subscription already. Never prompts, and leaves a subscription under another
+   * key to a tap.
    */
   #subscribeWhereUnregistered(key: SignIdentity, sessionChain: DelegationChain): Promise<void> {
     return this.#queueSubscribe(() => this.#subscribeIfUnregistered(key, sessionChain));
@@ -1652,10 +1655,12 @@ export class AuthClient {
   }
 
   async #subscribeIfUnregistered(key: SignIdentity, sessionChain: DelegationChain): Promise<void> {
-    if (!isInstalledApp()) return;
     if (globalThis.Notification?.permission !== 'granted') return;
     const registration = await globalThis.navigator?.serviceWorker?.getRegistration();
     if (registration === undefined) return;
+    // A tab whose service worker holds nothing leaves delivery to Internet Identity's.
+    const held = await registration.pushManager.getSubscription();
+    if (!isInstalledApp() && held === null) return;
 
     const options = {
       sessionKey: key,
@@ -1664,7 +1669,6 @@ export class AuthClient {
       agentOptions: this.#options.agentOptions,
     };
     const inbox = await PwaNotifications.create(options);
-    const held = await registration.pushManager.getSubscription();
     if (held !== null && held.endpoint === (await inbox.registeredEndpoint())) return;
     const consent = await NotificationConsent.create(options);
     if (!(await consent.status()).granted) return;
@@ -1673,8 +1677,8 @@ export class AuthClient {
 
   /** Best-effort: delivery stops with the session anyway. */
   async #removePwaSubscription(key: SignIdentity, sessionChain: DelegationChain): Promise<void> {
-    if (!isInstalledApp()) return;
     try {
+      if (!isInstalledApp() && (await heldPushSubscription()) === null) return;
       const inbox = await PwaNotifications.create({
         sessionKey: key,
         sessionChain,
@@ -2066,6 +2070,12 @@ export class AuthClient {
     const failed = outcomes.find((outcome) => outcome.status === 'rejected');
     if (failed !== undefined) throw failed.reason;
   }
+}
+
+/** The push subscription this origin's service worker holds, where it has one. */
+async function heldPushSubscription(): Promise<PushSubscription | null> {
+  const registration = await globalThis.navigator?.serviceWorker?.getRegistration();
+  return (await registration?.pushManager.getSubscription()) ?? null;
 }
 
 /** The moment a chain stops being usable: its earliest delegation's expiry. */

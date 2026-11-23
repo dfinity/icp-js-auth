@@ -2680,7 +2680,7 @@ describe('AuthClient notification consent', () => {
     expect(transport.requests[0].params).toEqual({ installedApp: true });
   });
 
-  it('should refuse to subscribe outside an installed web app, before asking for permission', async () => {
+  it('should refuse to subscribe where the browser has no Web Push, before asking for permission', async () => {
     const requestPermission = vi.fn(async () => 'granted');
     vi.stubGlobal('Notification', { requestPermission });
     const client = track(new AuthClient());
@@ -3000,6 +3000,7 @@ describe('AuthClient re-subscribing an installed app after sign-in', () => {
     }));
     const requestPermission = vi.fn(async () => permission);
     vi.stubGlobal('Notification', { permission, requestPermission });
+    vi.stubGlobal('PushManager', class {});
     const subscription = {
       endpoint: 'https://push.example/1',
       options: { applicationServerKey: applicationServerKey.buffer },
@@ -3011,15 +3012,17 @@ describe('AuthClient re-subscribing an installed app after sign-in', () => {
       ...subscription,
       options: { applicationServerKey: VAPID.buffer },
     }));
-    const registration = {
-      pushManager: { getSubscription: async () => subscription, subscribe },
-    };
+    const getSubscription = vi.fn(async (): Promise<typeof subscription | null> => subscription);
+    const registration = { pushManager: { getSubscription, subscribe } };
     Object.defineProperty(navigator, 'serviceWorker', {
       configurable: true,
       value: { getRegistration: async () => registration },
     });
-    return { requestPermission, subscription, subscribe };
+    return { requestPermission, subscription, subscribe, getSubscription };
   }
+
+  /** A browser tab rather than an installed app. */
+  const inATab = () => vi.stubGlobal('matchMedia', () => ({ matches: false }));
 
   function fakeCalls(granted: boolean, registered?: string) {
     const status = vi.fn(async () => ({ granted }));
@@ -3205,6 +3208,49 @@ describe('AuthClient re-subscribing an installed app after sign-in', () => {
     expect(replace).not.toHaveBeenCalled();
   });
 
+  it("subscribes a tab's service worker on a tap", async () => {
+    const { requestPermission } = installedApp('granted');
+    inATab();
+    const { set } = fakeCalls(true);
+    const client = track(new AuthClient({ namespace: 'subscribes-a-tab' }));
+    handleSignIn(FakeTransport.last());
+    await client.signIn();
+
+    await expect(client.subscribeToNotifications()).resolves.toBe('granted');
+
+    expect(requestPermission).toHaveBeenCalled();
+    expect(set).toHaveBeenCalledWith(
+      expect.objectContaining({ endpoint: 'https://push.example/1' }),
+    );
+  });
+
+  it("removes a tab's subscription at Internet Identity on sign-out", async () => {
+    installedApp('granted');
+    inATab();
+    const { set } = fakeCalls(true, 'https://push.example/1');
+    const client = track(new AuthClient({ namespace: 'tab-sign-out-removes' }));
+    handleSignIn(FakeTransport.last());
+    await client.signIn();
+
+    await client.signOut();
+
+    expect(set).toHaveBeenCalledWith(null);
+  });
+
+  it('asks Internet Identity nothing on sign-out in a tab whose service worker holds no subscription', async () => {
+    const { getSubscription } = installedApp('granted');
+    getSubscription.mockResolvedValue(null);
+    inATab();
+    const { set } = fakeCalls(true);
+    const client = track(new AuthClient({ namespace: 'tab-sign-out-asks-nothing' }));
+    handleSignIn(FakeTransport.last());
+    await client.signIn();
+
+    await client.signOut();
+
+    expect(set).not.toHaveBeenCalled();
+  });
+
   it('navigates to a returnTo even where registering fails', async () => {
     installedApp('granted');
     fakeCalls(true);
@@ -3298,15 +3344,29 @@ describe('AuthClient re-subscribing an installed app after sign-in', () => {
       await vi.waitFor(() => expect(set).toHaveBeenCalledTimes(1));
     });
 
-    it('asks Internet Identity nothing outside an installed app', async () => {
-      installedApp('granted');
-      vi.stubGlobal('matchMedia', () => ({ matches: false }));
+    it('asks Internet Identity nothing in a tab whose service worker holds no subscription', async () => {
+      const { getSubscription } = installedApp('granted');
+      getSubscription.mockResolvedValue(null);
+      inATab();
       const create = vi.spyOn(PwaNotifications, 'create');
 
       await restoredClient();
       await new Promise((resolve) => setTimeout(resolve, 0));
 
       expect(create).not.toHaveBeenCalled();
+    });
+
+    it("registers a tab's subscription again where its service worker holds one", async () => {
+      installedApp('granted');
+      inATab();
+      const { set } = fakeCalls(true, 'https://push.example/old');
+
+      await restoredClient();
+
+      await vi.waitFor(() => expect(set).toHaveBeenCalledTimes(1));
+      expect(set.mock.calls[0]).toEqual([
+        expect.objectContaining({ endpoint: 'https://push.example/1' }),
+      ]);
     });
   });
 });
