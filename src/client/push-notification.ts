@@ -191,7 +191,10 @@ async function resolvePush(
   const clear = (notShown?: NotShownReason): Promise<void> =>
     inbox.remove(inboxNotificationId, notShown).catch(() => undefined);
 
-  const entry = await inbox.get(inboxNotificationId).catch(() => null);
+  const entry = await inbox.get(inboxNotificationId).catch((error: unknown) => {
+    if (error instanceof SessionGoneError) throw error;
+    return null;
+  });
   // Unreadable, expired or already taken. Cleared anyway, so an expired entry is
   // counted as one asked for too late.
   if (entry === null || entry === undefined) return { clear };
@@ -203,6 +206,7 @@ async function resolvePush(
     app = await appActor(source, entry.canister_id);
     content = await app._internet_identity_notification_content(entry.id);
   } catch (error) {
+    if (error instanceof SessionGoneError) throw error;
     return { clear, notShown: notShownReasonOf(error) };
   }
 

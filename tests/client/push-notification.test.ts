@@ -205,6 +205,19 @@ describe('fetchPushNotification', () => {
     removeOf(remove, 3);
   });
 
+  it('rejects with SessionGoneError where Internet Identity no longer holds the session', async () => {
+    const { scope } = fakeScope();
+    const inbox = over(
+      fakeService({
+        app_get_pwa_notification: vi.fn(async () => ({ Err: { NoSuchSession: null } })),
+      }),
+    );
+
+    await expect(
+      fetchAndSettle(source(async () => inbox), push({ inbox_notification_id: 3 }), scope),
+    ).rejects.toThrow(SessionGoneError);
+  });
+
   describe("with the app's content", () => {
     const CANISTER = Principal.fromText('aaaaa-aa');
 
@@ -230,6 +243,21 @@ describe('fetchPushNotification', () => {
       );
       return { received, remove, inbox };
     }
+
+    it('rejects with SessionGoneError where the session ends before the canister is called', async () => {
+      const { inbox } = fakeApp([]);
+      const { scope } = fakeScope();
+      const gone = {
+        ...source(async () => inbox),
+        identity: async () => {
+          throw new SessionGoneError();
+        },
+      };
+
+      await expect(
+        fetchAndSettle(gone, push({ inbox_notification_id: 3 }), scope),
+      ).rejects.toThrow(SessionGoneError);
+    });
 
     it("answers the app's notification with the tag and the data its canister sent", async () => {
       const { inbox } = fakeApp([{ title: 'Hi', body: 'There', url: ['/inbox'] }]);
