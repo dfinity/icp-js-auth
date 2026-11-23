@@ -215,7 +215,7 @@ describe('subscribeDevice', () => {
   it('subscribes with the VAPID key and registers the sealed subscription', async () => {
     const { inbox, registration, set, subscribe } = await setUp([{ Ok: null }]);
 
-    await subscribeDevice(inbox, registration);
+    await subscribeDevice(inbox, registration, 'replace');
 
     expect(subscribe).toHaveBeenCalledWith(expect.objectContaining({ userVisibleOnly: true }));
     expect(set).toHaveBeenCalledTimes(1);
@@ -228,7 +228,7 @@ describe('subscribeDevice', () => {
       first as unknown as PushSubscription,
     );
 
-    await subscribeDevice(inbox, registration);
+    await subscribeDevice(inbox, registration, 'replace');
 
     expect(subscribe).not.toHaveBeenCalled();
     expect(set.mock.calls[0][0].subscription[0].endpoint).toBe('https://push.example/1');
@@ -244,11 +244,28 @@ describe('subscribeDevice', () => {
       other as unknown as PushSubscription,
     );
 
-    await subscribeDevice(inbox, registration);
+    await subscribeDevice(inbox, registration, 'replace');
 
     expect(other.unsubscribe).toHaveBeenCalled();
     expect(subscribe).toHaveBeenCalledWith(expect.objectContaining({ userVisibleOnly: true }));
     expect(set.mock.calls[0][0].subscription[0].endpoint).toBe('https://push.example/1');
+  });
+
+  it('keeps a push subscription bound to another key where asked to', async () => {
+    const { inbox, registration, set, subscribe } = await setUp([{ Ok: null }]);
+    const other = await fakeSubscription(
+      'https://push.example/other',
+      new Uint8Array([4, 7, 7, 7]),
+    );
+    vi.mocked(registration.pushManager.getSubscription).mockResolvedValueOnce(
+      other as unknown as PushSubscription,
+    );
+
+    await subscribeDevice(inbox, registration, 'keep');
+
+    expect(other.unsubscribe).not.toHaveBeenCalled();
+    expect(subscribe).not.toHaveBeenCalled();
+    expect(set).not.toHaveBeenCalled();
   });
 
   it('moves to a fresh endpoint once where the endpoint is held with other keys', async () => {
@@ -257,7 +274,7 @@ describe('subscribeDevice', () => {
       { Ok: null },
     ]);
 
-    await subscribeDevice(inbox, registration);
+    await subscribeDevice(inbox, registration, 'replace');
 
     expect(first.unsubscribe).toHaveBeenCalled();
     expect(set).toHaveBeenCalledTimes(2);
@@ -270,7 +287,7 @@ describe('subscribeDevice', () => {
       { Err: { EndpointInUse: null } },
     ]);
 
-    await expect(subscribeDevice(inbox, registration)).rejects.toThrow(
+    await expect(subscribeDevice(inbox, registration, 'replace')).rejects.toThrow(
       'This push endpoint is registered with other keys',
     );
   });

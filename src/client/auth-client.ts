@@ -1392,8 +1392,10 @@ export class AuthClient {
    * notifications from this application.
    *
    * Call it from a tap once {@link requestNotificationConsent} returned
-   * `granted: true`. The service worker must already be registered. Later
-   * sign-ins renew the subscription without asking.
+   * `granted: true`. The service worker must already be registered. A push
+   * subscription it holds under another key is replaced, so remove any of the
+   * app's own push code first. Later sign-ins renew the subscription without
+   * asking.
    *
    * @returns The notification permission; nothing is subscribed unless it is
    *   `'granted'`.
@@ -1416,7 +1418,7 @@ export class AuthClient {
       throw new Error('This origin has no service worker registered to receive notifications');
     }
     await this.#queueSubscribe(async () => {
-      await subscribeDevice(await this.#pwaNotifications(), registration);
+      await subscribeDevice(await this.#pwaNotifications(), registration, 'replace');
     });
     return permission;
   }
@@ -1636,7 +1638,7 @@ export class AuthClient {
   /**
    * Registers this installed app's push subscription where permission and
    * consent are granted but Internet Identity does not deliver to it yet.
-   * Never prompts.
+   * Never prompts, and leaves a subscription under another key to a tap.
    */
   #subscribeWhereUnregistered(key: SignIdentity, sessionChain: DelegationChain): Promise<void> {
     return this.#queueSubscribe(() => this.#subscribeIfUnregistered(key, sessionChain));
@@ -1666,7 +1668,7 @@ export class AuthClient {
     if (held !== null && held.endpoint === (await inbox.registeredEndpoint())) return;
     const consent = await NotificationConsent.create(options);
     if (!(await consent.status()).granted) return;
-    await subscribeDevice(inbox, registration);
+    await subscribeDevice(inbox, registration, 'keep');
   }
 
   /** Best-effort: delivery stops with the session anyway. */

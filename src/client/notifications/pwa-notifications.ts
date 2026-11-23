@@ -411,16 +411,22 @@ const subscribedWith = (subscription: PushSubscription, applicationServerKey: Ui
   );
 };
 
+/** What to do with a push subscription the service worker holds under another key. */
+export type OtherKeySubscription = 'replace' | 'keep';
+
 /**
  * The registration's push subscription where it is bound to `vapidPublicKey`,
- * otherwise a new one replacing it.
+ * otherwise a new one replacing it, or `undefined` where one under another key
+ * is kept.
  */
 const heldOrNewSubscription = async (
   registration: ServiceWorkerRegistration,
   vapidPublicKey: Uint8Array,
-): Promise<PushSubscription> => {
+  otherKey: OtherKeySubscription,
+): Promise<PushSubscription | undefined> => {
   const held = await registration.pushManager.getSubscription();
   if (held !== null && subscribedWith(held, vapidPublicKey)) return held;
+  if (held !== null && otherKey === 'keep') return undefined;
   await held?.unsubscribe();
   return registration.pushManager.subscribe({
     userVisibleOnly: true,
@@ -436,9 +442,11 @@ const heldOrNewSubscription = async (
 export async function subscribeDevice(
   inbox: PwaNotifications,
   registration: ServiceWorkerRegistration,
+  otherKey: OtherKeySubscription,
 ): Promise<void> {
   const keys = await inbox.prepare();
-  const subscription = await heldOrNewSubscription(registration, keys.vapidPublicKey);
+  const subscription = await heldOrNewSubscription(registration, keys.vapidPublicKey, otherKey);
+  if (subscription === undefined) return;
   try {
     await inbox.set(await sealSubscription(subscription, keys.transportPublicKey));
     return;

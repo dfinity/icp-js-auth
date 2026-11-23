@@ -2994,7 +2994,7 @@ describe('AuthClient re-subscribing an installed app after sign-in', () => {
   const VAPID = new Uint8Array([4, 1, 2, 3]);
 
   /** An installed app whose worker holds a subscription made with II's key. */
-  function installedApp(permission: NotificationPermission) {
+  function installedApp(permission: NotificationPermission, applicationServerKey = VAPID) {
     vi.stubGlobal('matchMedia', (query: string) => ({
       matches: query === '(display-mode: standalone)',
     }));
@@ -3002,18 +3002,23 @@ describe('AuthClient re-subscribing an installed app after sign-in', () => {
     vi.stubGlobal('Notification', { permission, requestPermission });
     const subscription = {
       endpoint: 'https://push.example/1',
-      options: { applicationServerKey: VAPID.buffer },
+      options: { applicationServerKey: applicationServerKey.buffer },
       getKey: (name: string) =>
         name === 'p256dh' ? new Uint8Array(65).buffer : new Uint8Array(16).buffer,
+      unsubscribe: vi.fn(async () => true),
     };
+    const subscribe = vi.fn(async () => ({
+      ...subscription,
+      options: { applicationServerKey: VAPID.buffer },
+    }));
     const registration = {
-      pushManager: { getSubscription: async () => subscription, subscribe: vi.fn() },
+      pushManager: { getSubscription: async () => subscription, subscribe },
     };
     Object.defineProperty(navigator, 'serviceWorker', {
       configurable: true,
       value: { getRegistration: async () => registration },
     });
-    return { requestPermission };
+    return { requestPermission, subscription, subscribe };
   }
 
   function fakeCalls(granted: boolean, registered?: string) {
@@ -3093,6 +3098,26 @@ describe('AuthClient re-subscribing an installed app after sign-in', () => {
 
     expect(prepare.mock.calls.length).toBeGreaterThanOrEqual(2);
     expect(most).toBe(1);
+  });
+
+  it("leaves the app's own push subscription alone after sign-in, and replaces it on a tap", async () => {
+    const { subscription, subscribe } = installedApp('granted', new Uint8Array([4, 7, 7, 7]));
+    const { set, prepare } = fakeCalls(true);
+    const client = track(new AuthClient({ namespace: 'keeps-the-apps-own-subscription' }));
+    handleSignIn(FakeTransport.last());
+
+    await client.signIn();
+    await vi.waitFor(() => expect(prepare).toHaveBeenCalled());
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(subscription.unsubscribe).not.toHaveBeenCalled();
+    expect(set).not.toHaveBeenCalled();
+
+    await client.subscribeToNotifications();
+
+    expect(subscription.unsubscribe).toHaveBeenCalled();
+    expect(subscribe).toHaveBeenCalled();
+    expect(set).toHaveBeenCalledTimes(1);
   });
 
   it('registers nothing where the identity has not consented', async () => {
