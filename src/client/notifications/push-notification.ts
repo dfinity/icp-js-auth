@@ -8,8 +8,11 @@ import type { NotShownReason, PwaNotifications } from './pwa-notifications.js';
 /** How long resolving a push may take before the generic notification is answered instead. */
 const DISPLAY_DEADLINE_MS = 8_000;
 
-/** The tag of the notification answered where the app's own cannot be, and the prefix of every tag answered here. */
-const GENERIC_TAG = 'ii-notification';
+/** What every notification tag answered here starts with. */
+const TAG_PREFIX = 'ii-notification';
+
+/** The tag of the notification answered where the app's own cannot be. */
+const GENERIC_TAG = TAG_PREFIX;
 
 /** The part of a service worker's `push` event {@link AuthClient.fetchNotificationPayload} reads. */
 export interface NotificationPushEvent {
@@ -131,7 +134,7 @@ const inboxNotificationIdOf = (data: NotificationPushEvent['data']): bigint | un
 };
 
 const tagOf = (canisterId: Principal, id: bigint): string =>
-  `${GENERIC_TAG}:${canisterId.toText()}:${id}`;
+  `${TAG_PREFIX}:${canisterId.toText()}:${id}`;
 
 /** iOS ignores `tag`, so a notification is replaced by closing the old one by hand. */
 const closeTagged = async (scope: PushNotificationScope, tag: string): Promise<void> => {
