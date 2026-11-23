@@ -5,10 +5,7 @@ import type { NotificationConsentOptions } from './notification-consent.js';
 import type { NotShownReason, PwaNotifications } from './pwa-notifications.js';
 import { SessionGoneError } from './session/app-delegation-source.js';
 
-/**
- * How long everything before showing may take, from reading the session to the
- * app's content, before the generic notification is answered instead.
- */
+/** How long resolving a push may take before the generic notification is answered instead. */
 const DISPLAY_DEADLINE_MS = 8_000;
 
 /** The tag of the notification answered where the app's own cannot be, and the prefix of every tag answered here. */
@@ -37,7 +34,7 @@ export interface PushNotificationData {
 /** What to show for one push. */
 export interface NotificationPayload {
   title: string;
-  /** Spread these first into `showNotification`'s options; they carry the `tag`, and `data` for the app's notification. */
+  /** Spread into `showNotification`'s options before the app's own. */
   options: NotificationOptions;
 }
 
@@ -254,8 +251,7 @@ async function fetchForPush(
     const outcome = await withinDeadline(resolving, DISPLAY_DEADLINE_MS);
 
     if (outcome === undefined) {
-      // The late answer is not shown, and its entry is cleared as one the app could
-      // not deliver in time.
+      // The late answer is never shown; its entry is cleared as undeliverable.
       return await generic(scope, async () => {
         const late = await resolving;
         await late.clear?.(late.shown === undefined ? late.notShown : { PayloadUnreachable: null });
@@ -278,16 +274,8 @@ async function fetchForPush(
 }
 
 /**
- * Works out what to show for one push: the app's notification, or the generic
- * one where the payload names no entry, or reading it fails or takes longer than
- * {@link DISPLAY_DEADLINE_MS}, because iOS requires a notification for every
- * push. Rejects only with {@link SessionGoneError}, where no session is held.
- *
- * A copy of the same notification already on screen is closed before this
- * resolves, since iOS ignores `tag` and would show both. Reporting it received
- * and clearing its entry start as it resolves, under `event.waitUntil`, and so
- * does clearing an answer that arrives after the deadline, which is never
- * shown.
+ * See {@link AuthClient.fetchNotificationPayload}. Reporting the notification
+ * received and clearing its entry run under `event.waitUntil`.
  */
 export async function fetchPushNotificationPayload(
   source: PushNotificationSource,
@@ -320,11 +308,7 @@ const clickedOf = (data: unknown): { canisterId: Principal; id: bigint } | undef
   }
 };
 
-/**
- * Reports a click on the app's notification to its canister, and ignores a
- * click on any other. A failed report is dropped. Rejects only with
- * {@link SessionGoneError}, where no session is held.
- */
+/** See {@link AuthClient.markNotificationOpened}. A failed report is dropped. */
 export async function markPushNotificationOpened(
   source: PushNotificationSource,
   event: NotificationClickEvent,

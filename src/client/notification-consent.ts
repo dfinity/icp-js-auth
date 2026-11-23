@@ -55,9 +55,8 @@ export class NotificationsUnsupportedError extends Error {
  * @param signer - The channel to the identity provider.
  * @param derivationOrigin - The origin the account is derived for, where the
  *   application signs in under one other than its own.
- * @param installedApp - Whether the application runs as an installed web app.
- *   The provider then records consent alone, and the application subscribes its
- *   own service worker afterwards.
+ * @param installedApp - Whether the application runs as an installed web app,
+ *   where the provider records consent only.
  * @returns What the provider recorded, read back rather than reported from the
  *   screen.
  * @throws {InteractionRequiredError} Where the request asked not to render.

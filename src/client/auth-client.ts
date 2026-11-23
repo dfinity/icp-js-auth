@@ -1089,9 +1089,7 @@ export class AuthClient {
         if (this.#committing === committing) this.#committing = null;
       }
 
-      // Awaited only before navigating away, which would abandon it. Otherwise it
-      // is several update calls the user is not waiting for. A failure never fails
-      // signIn().
+      // Awaited only before navigating away, which would abandon it; never fails signIn().
       const resubscribing = this.#subscribeWhereUnregistered(key, sessionChain).catch(
         () => undefined,
       );
@@ -1113,8 +1111,7 @@ export class AuthClient {
       const target = await returnTo;
       if (typeof target === 'string') {
         await resubscribing;
-        // Re-checked after that wait: a sign-out or a later sign-in may have taken
-        // over meanwhile, and this page is no longer this sign-in's to navigate.
+        // A sign-out or later sign-in may have taken over during that wait.
         this.#assertCurrent(signInLock);
         location.replace(target);
       }
@@ -1277,10 +1274,8 @@ export class AuthClient {
    * user's answer and nothing else can stand in for it. Where they agree, the
    * browser they answered on is registered for delivery.
    *
-   * In an installed web app this records consent alone: the provider's window
-   * cannot subscribe the app's own service worker, and iOS grants notification
-   * permission only from a tap in the app itself. Call
-   * {@link subscribeToNotifications} from a second tap once this returns
+   * In an installed web app this records consent only: call
+   * {@link subscribeToNotifications} from a second tap once it returns
    * `granted: true`.
    *
    * A refusal is an answer rather than a failure: it returns `granted: false`,
@@ -1327,33 +1322,14 @@ export class AuthClient {
   }
 
   /**
-   * Works out what an installed web app's service worker shows for one push,
-   * and reports it to Internet Identity and this application's canister.
+   * Fetches what an installed web app's service worker shows for one push.
    *
-   * Call it from the service worker's own `push` listener, inside
-   * `event.waitUntil`, with an AuthClient built with the same options as the
-   * page's so it reads the session the page signed in with. It reads the
-   * Internet Identity inbox entry the push names and fetches the content from
-   * this application's canister. Show what it answers; the app's own options go
-   * next to `...payload.options`, which carry the `tag`, and `data` with what the
-   * app's canister sent.
+   * Call it from the service worker's `push` listener, with an AuthClient built
+   * with the page's options. Where the content cannot be read in time, it
+   * answers a generic notification, since iOS requires one for every push.
    *
-   * As it resolves it reports the notification received to the app's canister
-   * and clears the entry at Internet Identity, under `event.waitUntil`, so the
-   * worker stays alive for it. That clear is what answers a repair probe.
-   *
-   * Where a session is held it always resolves, because iOS requires a
-   * notification for every push: to the app's notification, or to a generic one
-   * where the push names no entry, or reading it fails or takes too long. An
-   * answer that arrives after that is never shown; its entry is cleared under
-   * `event.waitUntil` once it arrives.
-   *
-   * Where no session is held it rejects, and nothing is shown: the rejection
-   * fails the push's `waitUntil`, and the next sign-in subscribes again should
-   * the browser drop the subscription for it.
-   *
-   * @param event - The service worker's `push` event, as it arrived.
-   * @returns What to show.
+   * @param event - The service worker's `push` event.
+   * @returns The title and options to pass to `showNotification`.
    * @throws {SessionGoneError} Where this origin holds no live session.
    * @example
    * // service-worker.ts
@@ -1373,18 +1349,12 @@ export class AuthClient {
   }
 
   /**
-   * Reports a click on this application's notification to its canister, as the
-   * session, so the app learns it was opened.
+   * Reports a click on this application's notification to its canister.
    *
-   * Call it from the service worker's own `notificationclick` listener, with the
-   * event as it arrived. It reads the canister and id
-   * {@link fetchNotificationPayload} put in `options.data`, and ignores a click
-   * on any other notification, the generic and probe ones included. A report
-   * that fails is dropped. It does not call `event.waitUntil` itself: put it in
-   * the listener's own, after opening the window, which the browser allows only
-   * shortly after the tap.
+   * Call it from the service worker's `notificationclick` listener, after
+   * opening the window. Clicks on other notifications are ignored.
    *
-   * @param event - The service worker's `notificationclick` event, as it arrived.
+   * @param event - The service worker's `notificationclick` event.
    * @throws {SessionGoneError} Where this origin holds no live session.
    * @example
    * // service-worker.ts
@@ -1400,7 +1370,7 @@ export class AuthClient {
     return markPushNotificationOpened(this.#pushNotificationSource(), event);
   }
 
-  /** The session calls a service worker's notification handling is made with. */
+  /** The session-backed calls behind the service worker's notification handling. */
   #pushNotificationSource(): PushNotificationSource {
     return {
       inbox: () => this.#pwaNotifications(),
@@ -1414,25 +1384,15 @@ export class AuthClient {
   }
 
   /**
-   * Subscribes this installed web app's own service worker to the user's
+   * Subscribes this installed web app's service worker to the user's
    * notifications from this application.
    *
-   * Call it from a tap, after {@link requestNotificationConsent} returned
-   * `granted: true`, and only in an installed web app: iOS asks for notification
-   * permission only from a tap in the page itself, so this asks for it first,
-   * before anything else is awaited. The service worker has to be registered
-   * already and show each push through {@link fetchNotificationPayload}. A push
-   * subscription the service worker already holds with Internet Identity's key
-   * is reused. A service worker holds one push subscription, so one bound to any
-   * other key is unsubscribed and replaced.
+   * Call it from a tap once {@link requestNotificationConsent} returned
+   * `granted: true`. The service worker must already be registered. Later
+   * sign-ins renew the subscription without asking.
    *
-   * After a later sign-in in the installed app, the subscription is registered
-   * again without asking, where permission and consent are both still granted.
-   *
-   * A permission the user did not grant is an answer: it comes back as is, and
-   * nothing is subscribed.
-   *
-   * @returns The notification permission, which is `'granted'` once subscribed.
+   * @returns The notification permission; nothing is subscribed unless it is
+   *   `'granted'`.
    * @throws {NotificationsUnsupportedError} Outside an installed web app.
    * @throws {SessionGoneError} Where this origin holds no live session.
    * @example
@@ -1561,9 +1521,8 @@ export class AuthClient {
   /**
    * Clears the stored session and resets the client to an anonymous state.
    *
-   * In an installed web app, this device's installed-app subscription is
-   * removed at Internet Identity while the session still exists. The push
-   * subscription of the service worker is left as it is.
+   * In an installed web app, also removes this device's notification
+   * subscription at Internet Identity.
    *
    * @param options - Sign-out options.
    * @param options.returnTo - URL to navigate to after sign-out.
@@ -1671,10 +1630,9 @@ export class AuthClient {
   }
 
   /**
-   * Registers this installed app's push subscription for the session a sign-in
-   * created or a load restored, where the user already granted notification
-   * permission and this application's consent, and Internet Identity does not
-   * already deliver to this device's endpoint for it. Asks the user for nothing.
+   * Registers this installed app's push subscription where permission and
+   * consent are granted but Internet Identity does not deliver to it yet.
+   * Never prompts.
    */
   #subscribeWhereUnregistered(key: SignIdentity, sessionChain: DelegationChain): Promise<void> {
     return this.#queueSubscribe(() => this.#subscribeIfUnregistered(key, sessionChain));
@@ -1707,12 +1665,7 @@ export class AuthClient {
     await subscribeDevice(inbox, registration);
   }
 
-  /**
-   * Removes this device's installed-app subscription at the canister.
-   *
-   * Best-effort: the session is revoked next, and a subscription whose session
-   * has ended is not delivered to.
-   */
+  /** Best-effort: delivery stops with the session anyway. */
   async #removePwaSubscription(key: SignIdentity, sessionChain: DelegationChain): Promise<void> {
     if (!isInstalledApp()) return;
     try {
@@ -1723,15 +1676,10 @@ export class AuthClient {
         agentOptions: this.#options.agentOptions,
       });
       await inbox.set(null);
-    } catch {
-      // Left to the session's end, which stops delivery to it.
-    }
+    } catch {}
   }
 
-  /**
-   * Removes this device's installed-app subscription while the session can still
-   * be called as, then ends the session.
-   */
+  /** Removes this device's notification subscription, then ends the session. */
   async #endAtCanister(key: SignIdentity, sessionChain: DelegationChain): Promise<void> {
     await this.#removePwaSubscription(key, sessionChain);
     await this.#revoke(key, sessionChain);
@@ -2008,8 +1956,7 @@ export class AuthClient {
       return;
     }
     this.#installIdentity(identity);
-    // Not awaited: a load must not wait on update calls, and a failure is left
-    // to the next load or sign-in.
+    // Not awaited: a load must not wait on update calls.
     this.#subscribeWhereUnregistered(key, chain).catch(() => undefined);
   }
 

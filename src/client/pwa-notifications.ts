@@ -305,16 +305,10 @@ export class PwaNotifications {
 const bytesOf = (view: Uint8Array): ArrayBuffer =>
   view.buffer.slice(view.byteOffset, view.byteOffset + view.byteLength) as ArrayBuffer;
 
-/**
- * What the HKDF info starts with. Must match Internet Identity's transport
- * module, which is the source of truth: https://github.com/dfinity/internet-identity/blob/main/src/internet_identity/src/notifications/webpush/transport.rs
- */
+// HKDF info prefix and labels. Must match Internet Identity's
+// https://github.com/dfinity/internet-identity/blob/main/src/internet_identity/src/notifications/webpush/transport.rs
 const INFO_PREFIX = new TextEncoder().encode('II webpush transport\0');
-
-/** The HKDF label the AES key is derived under, as in Internet Identity's transport module: https://github.com/dfinity/internet-identity/blob/main/src/internet_identity/src/notifications/webpush/transport.rs */
 const KEY_LABEL = new TextEncoder().encode('key\0');
-
-/** The HKDF label the AES-GCM nonce is derived under, as in Internet Identity's transport module: https://github.com/dfinity/internet-identity/blob/main/src/internet_identity/src/notifications/webpush/transport.rs */
 const IV_LABEL = new TextEncoder().encode('iv\0');
 
 /** The bits of an ECDH P-256 shared secret. */
@@ -337,12 +331,9 @@ const concat = (...parts: Uint8Array[]): Uint8Array => {
 };
 
 /**
- * Encrypts `subscription`'s `auth` secret to `transportPublicKey`, as Internet
- * Identity's own frontend does: ECDH P-256 with a key minted for this one
- * encryption, HKDF-SHA-256 with no salt over both public keys, and AES-128-GCM.
- *
- * `auth` is sealed because a canister call passes a boundary node and every
- * replica, and `(endpoint, p256dh, auth)` is all a forged push needs.
+ * Encrypts `subscription`'s `auth` secret to `transportPublicKey` (ephemeral
+ * ECDH P-256, HKDF-SHA-256, AES-128-GCM), so boundary nodes and replicas never
+ * see enough to forge a push.
  */
 export async function sealSubscription(
   subscription: PushSubscription,
@@ -421,11 +412,8 @@ const subscribedWith = (subscription: PushSubscription, applicationServerKey: Ui
 };
 
 /**
- * The push subscription the registration holds where it is bound to
- * `vapidPublicKey`, and a new one bound to it otherwise.
- *
- * A service worker holds one push subscription, so one bound to any other key
- * is replaced: subscribing is the application handing it to Internet Identity.
+ * The registration's push subscription where it is bound to `vapidPublicKey`,
+ * otherwise a new one replacing it.
  */
 const heldOrNewSubscription = async (
   registration: ServiceWorkerRegistration,
@@ -442,10 +430,8 @@ const heldOrNewSubscription = async (
 
 /**
  * Subscribes `registration` with Internet Identity's VAPID key and registers the
- * subscription for the session behind `inbox`.
- *
- * An endpoint registered by another entry with other keys is refused, and the
- * device moves to a fresh endpoint and tries once more.
+ * subscription for the session behind `inbox`, retrying once on a fresh
+ * endpoint where the current one is registered with other keys.
  */
 export async function subscribeDevice(
   inbox: PwaNotifications,
