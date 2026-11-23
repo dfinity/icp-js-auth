@@ -3648,4 +3648,26 @@ describe('AuthClient same-device link', () => {
     expect(prepareSameDeviceLink).toHaveBeenCalledTimes(1);
     expect(location.href).toMatch(/^x-safari-https:\/\/id\.example\/ios-installed-app#key=[\w-]+$/);
   });
+
+  it('registers one key for taps that overlap', async () => {
+    safariInstalledApp();
+    const prepareSameDeviceLink = vi.fn(async () => undefined);
+    vi.spyOn(PwaNotifications, 'create').mockResolvedValue({
+      prepareSameDeviceLink,
+    } as unknown as PwaNotifications);
+    const hrefs: string[] = [];
+    const client = await signedInClient({
+      identityProvider: { authorizeUrl: 'https://id.example/authorize', canisterId: II_CANISTER },
+    });
+    vi.stubGlobal('location', {
+      set href(url: string) {
+        hrefs.push(url);
+      },
+    });
+
+    await Promise.all([client.requestSameDeviceLink(), client.requestSameDeviceLink()]);
+
+    expect(prepareSameDeviceLink).toHaveBeenCalledTimes(1);
+    expect(hrefs).toHaveLength(1);
+  });
 });

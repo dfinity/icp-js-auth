@@ -445,6 +445,8 @@ export class AuthClient {
   // One subscribe at a time: each prepare replaces the key the one before it
   // handed out, so two at once would spend each other's.
   #subscribing: Promise<void> = Promise.resolve();
+  // Each prepare replaces the link key before it, so concurrent taps share one.
+  #linking: Promise<void> | undefined;
   // Set while a repair holds `#subscribing`, which can be its whole probe deadline.
   #repairing = false;
   // Resolved, and replaced, each time a repair starts, so a waiter queued behind it stops waiting.
@@ -1569,6 +1571,13 @@ export class AuthClient {
         'A same-device link is made only in an installed web app of Safari',
       );
     }
+    this.#linking ??= this.#openSameDeviceLink().finally(() => {
+      this.#linking = undefined;
+    });
+    return this.#linking;
+  }
+
+  async #openSameDeviceLink(): Promise<void> {
     const url = await prepareSameDeviceLinkUrl(
       await this.#pwaNotifications(),
       this.#identityProviderOrigin,
