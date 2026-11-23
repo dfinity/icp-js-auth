@@ -5,8 +5,8 @@ import {
   PwaNotifications,
   sealSubscription,
   subscribeDevice,
-} from '../../src/client/pwa-notifications.ts';
-import { SessionGoneError } from '../../src/client/session/app-delegation-source.ts';
+} from '../../../src/client/notifications/pwa-notifications.ts';
+import { SessionGoneError } from '../../../src/client/session/app-delegation-source.ts';
 
 /** The private constructor, which is how `notification-consent.test.ts` reaches its own. */
 const over = (service: unknown): PwaNotifications =>

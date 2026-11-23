@@ -23,8 +23,8 @@ import { IdbKeyVal } from '../../src/client/db.ts';
 import {
   NotificationConsent,
   NotificationsUnsupportedError,
-} from '../../src/client/notification-consent.ts';
-import { PwaNotifications } from '../../src/client/pwa-notifications.ts';
+} from '../../src/client/notifications/notification-consent.ts';
+import { PwaNotifications } from '../../src/client/notifications/pwa-notifications.ts';
 import { SessionGoneError } from '../../src/client/session/app-delegation-source.ts';
 import { stealLock } from '../../src/client/session/app-lock.ts';
 import { InteractionRequiredError } from '../../src/client/session/session-delegation.ts';

@@ -25,7 +25,7 @@ import {
   // Aliased: the method below is this library's name for the operation, and this
   // is the request it sends.
   requestNotificationConsent as sendConsentRequest,
-} from './notification-consent.js';
+} from './notifications/notification-consent.js';
 import {
   fetchPushNotificationPayload,
   markPushNotificationOpened,
@@ -33,8 +33,12 @@ import {
   type NotificationPayload,
   type NotificationPushEvent,
   type PushNotificationSource,
-} from './push-notification.js';
-import { isInstalledApp, PwaNotifications, subscribeDevice } from './pwa-notifications.js';
+} from './notifications/push-notification.js';
+import {
+  isInstalledApp,
+  PwaNotifications,
+  subscribeDevice,
+} from './notifications/pwa-notifications.js';
 import {
   AccountMismatchError,
   chainAuthorisesKey,

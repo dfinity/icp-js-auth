@@ -1,19 +1,19 @@
 import { Actor, AnonymousIdentity, HttpAgent, RejectError } from '@icp-sdk/core/agent';
 import { Principal } from '@icp-sdk/core/principal';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { AuthClient } from '../../src/client/auth-client.ts';
+import { AuthClient } from '../../../src/client/auth-client.ts';
 import {
   fetchPushNotificationPayload,
   markPushNotificationOpened,
   type NotificationPushEvent,
   type PushNotificationScope,
   type PushNotificationSource,
-} from '../../src/client/push-notification.ts';
+} from '../../../src/client/notifications/push-notification.ts';
 import {
   type PwaNotificationService,
   PwaNotifications,
-} from '../../src/client/pwa-notifications.ts';
-import { SessionGoneError } from '../../src/client/session/app-delegation-source.ts';
+} from '../../../src/client/notifications/pwa-notifications.ts';
+import { SessionGoneError } from '../../../src/client/session/app-delegation-source.ts';
 
 /** The private constructor, which is how `notification-consent.test.ts` reaches its own. */
 const over = (service: unknown): PwaNotifications =>
@@ -214,7 +214,11 @@ describe('fetchPushNotification', () => {
     );
 
     await expect(
-      fetchAndSettle(source(async () => inbox), push({ inbox_notification_id: 3 }), scope),
+      fetchAndSettle(
+        source(async () => inbox),
+        push({ inbox_notification_id: 3 }),
+        scope,
+      ),
     ).rejects.toThrow(SessionGoneError);
   });
 
@@ -254,9 +258,9 @@ describe('fetchPushNotification', () => {
         },
       };
 
-      await expect(
-        fetchAndSettle(gone, push({ inbox_notification_id: 3 }), scope),
-      ).rejects.toThrow(SessionGoneError);
+      await expect(fetchAndSettle(gone, push({ inbox_notification_id: 3 }), scope)).rejects.toThrow(
+        SessionGoneError,
+      );
     });
 
     it("answers the app's notification with the tag and the data its canister sent", async () => {

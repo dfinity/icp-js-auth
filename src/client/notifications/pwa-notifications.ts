@@ -2,9 +2,9 @@ import { Actor, HttpAgent } from '@icp-sdk/core/agent';
 import type { IDL } from '@icp-sdk/core/candid';
 import { DelegationIdentity } from '@icp-sdk/core/identity';
 import type { Principal } from '@icp-sdk/core/principal';
+import { SessionGoneError } from '../session/app-delegation-source.js';
+import { assertChainReaches } from '../session/session-minter.js';
 import type { NotificationConsentOptions } from './notification-consent.js';
-import { SessionGoneError } from './session/app-delegation-source.js';
-import { assertChainReaches } from './session/session-minter.js';
 
 /**
  * Whether this page runs as an installed web app rather than in a browser tab.

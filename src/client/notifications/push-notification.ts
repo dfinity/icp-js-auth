@@ -1,9 +1,9 @@
 import { Actor, HttpAgent, type Identity, RejectError } from '@icp-sdk/core/agent';
 import { IDL } from '@icp-sdk/core/candid';
 import { Principal } from '@icp-sdk/core/principal';
+import { SessionGoneError } from '../session/app-delegation-source.js';
 import type { NotificationConsentOptions } from './notification-consent.js';
 import type { NotShownReason, PwaNotifications } from './pwa-notifications.js';
-import { SessionGoneError } from './session/app-delegation-source.js';
 
 /** How long resolving a push may take before the generic notification is answered instead. */
 const DISPLAY_DEADLINE_MS = 8_000;

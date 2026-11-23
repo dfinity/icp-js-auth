@@ -20,13 +20,13 @@ export {
   type NotificationConsentStatus,
   NotificationsUnsupportedError,
   requestNotificationConsent,
-} from './notification-consent.js';
+} from './notifications/notification-consent.js';
 export type {
   NotificationClickEvent,
   NotificationPayload,
   NotificationPushEvent,
   PushNotificationData,
-} from './push-notification.js';
+} from './notifications/push-notification.js';
 export { type AppDelegationSource, SessionGoneError } from './session/app-delegation-source.js';
 export {
   InteractionRequiredError,
