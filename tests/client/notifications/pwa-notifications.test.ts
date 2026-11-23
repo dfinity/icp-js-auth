@@ -546,6 +546,20 @@ describe('repairSubscription', () => {
     expect(set).toHaveBeenCalledTimes(1);
   });
 
+  it('keeps the held subscription where keys for its replacement cannot be had', async () => {
+    vi.useFakeTimers();
+    vi.stubGlobal('Notification', { permission: 'granted' });
+    const { inbox, registration, set, held } = await setUp(Array(20).fill(outstanding));
+    vi.spyOn(inbox, 'prepare').mockRejectedValue(new Error('offline'));
+
+    const repairing = repairSubscription(inbox, REGISTERED, registration).catch(() => undefined);
+    await vi.advanceTimersByTimeAsync(30_000);
+    await repairing;
+
+    expect(held.unsubscribe).not.toHaveBeenCalled();
+    expect(set).not.toHaveBeenCalled();
+  });
+
   it('waits on a probe already outstanding without sending another, and repairs at the deadline', async () => {
     vi.useFakeTimers();
     vi.stubGlobal('Notification', { permission: 'granted' });
