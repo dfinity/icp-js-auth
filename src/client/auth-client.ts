@@ -1825,12 +1825,13 @@ export class AuthClient {
   }
 
   /**
-   * Registers this installed app's push subscription where permission and
-   * consent are granted but Internet Identity does not deliver to it yet.
-   * Never prompts, and leaves a subscription under another key to a tap. A
-   * subscription Internet Identity reports unanswered is probed first, and
-   * replaced, or removed where permission was revoked, if the probe goes
-   * unanswered. Resolves without waiting for the probe, or for a repair already
+   * Registers this origin's push subscription where permission and consent are
+   * granted but Internet Identity does not deliver to it yet: in an installed
+   * app always, in a browser tab only where its service worker holds a
+   * subscription already. Never prompts, and leaves a subscription under another
+   * key to a tap. A subscription Internet Identity reports unanswered is probed
+   * first, and replaced, or removed where permission was revoked, if the probe
+   * goes unanswered. Resolves without waiting for the probe, or for a repair already
    * running.
    */
   #subscribeWhereUnregistered(key: SignIdentity, sessionChain: DelegationChain): Promise<void> {
@@ -1887,7 +1888,6 @@ export class AuthClient {
     key: SignIdentity,
     sessionChain: DelegationChain,
   ): Promise<SubscribeStep> {
-    if (!isInstalledApp()) return;
     // Asked whatever the permission: a subscription the user revoked or reset is removed,
     // but only once Internet Identity reports it past the unanswered limit and the probe fails.
     const permission = globalThis.Notification?.permission;
@@ -1906,7 +1906,6 @@ export class AuthClient {
     const inbox = await PwaNotifications.create(options, globalThis.location.origin);
     const registered = await inbox.registeredSubscription();
     const canSubscribe = permission === 'granted' && registration !== undefined;
-    const held = canSubscribe ? await registration.pushManager.getSubscription() : null;
     // Only the endpoint this device holds is worth probing; another one is replaced below.
     // An outstanding probe is one an interrupted repair left unresolved.
     const needsProbe = registered?.isPastLimit === true || registered?.probeSentAtNs !== undefined;
