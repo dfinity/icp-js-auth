@@ -1586,7 +1586,7 @@ export class AuthClient {
       this.#identityProviderOrigin,
     );
     // A link inside the app opens in the app's own view, which holds no Safari sign-in.
-    location.href = url.replace(/^https:/, 'x-safari-https:');
+    globalThis.location.href = url.replace(/^https:/, 'x-safari-https:');
   }
 
   /**

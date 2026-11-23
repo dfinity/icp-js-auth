@@ -880,14 +880,15 @@ export async function prepareSameDeviceLinkUrl(
   inbox: PwaNotifications,
   identityProviderOrigin: string,
 ): Promise<string> {
-  const keyPair = (await crypto.subtle.generateKey(LINK_KEY_ALGORITHM, true, [
+  const { subtle } = globalThis.crypto;
+  const keyPair = (await subtle.generateKey(LINK_KEY_ALGORITHM, true, [
     'sign',
     'verify',
   ])) as CryptoKeyPair;
-  const publicKey = new Uint8Array(await crypto.subtle.exportKey('spki', keyPair.publicKey));
+  const publicKey = new Uint8Array(await subtle.exportKey('spki', keyPair.publicKey));
   // Registered before the key is handed out, so a URL that exists is one Internet Identity waits for.
   await inbox.prepareSameDeviceLink(publicKey);
-  const { d, x, y } = await crypto.subtle.exportKey('jwk', keyPair.privateKey);
+  const { d, x, y } = await subtle.exportKey('jwk', keyPair.privateKey);
   const key = toBase64Url(concat(fromBase64Url(d), fromBase64Url(x), fromBase64Url(y)));
   const url = new URL(SAME_DEVICE_LINK_PATH, identityProviderOrigin);
   url.hash = new URLSearchParams({ key }).toString();
