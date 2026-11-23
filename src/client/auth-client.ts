@@ -1117,7 +1117,7 @@ export class AuthClient {
         await resubscribing;
         // A sign-out or later sign-in may have taken over during that wait.
         this.#assertCurrent(signInLock);
-        location.replace(target);
+        globalThis.location.replace(target);
       }
 
       return this.#identity;
@@ -1410,10 +1410,10 @@ export class AuthClient {
         'Notifications are subscribed to only in an installed web app',
       );
     }
-    const permission = await Notification.requestPermission();
+    const permission = await globalThis.Notification.requestPermission();
     if (permission !== 'granted') return permission;
 
-    const registration = await navigator.serviceWorker.getRegistration();
+    const registration = await globalThis.navigator.serviceWorker.getRegistration();
     if (registration === undefined) {
       throw new Error('This origin has no service worker registered to receive notifications');
     }
@@ -1593,7 +1593,7 @@ export class AuthClient {
       // from it.
       const target = sameOriginTarget(options.returnTo);
       if (target !== undefined) {
-        window.location.assign(target.href);
+        globalThis.location.assign(target.href);
       }
     }
   }
@@ -2096,13 +2096,13 @@ function publicKeyOf(key: SignIdentity | PartialIdentity): string {
 function sameOriginTarget(returnTo: string): URL | undefined {
   let target: URL;
   try {
-    target = new URL(returnTo, window.location.href);
+    target = new URL(returnTo, globalThis.location.href);
   } catch {
     return undefined;
   }
   if (
     (target.protocol === 'https:' || target.protocol === 'http:') &&
-    target.origin === window.location.origin
+    target.origin === globalThis.location.origin
   ) {
     return target;
   }

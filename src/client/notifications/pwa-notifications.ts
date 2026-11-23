@@ -344,29 +344,30 @@ export async function sealSubscription(
   if (subscriberKey === null || authSecret === null) {
     throw new Error('The push subscription carries no encryption keys');
   }
+  const { subtle } = globalThis.crypto;
 
-  const browser = await crypto.subtle.generateKey({ name: 'ECDH', namedCurve: 'P-256' }, false, [
+  const browser = await subtle.generateKey({ name: 'ECDH', namedCurve: 'P-256' }, false, [
     'deriveBits',
   ]);
-  const transportKey = new Uint8Array(await crypto.subtle.exportKey('raw', browser.publicKey));
-  const theirs = await crypto.subtle.importKey(
+  const transportKey = new Uint8Array(await subtle.exportKey('raw', browser.publicKey));
+  const theirs = await subtle.importKey(
     'raw',
     bytesOf(transportPublicKey),
     { name: 'ECDH', namedCurve: 'P-256' },
     false,
     [],
   );
-  const shared = await crypto.subtle.deriveBits(
+  const shared = await subtle.deriveBits(
     { name: 'ECDH', public: theirs },
     browser.privateKey,
     SHARED_SECRET_BITS,
   );
-  const extracted = await crypto.subtle.importKey('raw', shared, 'HKDF', false, ['deriveBits']);
+  const extracted = await subtle.importKey('raw', shared, 'HKDF', false, ['deriveBits']);
 
   // The canister's key first and this one second, which is the order it rebuilds in.
   const info = concat(INFO_PREFIX, transportPublicKey, transportKey);
   const derive = (label: Uint8Array, bits: number): Promise<ArrayBuffer> =>
-    crypto.subtle.deriveBits(
+    subtle.deriveBits(
       {
         name: 'HKDF',
         hash: 'SHA-256',
@@ -377,7 +378,7 @@ export async function sealSubscription(
       bits,
     );
 
-  const key = await crypto.subtle.importKey(
+  const key = await subtle.importKey(
     'raw',
     await derive(KEY_LABEL, AES_KEY_BITS),
     'AES-GCM',
@@ -385,7 +386,7 @@ export async function sealSubscription(
     ['encrypt'],
   );
   const sealedAuth = new Uint8Array(
-    await crypto.subtle.encrypt(
+    await subtle.encrypt(
       { name: 'AES-GCM', iv: await derive(IV_LABEL, AES_IV_BITS) },
       key,
       authSecret,
