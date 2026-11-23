@@ -1493,7 +1493,8 @@ export class AuthClient {
       const registration = await pushRegistration();
       if (registration === undefined) throw noServiceWorkerError();
       await this.#queueSubscribe(async () => {
-        await saveVapidKey(await subscribeDevice(await this.#pwaNotifications(), registration));
+        const inbox = await this.#pwaNotifications();
+        await saveKey(await subscribeDevice(inbox, registration, this.#disposal.signal));
       });
       return permission;
     }
@@ -1516,7 +1517,7 @@ export class AuthClient {
         if (held !== null && subscribedWith(held, savedKey) && held.endpoint === registered) {
           return;
         }
-        await saveVapidKey(await subscribeDevice(inbox, registration));
+        await saveKey(await subscribeDevice(inbox, registration, this.#disposal.signal));
       } catch (error) {
         if (!(error instanceof NotificationsNotAllowedError)) throw error;
       }
@@ -1819,7 +1820,7 @@ export class AuthClient {
         this.#sessionOptions(key, sessionChain),
         globalThis.location.origin,
       );
-      await saveVapidKey(await resubscribeDevice(inbox, registration));
+      await saveKey(await resubscribeDevice(inbox, registration, this.#disposal.signal));
     });
   }
 
@@ -1844,8 +1845,8 @@ export class AuthClient {
   /**
    * Runs `work` once every subscribe queued before it has settled, holding the
    * lock every client and tab of this origin takes around its push subscription.
-   * Resolves once `work` does; a repair it hands back keeps the queue and the
-   * lock until it settles.
+   * Resolves once `work` does, or without running it once this client is
+   * disposed; a repair it hands back keeps the queue and the lock until it settles.
    */
   #queueSubscribe(work: () => Promise<SubscribeStep>): Promise<void> {
     let done: () => void = () => undefined;
@@ -1856,6 +1857,10 @@ export class AuthClient {
     });
     const whole = this.#subscribing.then(() =>
       withMintLock(PUSH_SUBSCRIPTION_LOCK, async () => {
+        if (this.#disposal.signal.aborted) {
+          done();
+          return;
+        }
         const step = await work().catch((error: unknown) => {
           failed(error);
           return undefined;
@@ -1920,7 +1925,7 @@ export class AuthClient {
           }
           const consent = await NotificationConsent.create(options);
           if (!(await consent.status()).granted || stop.aborted) return;
-          await resubscribeDevice(inbox, registration);
+          await resubscribeDevice(inbox, registration, stop);
         })(),
       };
     }
@@ -1928,7 +1933,7 @@ export class AuthClient {
     if (held !== null && held.endpoint === registered?.endpoint) return;
     const consent = await NotificationConsent.create(options);
     if (!(await consent.status()).granted) return;
-    await subscribeDevice(inbox, registration);
+    await subscribeDevice(inbox, registration, this.#disposal.signal);
   }
 
   /**
@@ -2354,6 +2359,11 @@ export class AuthClient {
     const failed = outcomes.find((outcome) => outcome.status === 'rejected');
     if (failed !== undefined) throw failed.reason;
   }
+}
+
+/** Records `vapidPublicKey` where a subscribe bound the push subscription to it. */
+async function saveKey(vapidPublicKey: Uint8Array | undefined): Promise<void> {
+  if (vapidPublicKey !== undefined) await saveVapidKey(vapidPublicKey);
 }
 
 /** The global scope where this runs in a service worker, or `undefined` in a page. */

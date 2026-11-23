@@ -209,6 +209,9 @@ describe('sealSubscription', () => {
   });
 });
 
+/** A signal nothing aborts. */
+const running = new AbortController().signal;
+
 describe('subscribeDevice', () => {
   async function setUp(setAnswers: unknown[]) {
     const transport = await crypto.subtle.generateKey(
@@ -243,7 +246,9 @@ describe('subscribeDevice', () => {
   it('subscribes with the VAPID key and registers the sealed subscription', async () => {
     const { inbox, registration, set, subscribe } = await setUp([{ Ok: null }]);
 
-    await expect(subscribeDevice(inbox, registration)).resolves.toEqual(KEYS.vapid_public_key);
+    await expect(subscribeDevice(inbox, registration, running)).resolves.toEqual(
+      KEYS.vapid_public_key,
+    );
 
     expect(subscribe).toHaveBeenCalledWith(expect.objectContaining({ userVisibleOnly: true }));
     expect(set).toHaveBeenCalledTimes(1);
@@ -256,7 +261,7 @@ describe('subscribeDevice', () => {
       first as unknown as PushSubscription,
     );
 
-    await subscribeDevice(inbox, registration);
+    await subscribeDevice(inbox, registration, running);
 
     expect(subscribe).not.toHaveBeenCalled();
     expect(set.mock.calls[0][0].subscription[0].endpoint).toBe('https://push.example/1');
@@ -272,7 +277,7 @@ describe('subscribeDevice', () => {
       other as unknown as PushSubscription,
     );
 
-    await subscribeDevice(inbox, registration);
+    await subscribeDevice(inbox, registration, running);
 
     expect(other.unsubscribe).toHaveBeenCalled();
     expect(subscribe).toHaveBeenCalledWith(expect.objectContaining({ userVisibleOnly: true }));
@@ -289,7 +294,7 @@ describe('subscribeDevice', () => {
       other as unknown as PushSubscription,
     );
 
-    await resubscribeDevice(inbox, registration);
+    await resubscribeDevice(inbox, registration, running);
 
     expect(other.unsubscribe).not.toHaveBeenCalled();
     expect(subscribe).not.toHaveBeenCalled();
@@ -301,11 +306,47 @@ describe('subscribeDevice', () => {
       { Ok: null },
     ]);
 
-    await subscribeDevice(inbox, registration);
+    await subscribeDevice(inbox, registration, running);
 
     expect(first.unsubscribe).toHaveBeenCalled();
     expect(set).toHaveBeenCalledTimes(2);
     expect(set.mock.calls[1][0].subscription[0].endpoint).toBe('https://push.example/2');
+  });
+
+  it('changes nothing once stopped while keys are being prepared', async () => {
+    const { inbox, registration, set, subscribe } = await setUp([{ Ok: null }]);
+    const stop = new AbortController();
+    const prepare = inbox.prepare.bind(inbox);
+    vi.spyOn(inbox, 'prepare').mockImplementationOnce(async () => {
+      const keys = await prepare();
+      stop.abort();
+      return keys;
+    });
+
+    await subscribeDevice(inbox, registration, stop.signal);
+
+    expect(subscribe).not.toHaveBeenCalled();
+    expect(set).not.toHaveBeenCalled();
+  });
+
+  it('keeps the held subscription once stopped while keys for its replacement are prepared', async () => {
+    const { inbox, registration, set, subscribe, first } = await setUp([{ Ok: null }]);
+    vi.mocked(registration.pushManager.getSubscription).mockResolvedValueOnce(
+      first as unknown as PushSubscription,
+    );
+    const stop = new AbortController();
+    const prepare = inbox.prepare.bind(inbox);
+    vi.spyOn(inbox, 'prepare').mockImplementationOnce(async () => {
+      const keys = await prepare();
+      stop.abort();
+      return keys;
+    });
+
+    await resubscribeDevice(inbox, registration, stop.signal);
+
+    expect(first.unsubscribe).not.toHaveBeenCalled();
+    expect(subscribe).not.toHaveBeenCalled();
+    expect(set).not.toHaveBeenCalled();
   });
 
   it('retries no more than once', async () => {
@@ -314,7 +355,7 @@ describe('subscribeDevice', () => {
       { Err: { EndpointInUse: null } },
     ]);
 
-    await expect(subscribeDevice(inbox, registration)).rejects.toThrow(
+    await expect(subscribeDevice(inbox, registration, running)).rejects.toThrow(
       'This push endpoint is registered with other keys',
     );
   });
@@ -349,7 +390,9 @@ describe('resubscribeDevice', () => {
       },
     } as unknown as ServiceWorkerRegistration;
 
-    await expect(resubscribeDevice(inbox, registration)).resolves.toEqual(KEYS.vapid_public_key);
+    await expect(resubscribeDevice(inbox, registration, running)).resolves.toEqual(
+      KEYS.vapid_public_key,
+    );
 
     expect(held.unsubscribe).toHaveBeenCalled();
     expect(set).toHaveBeenCalledWith(
@@ -452,8 +495,6 @@ describe('same-device link', () => {
 
 describe('repairSubscription', () => {
   const UNANSWERED = { count: 3, first_sent_at_ns: BigInt(1), is_past_limit: true };
-  /** A repair nothing stops. */
-  const running = new AbortController().signal;
   const REGISTERED = {
     endpoint: 'https://push.example/1',
     isPastLimit: true,
@@ -578,6 +619,23 @@ describe('repairSubscription', () => {
     await expect(repairing).resolves.toBe('stopped');
     await vi.advanceTimersByTimeAsync(30_000);
     expect(status.mock.calls.length).toBe(polled);
+    expect(held.unsubscribe).not.toHaveBeenCalled();
+    expect(set).not.toHaveBeenCalled();
+  });
+
+  it('sends no probe once stopped before it starts', async () => {
+    vi.useFakeTimers();
+    vi.stubGlobal('Notification', { permission: 'granted' });
+    const { inbox, registration, set, held, probe } = await setUp(Array(20).fill(unanswered));
+    const stop = new AbortController();
+    stop.abort();
+
+    await expect(repairSubscription(inbox, REGISTERED, registration, stop.signal)).resolves.toBe(
+      'stopped',
+    );
+    await vi.advanceTimersByTimeAsync(30_000);
+
+    expect(probe).not.toHaveBeenCalled();
     expect(held.unsubscribe).not.toHaveBeenCalled();
     expect(set).not.toHaveBeenCalled();
   });
