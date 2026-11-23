@@ -288,11 +288,14 @@ export async function fetchPushNotificationPayload(
 ): Promise<NotificationPayload> {
   const { payload, report } = await fetchForPush(source, event, scope);
   if (report !== undefined) {
-    const reporting = report().catch(() => undefined);
+    const reporting = report().catch((error: unknown) => {
+      if (error instanceof SessionGoneError) throw error;
+    });
     try {
       event.waitUntil(reporting);
     } catch {
       // The event's lifetime already ended; the report runs for as long as the worker does.
+      reporting.catch(() => undefined);
     }
   }
   return payload;

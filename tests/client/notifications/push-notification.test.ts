@@ -190,6 +190,30 @@ describe('fetchPushNotification', () => {
     removeOf(remove, 3);
   });
 
+  it('fails the push with SessionGoneError where the session ends after the deadline', async () => {
+    vi.useFakeTimers();
+    const { scope } = fakeScope();
+    let end: (error: Error) => void = () => undefined;
+
+    const fetching = fetchAndSettle(
+      source(
+        () =>
+          new Promise<PwaNotifications>((_, reject) => {
+            end = reject;
+          }),
+      ),
+      push({ inbox_notification_id: 3 }),
+      scope,
+    );
+    await vi.advanceTimersByTimeAsync(8_000);
+    const notification = await fetching;
+    expect(notification).toMatchObject(GENERIC);
+
+    const settling = notification.settled();
+    end(new SessionGoneError());
+    await expect(settling).rejects.toThrow(SessionGoneError);
+  });
+
   it('clears an entry that is gone without a reason', async () => {
     const remove = vi.fn(async () => ({ Ok: {} }));
     const { scope } = fakeScope();
