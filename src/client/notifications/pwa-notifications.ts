@@ -8,13 +8,14 @@ import { assertChainReaches } from '../session/session-minter.js';
 import type { NotificationConsentOptions } from './notification-consent.js';
 
 /**
- * Whether this page runs as an installed web app rather than in a browser tab.
+ * Whether this page runs as an installed web app of Safari (an iOS Home Screen
+ * app or a macOS Dock app), which keeps storage of its own apart from Safari's.
  *
- * iOS predates the display-mode query for Home Screen apps and reports them
- * through `navigator.standalone` instead, so both are asked.
+ * Only Safari reports `navigator.standalone`. Installed apps of Chromium share
+ * the browser's storage, and with it the browser's entry at Internet Identity,
+ * in every display mode.
  */
-export function isInstalledApp(): boolean {
-  if (globalThis.matchMedia?.('(display-mode: standalone)').matches === true) return true;
+export function isSafariInstalledApp(): boolean {
   const navigator = globalThis.navigator as (Navigator & { standalone?: boolean }) | undefined;
   return navigator?.standalone === true;
 }

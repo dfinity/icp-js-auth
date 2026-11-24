@@ -35,7 +35,7 @@ import {
   type PushNotificationSource,
 } from './notifications/push-notification.js';
 import {
-  isInstalledApp,
+  isSafariInstalledApp,
   NotificationsNotAllowedError,
   PwaNotifications,
   resubscribeDevice,
@@ -1287,10 +1287,11 @@ export class AuthClient {
    * user's answer and nothing else can stand in for it. Where they agree, the
    * browser they answered on is registered for delivery.
    *
-   * In an installed web app this records consent only: call
+   * In a Safari installed web app (iOS, macOS) this records consent only: call
    * {@link subscribeToNotifications} from a second tap once it returns
-   * `granted: true`. A browser tab may call it too, to have its own service
-   * worker deliver instead of Internet Identity's.
+   * `granted: true`. Elsewhere, in a browser tab or a Chromium installed app,
+   * it may be called too, to have the app's own service worker deliver instead
+   * of Internet Identity's.
    *
    * A refusal is an answer rather than a failure: it returns `granted: false`,
    * and an application renders that. Calling it again where consent is already
@@ -1313,7 +1314,7 @@ export class AuthClient {
       const response = sendConsentRequest(
         this.#signer,
         this.#options.derivationOrigin?.toString(),
-        isInstalledApp(),
+        isSafariInstalledApp(),
       );
       this.#takeChannelLock();
       return await response;

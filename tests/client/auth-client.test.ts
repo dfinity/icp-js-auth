@@ -2669,7 +2669,22 @@ describe('AuthClient notification consent', () => {
     expect(transport.requests[0].params?.icrc95DerivationOrigin).toBe('https://app.example.com');
   });
 
-  it('should say so where it runs as an installed web app', async () => {
+  it('should say so where it runs as an installed web app of Safari', async () => {
+    Object.defineProperty(navigator, 'standalone', { configurable: true, value: true });
+    try {
+      const client = track(new AuthClient());
+      const transport = FakeTransport.last();
+      handleNotificationConsent(transport);
+
+      await client.requestNotificationConsent();
+
+      expect(transport.requests[0].params).toEqual({ installedApp: true });
+    } finally {
+      Reflect.deleteProperty(navigator, 'standalone');
+    }
+  });
+
+  it('should take the browser path in a Chromium installed app, whatever its display mode', async () => {
     vi.stubGlobal('matchMedia', (query: string) => ({
       matches: query === '(display-mode: standalone)',
     }));
@@ -2679,7 +2694,7 @@ describe('AuthClient notification consent', () => {
 
     await client.requestNotificationConsent();
 
-    expect(transport.requests[0].params).toEqual({ installedApp: true });
+    expect(transport.requests[0].params).toEqual({});
   });
 
   it('should refuse to subscribe where the browser has no Web Push, before asking for permission', async () => {

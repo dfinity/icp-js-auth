@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
-  isInstalledApp,
+  isSafariInstalledApp,
   type PwaNotificationService,
   PwaNotifications,
   resubscribeDevice,
@@ -43,26 +43,23 @@ afterEach(() => {
   vi.useRealTimers();
 });
 
-describe('isInstalledApp', () => {
-  it('reads the standalone display mode', () => {
-    vi.stubGlobal('matchMedia', (query: string) => ({
-      matches: query === '(display-mode: standalone)',
-    }));
-
-    expect(isInstalledApp()).toBe(true);
-  });
-
-  it('reads navigator.standalone, which iOS reports a Home Screen app through', () => {
-    vi.stubGlobal('matchMedia', () => ({ matches: false }));
+describe('isSafariInstalledApp', () => {
+  it('reads navigator.standalone, which Safari reports its installed web apps through', () => {
     vi.stubGlobal('navigator', { standalone: true });
 
-    expect(isInstalledApp()).toBe(true);
+    expect(isSafariInstalledApp()).toBe(true);
   });
 
-  it('answers no in a browser tab', () => {
-    vi.stubGlobal('matchMedia', () => ({ matches: false }));
+  it('answers no in a Chromium installed app, whatever its display mode', () => {
+    vi.stubGlobal('matchMedia', () => ({ matches: true }));
 
-    expect(isInstalledApp()).toBe(false);
+    expect(isSafariInstalledApp()).toBe(false);
+  });
+
+  it('answers no in a Safari tab', () => {
+    vi.stubGlobal('navigator', { standalone: false });
+
+    expect(isSafariInstalledApp()).toBe(false);
   });
 });
 
