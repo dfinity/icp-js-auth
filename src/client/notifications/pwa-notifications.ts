@@ -27,7 +27,7 @@ export type NotShownReason = { PayloadUnreachable: null } | { PayloadRejected: n
 type PrepareError =
   | { NoSuchSession: null }
   | { NotificationsNotAllowed: null }
-  | { UnlistedFrontend: null }
+  | { NoSuchFrontend: null }
   | { InternalCanisterError: string };
 
 /** Why Internet Identity did not register or remove a subscription. */
@@ -94,7 +94,7 @@ const idlFactory: IDL.InterfaceFactory = ({ IDL }) => {
   const PrepareError = IDL.Variant({
     NoSuchSession: IDL.Null,
     NotificationsNotAllowed: IDL.Null,
-    UnlistedFrontend: IDL.Null,
+    NoSuchFrontend: IDL.Null,
     InternalCanisterError: IDL.Text,
   });
   const FrontendRequest = IDL.Record({ frontend_origin: IDL.Opt(IDL.Text) });
@@ -208,8 +208,8 @@ const unwrapSubscription = <T>(
   if ('NoSuchSession' in error) throw new SessionGoneError();
   if ('EndpointInUse' in error) throw new EndpointInUseError();
   if ('NotificationsNotAllowed' in error) throw new NotificationsNotAllowedError();
-  if ('UnlistedFrontend' in error) {
-    throw new Error('This application does not list this page among its alternative origins');
+  if ('NoSuchFrontend' in error) {
+    throw new Error("This application lists no frontend at this page's origin");
   }
   if ('TransportKeyExpired' in error) {
     throw new Error('Internet Identity no longer holds the key this subscription was sealed to');
