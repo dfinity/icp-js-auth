@@ -3295,7 +3295,50 @@ describe("AuthClient and this origin's push subscription", () => {
     });
   });
 
+  /**
+   * Holds the next prepare, and with it the origin's subscribe queue, until the
+   * returned function is called.
+   */
+  function holdNextPrepare(prepare: ReturnType<typeof fakeCalls>['prepare']): () => void {
+    let release: () => void = () => undefined;
+    const keys = prepare.getMockImplementation();
+    prepare.mockImplementationOnce(async () => {
+      await new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      return (await keys?.()) as Awaited<ReturnType<NonNullable<typeof keys>>>;
+    });
+    return () => release();
+  }
+
+  /** Lets the queued subscribe tasks run. */
+  const settle = () => new Promise((resolve) => setTimeout(resolve, 20));
+
   describe('signIn', () => {
+    it('skips its subscribe where another session is stored by the time it runs', async () => {
+      serviceWorker('granted');
+      const storage = new MemoryCredentialStorage();
+      const namespace = 'sign-in-superseded';
+      const client = track(new AuthClient({ namespace, credentialStorage: storage }));
+      handleSignIn(FakeTransport.last());
+      await client.signIn();
+      await saveVapidKey(VAPID);
+      const { prepare } = fakeCalls();
+      const release = holdNextPrepare(prepare);
+      const tapping = client.subscribeToNotifications();
+      await vi.waitFor(() => expect(prepare).toHaveBeenCalledTimes(1));
+
+      handleSignIn(FakeTransport.last());
+      await client.signIn();
+      // Another client of this origin signs in while this one's subscribe waits.
+      await storage.set(slotsFor(namespace).session, { identity: await storage.create() });
+      release();
+      await tapping;
+      await settle();
+
+      expect(prepare).toHaveBeenCalledTimes(1);
+    });
+
     it('subscribes a fresh endpoint for the new account where a key is saved', async () => {
       const { subscription, subscribe, requestPermission } = serviceWorker('granted');
       await saveVapidKey(VAPID);
@@ -3389,9 +3432,11 @@ describe("AuthClient and this origin's push subscription", () => {
 
       const signingIn = client.signIn({ returnTo: '/app' });
       await vi.waitFor(() => expect(set).toHaveBeenCalled());
-      await client.signOut();
+      // Its teardown waits for the subscribe holding the lock.
+      const signingOut = client.signOut();
 
       land();
+      await signingOut;
       await expect(signingIn).rejects.toBeInstanceOf(SupersededError);
       expect(replace).not.toHaveBeenCalled();
     });
@@ -3427,6 +3472,32 @@ describe("AuthClient and this origin's push subscription", () => {
   });
 
   describe('signOut', () => {
+    it('leaves the subscription alone where a later sign-in stored another session', async () => {
+      const { subscription } = serviceWorker('granted');
+      const storage = new MemoryCredentialStorage();
+      const namespace = 'sign-out-superseded';
+      const client = track(new AuthClient({ namespace, credentialStorage: storage }));
+      handleSignIn(FakeTransport.last());
+      await client.signIn();
+      await saveVapidKey(VAPID);
+      const { prepare, set } = fakeCalls('https://push.example/1');
+      const release = holdNextPrepare(prepare);
+      const tapping = client.subscribeToNotifications();
+      await vi.waitFor(() => expect(prepare).toHaveBeenCalledTimes(1));
+
+      const signingOut = client.signOut();
+      const slot = slotsFor(namespace).session;
+      await vi.waitFor(async () => expect(await storage.get(slot)).toBeNull());
+      // Another client of this origin signs in before this sign-out's teardown runs.
+      await storage.set(slot, { identity: await storage.create() });
+      release();
+      await tapping;
+      await signingOut;
+
+      expect(set).not.toHaveBeenCalledWith(null);
+      expect(subscription.unsubscribe).not.toHaveBeenCalled();
+    });
+
     it('removes the subscription under the saved key at Internet Identity and unsubscribes it', async () => {
       const { subscription } = serviceWorker('granted');
       const client = await signedIn('sign-out-removes');

@@ -1720,6 +1720,8 @@ export class AuthClient {
   #subscribeAfterSignIn(key: SignIdentity, sessionChain: DelegationChain): Promise<void> {
     return this.#queueSubscribe(async () => {
       if ((await savedVapidKey()) === undefined) return;
+      // A sign-out, or a later sign-in from any client of this origin, may have run first.
+      if ((await this.#storedSessionKey()) !== publicKeyOf(key)) return;
       const registration = await pushRegistration();
       if (registration === undefined || (await pushPermission(registration)) !== 'granted') return;
       const inbox = await PwaNotifications.create(
@@ -1746,13 +1748,17 @@ export class AuthClient {
   /**
    * Where this origin's push subscription is the one {@link subscribeToNotifications}
    * recorded the key of, removes it at Internet Identity and unsubscribes it.
-   * Without a recorded key it calls nothing. Best-effort: delivery stops with the
-   * session anyway.
+   * Without a recorded key it calls nothing, and where a later sign-in stored
+   * another session it leaves that sign-in's subscription alone. Best-effort:
+   * delivery stops with the session anyway.
    */
-  async #removePwaSubscription(key: SignIdentity, sessionChain: DelegationChain): Promise<void> {
-    try {
+  #removePwaSubscription(key: SignIdentity, sessionChain: DelegationChain): Promise<void> {
+    return this.#queueSubscribe(async () => {
       const savedKey = await savedVapidKey();
       if (savedKey === undefined) return;
+      // Cleared by this sign-out, or still this session: either way the subscription is its own.
+      const stored = await this.#storedSessionKey();
+      if (stored !== undefined && stored !== publicKeyOf(key)) return;
       const held = await heldPushSubscription();
       if (held === null || !subscribedWith(held, savedKey)) return;
       try {
@@ -1764,7 +1770,13 @@ export class AuthClient {
       } finally {
         await held.unsubscribe();
       }
-    } catch {}
+    }).catch(() => undefined);
+  }
+
+  /** The public key of the session this origin stores, or `undefined` where it stores none. */
+  async #storedSessionKey(): Promise<string | undefined> {
+    const session = await this.#credentialStorage.get(this.#slots.session).catch(() => null);
+    return session === null ? undefined : publicKeyOf(session.identity);
   }
 
   /** What a call made as the session `key` and `sessionChain` make up is built from. */
