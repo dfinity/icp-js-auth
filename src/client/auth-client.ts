@@ -39,7 +39,6 @@ import {
   NotificationsNotAllowedError,
   PwaNotifications,
   prepareSameDeviceLinkUrl,
-  repairSubscription,
   resubscribeDevice,
   type SameDeviceLinkStatus,
   savedVapidKey,
@@ -81,18 +80,6 @@ const CHANNEL_LOCK = 'ic-auth-signer-channel';
  * and tab of the origin, and its service worker, share one registration.
  */
 const PUSH_SUBSCRIPTION_LOCK = 'ic-auth-push-subscription';
-
-/** A subscribe's foreground part done, and the repair it leaves running, if any. */
-type SubscribeStep = { repairing: Promise<void> } | undefined;
-
-/** A promise and what settles it, for the start of the next repair. */
-const repairSignal = (): { promise: Promise<void>; resolve: () => void } => {
-  let resolve: () => void = () => undefined;
-  const promise = new Promise<void>((settle) => {
-    resolve = settle;
-  });
-  return { promise, resolve };
-};
 
 /** The lock over one namespace's sign-in, which `signIn` and `signOut` both move. */
 const signInLockFor = (stateSlot: string): string => `${stateSlot}:sign-in`;
@@ -447,12 +434,8 @@ export class AuthClient {
   #subscribing: Promise<void> = Promise.resolve();
   // Each prepare replaces the link key before it, so concurrent taps share one.
   #linking: Promise<void> | undefined;
-  // Stops a background repair, which would otherwise hold the push subscription lock past dispose().
+  // Stops queued push subscription work, so a disposed client changes no subscription.
   readonly #disposal = new AbortController();
-  // Set while a repair holds `#subscribing`, which can be its whole probe deadline.
-  #repairing = false;
-  // Resolved, and replaced, each time a repair starts, so a waiter queued behind it stops waiting.
-  #repairStarted = repairSignal();
   // What `getStatus` answers with, replaced only when the record changes.
   #status: SessionStatus;
   readonly #listeners = new Set<() => void>();
@@ -1448,7 +1431,8 @@ export class AuthClient {
    * - `'denied'`: removes the registration at Internet Identity, which then
    *   delivers through its own path.
    * - `'granted'`: registers this device's subscription again where Internet
-   *   Identity holds another endpoint, or none.
+   *   Identity holds another endpoint, or none, and moves to a fresh endpoint
+   *   where Internet Identity reports pushes to the current one unanswered.
    *
    * Where nothing was subscribed on this origin before, or the user has not
    * consented, it changes nothing. Call it this way when the app starts, after
@@ -1513,10 +1497,14 @@ export class AuthClient {
           return;
         }
         const held = await registration.pushManager.getSubscription();
-        const registered = (await inbox.registeredSubscription())?.endpoint;
-        if (held !== null && subscribedWith(held, savedKey) && held.endpoint === registered) {
+        const registered = await inbox.registeredSubscription();
+        const isCurrent =
+          held !== null && subscribedWith(held, savedKey) && held.endpoint === registered?.endpoint;
+        if (isCurrent && registered?.isPastLimit === true) {
+          await saveKey(await resubscribeDevice(inbox, registration, this.#disposal.signal));
           return;
         }
+        if (isCurrent) return;
         await saveKey(await subscribeDevice(inbox, registration, this.#disposal.signal));
       } catch (error) {
         if (!(error instanceof NotificationsNotAllowedError)) throw error;
@@ -1825,114 +1813,22 @@ export class AuthClient {
   }
 
   /**
-   * Registers this origin's push subscription where permission and consent are
-   * granted but Internet Identity does not deliver to it yet: in an installed
-   * app always, in a browser tab only where its service worker holds a
-   * subscription already. Never prompts, and leaves a subscription under another
-   * key to a tap. A subscription Internet Identity reports unanswered is probed
-   * first, and replaced, or removed where permission was revoked, if the probe
-   * goes unanswered. Resolves without waiting for the probe, or for a repair already
-   * running.
-   */
-  #subscribeWhereUnregistered(key: SignIdentity, sessionChain: DelegationChain): Promise<void> {
-    const queued = this.#queueSubscribe(() => this.#subscribeIfUnregistered(key, sessionChain));
-    // Behind a repair, already running or started by work queued ahead, nothing waits for it:
-    // it runs if the page stays, and the next load checks again.
-    queued.catch(() => undefined);
-    if (this.#repairing) return Promise.resolve();
-    return Promise.race([queued, this.#repairStarted.promise]);
-  }
-
-  /**
    * Runs `work` once every subscribe queued before it has settled, holding the
-   * lock every client and tab of this origin takes around its push subscription.
-   * Resolves once `work` does, or without running it once this client is
-   * disposed; a repair it hands back keeps the queue and the lock until it settles.
+   * lock every client, tab and service worker of this origin takes around its
+   * push subscription. Resolves without running it once this client is
+   * disposed.
    */
-  #queueSubscribe(work: () => Promise<SubscribeStep>): Promise<void> {
-    let done: () => void = () => undefined;
-    let failed: (error: unknown) => void = () => undefined;
-    const subscribed = new Promise<void>((resolve, reject) => {
-      done = resolve;
-      failed = reject;
-    });
-    const whole = this.#subscribing.then(() =>
-      withMintLock(PUSH_SUBSCRIPTION_LOCK, async () => {
-        if (this.#disposal.signal.aborted) {
-          done();
-          return;
-        }
-        const step = await work().catch((error: unknown) => {
-          failed(error);
-          return undefined;
-        });
-        done();
-        if (step === undefined) return;
-        this.#repairing = true;
-        this.#repairStarted.resolve();
-        this.#repairStarted = repairSignal();
-        try {
-          await step.repairing;
-        } finally {
-          this.#repairing = false;
-        }
-      }),
-    );
-    whole.catch(failed);
-    this.#subscribing = whole.catch(() => undefined);
-    return subscribed;
-  }
-
-  /** Wrapped, so the repair is handed back running rather than awaited. */
-  async #subscribeIfUnregistered(
-    key: SignIdentity,
-    sessionChain: DelegationChain,
-  ): Promise<SubscribeStep> {
-    // Asked whatever the permission: a subscription the user revoked or reset is removed,
-    // but only once Internet Identity reports it past the unanswered limit and the probe fails.
-    const permission = globalThis.Notification?.permission;
-    if (permission === undefined) return;
-    const registration = await globalThis.navigator?.serviceWorker?.getRegistration();
-    // A tab whose service worker holds nothing leaves delivery to Internet Identity's.
-    const held = (await registration?.pushManager.getSubscription()) ?? null;
-    if (!isInstalledApp() && held === null) return;
-
-    const options = {
-      sessionKey: key,
-      sessionChain,
-      canisterId: this.#canisterId,
-      agentOptions: this.#options.agentOptions,
-    };
-    const inbox = await PwaNotifications.create(options, globalThis.location.origin);
-    const registered = await inbox.registeredSubscription();
-    const canSubscribe = permission === 'granted' && registration !== undefined;
-    // Only the endpoint this device holds is worth probing; another one is replaced below.
-    // An outstanding probe is one an interrupted repair left unresolved.
-    const needsProbe = registered?.isPastLimit === true || registered?.probeSentAtNs !== undefined;
-    if (
-      registered !== undefined &&
-      needsProbe &&
-      (!canSubscribe || held?.endpoint === registered.endpoint)
-    ) {
-      return {
-        repairing: (async () => {
-          const stop = this.#disposal.signal;
-          if ((await repairSubscription(inbox, registered, registration, stop)) !== 'gone') return;
-          // Dropped after its push service refused the endpoint, so a fresh one is registered.
-          if (globalThis.Notification?.permission !== 'granted' || registration === undefined) {
-            return;
-          }
-          const consent = await NotificationConsent.create(options);
-          if (!(await consent.status()).granted || stop.aborted) return;
-          await resubscribeDevice(inbox, registration, stop);
-        })(),
-      };
-    }
-    if (!canSubscribe) return;
-    if (held !== null && held.endpoint === registered?.endpoint) return;
-    const consent = await NotificationConsent.create(options);
-    if (!(await consent.status()).granted) return;
-    await subscribeDevice(inbox, registration, this.#disposal.signal);
+  #queueSubscribe(work: () => Promise<void>): Promise<void> {
+    const next = this.#subscribing
+      .catch(() => undefined)
+      .then(() =>
+        withMintLock(PUSH_SUBSCRIPTION_LOCK, async () => {
+          if (this.#disposal.signal.aborted) return;
+          await work();
+        }),
+      );
+    this.#subscribing = next;
+    return next;
   }
 
   /**

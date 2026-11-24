@@ -59,12 +59,6 @@ type SubscriptionError =
 /** Why Internet Identity could not answer an inbox or status call. */
 type NotificationError = { NoSuchSession: null } | { InternalCanisterError: string };
 
-/** Why Internet Identity sent no probe; `NotReachable` is the push service refusing it. */
-type ProbeError =
-  | { NoSuchSession: null }
-  | { NotReachable: null }
-  | { InternalCanisterError: string };
-
 /** Fails the build where a {@link CandidSameDeviceLinkStatus} variant has no arm. */
 const unhandledStatus = (status: never): never => {
   throw new Error(`Internet Identity answered an unknown link status: ${JSON.stringify(status)}`);
@@ -123,13 +117,11 @@ export interface PwaNotificationService {
               {
                 endpoint: string;
                 unanswered_pushes: [] | [CandidUnansweredPushes];
-                probe_sent_at_ns: [] | [bigint];
               },
             ];
       }
     | { Err: NotificationError }
   >;
-  app_probe_pwa_webpush_subscription(): Promise<{ Ok: null } | { Err: ProbeError }>;
   app_get_pwa_notification(request: { inbox_notification_id: bigint }): Promise<
     | {
         Ok: {
@@ -221,27 +213,12 @@ const idlFactory: IDL.InterfaceFactory = ({ IDL }) => {
             IDL.Record({
               endpoint: IDL.Text,
               unanswered_pushes: IDL.Opt(UnansweredPushes),
-              probe_sent_at_ns: IDL.Opt(IDL.Nat64),
             }),
           ),
           Err: NotificationError,
         }),
       ],
       ['query'],
-    ),
-    app_probe_pwa_webpush_subscription: IDL.Func(
-      [],
-      [
-        IDL.Variant({
-          Ok: IDL.Null,
-          Err: IDL.Variant({
-            NoSuchSession: IDL.Null,
-            NotReachable: IDL.Null,
-            InternalCanisterError: IDL.Text,
-          }),
-        }),
-      ],
-      [],
     ),
     app_get_pwa_notification: IDL.Func(
       [IDL.Record({ inbox_notification_id: IDL.Nat64 })],
@@ -350,21 +327,14 @@ const PREPARE_ATTEMPTS = 4;
 
 const wait = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
 
-/** The subscription Internet Identity delivers to for this session's browser and account. */
+/** The subscription Internet Identity delivers to for this session's browser, account and frontend. */
 export interface RegisteredSubscription {
   endpoint: string;
-  /** Whether pushes went unanswered long enough that this subscription is worth a probe. */
+  /**
+   * Whether pushes went unanswered through it past Internet Identity's limit,
+   * so its service worker no longer receives them.
+   */
   isPastLimit: boolean;
-  /**
-   * When the first push not followed by a fetch was sent, in nanoseconds since
-   * the epoch, or `undefined` where every push was fetched.
-   */
-  unansweredSinceNs?: bigint;
-  /**
-   * When Internet Identity sent a probe through it that no fetch has answered
-   * yet, in nanoseconds since the epoch.
-   */
-  probeSentAtNs?: bigint;
 }
 
 /** What a wake-up names: an app's notification, or something Internet Identity says itself. */
@@ -453,28 +423,7 @@ export class PwaNotifications {
     );
     if (status === undefined) return undefined;
     const [unanswered] = status.unanswered_pushes;
-    return {
-      endpoint: status.endpoint,
-      isPastLimit: unanswered?.is_past_limit === true,
-      unansweredSinceNs: unanswered?.first_sent_at_ns,
-      probeSentAtNs: status.probe_sent_at_ns[0],
-    };
-  }
-
-  /**
-   * Sends Internet Identity's "notifications are working" notification through
-   * this subscription. Answers `false` where the push service would not take it.
-   */
-  async probe(): Promise<boolean> {
-    const result = await this.#service.app_probe_pwa_webpush_subscription();
-    if ('Ok' in result) return true;
-    const error = result.Err;
-    if ('NotReachable' in error) return false;
-    if ('NoSuchSession' in error) throw new SessionGoneError();
-    const detail = error.InternalCanisterError;
-    throw new Error(
-      `Internet Identity could not probe this subscription${detail === '' ? '' : `: ${detail}`}`,
-    );
+    return { endpoint: status.endpoint, isPastLimit: unanswered?.is_past_limit === true };
   }
 
   /** The entry a wake-up named, empty where it is gone. */
@@ -699,8 +648,7 @@ export async function resubscribeDevice(
 
 /**
  * Unsubscribes `held`, subscribes `registration` anew, and registers the new
- * endpoint. Keys come first, so `held` survives where they cannot be had. A
- * `held` under another key is the app's own, and is left alone.
+ * endpoint. Keys come first, so `held` survives where they cannot be had.
  */
 async function subscribeFresh(
   inbox: PwaNotifications,
@@ -709,8 +657,7 @@ async function subscribeFresh(
   stop: AbortSignal,
 ): Promise<Uint8Array | undefined> {
   const keys = await inbox.prepare();
-  if (stop.aborted) return;
-  if (held !== null && !subscribedWith(held, keys.vapidPublicKey)) return;
+  if (stop.aborted) return undefined;
   await held?.unsubscribe();
   const replacement = await registration.pushManager.subscribe({
     userVisibleOnly: true,
@@ -747,118 +694,6 @@ export async function savedVapidKey(): Promise<Uint8Array | undefined> {
 export async function saveVapidKey(vapidPublicKey: Uint8Array): Promise<void> {
   const db = await IdbKeyVal.create(VAPID_KEY_DB);
   await db.set(VAPID_KEY, vapidPublicKey);
-}
-
-/**
- * How long a probe, from the probe call to the last status read, may take
- * before its path counts as broken.
- */
-const PROBE_DEADLINE_MS = 30_000;
-
-/** How often Internet Identity is asked whether the probe was fetched. */
-const PROBE_POLL_MS = 2_000;
-
-/** How a probe ended. */
-type ProbeOutcome =
-  /** The service worker fetched it. */
-  | 'answered'
-  /** Not fetched by the deadline, or the push service would not take it. */
-  | 'unanswered'
-  /** Internet Identity dropped the subscription meanwhile, as it does on a 404 or 410 from the push service. */
-  | 'gone'
-  /** `stop` fired first. */
-  | 'stopped';
-
-/**
- * Probes the subscription of the session behind `inbox`, and answers whether
- * the service worker fetched the probe within {@link PROBE_DEADLINE_MS}.
- *
- * Fetched means Internet Identity no longer reports the probe outstanding, and
- * the batch of unanswered pushes that started at `batchSentAtNs` is gone or
- * replaced by a later one. The unanswered count alone says nothing: a probe
- * still queued, or refused with a server error, leaves it empty.
- */
-async function probeOutcome(
-  inbox: PwaNotifications,
-  batchSentAtNs: bigint,
-  isProbeSent: boolean,
-  stop: AbortSignal,
-): Promise<ProbeOutcome> {
-  let expired = false;
-  let timer: ReturnType<typeof setTimeout> | undefined;
-  let onStop: () => void = () => undefined;
-  const deadline = new Promise<ProbeOutcome>((resolve) => {
-    const end = (outcome: ProbeOutcome) => {
-      expired = true;
-      resolve(outcome);
-    };
-    timer = setTimeout(() => end('unanswered'), PROBE_DEADLINE_MS);
-    onStop = () => end('stopped');
-    if (stop.aborted) onStop();
-    else stop.addEventListener('abort', onStop, { once: true });
-  });
-  const polling = (async (): Promise<ProbeOutcome> => {
-    if (stop.aborted) return 'stopped';
-    if (!isProbeSent && !(await inbox.probe())) return 'unanswered';
-    while (!expired) {
-      await wait(PROBE_POLL_MS);
-      if (expired) return 'unanswered';
-      const registered = await inbox.registeredSubscription();
-      if (registered === undefined) return 'gone';
-      if (registered.probeSentAtNs !== undefined) continue;
-      const since = registered.unansweredSinceNs;
-      if (since === undefined || since > batchSentAtNs) return 'answered';
-    }
-    return 'unanswered';
-  })();
-  // A call still pending at the deadline settles later, with nobody to report to.
-  polling.catch(() => undefined);
-  try {
-    return await Promise.race([polling, deadline]);
-  } finally {
-    clearTimeout(timer);
-    stop.removeEventListener('abort', onStop);
-  }
-}
-
-/**
- * Probes `registered`, the subscription Internet Identity holds for the session
- * behind `inbox`, or waits on the probe already outstanding for it, and repairs it where the service worker does not fetch the
- * probe in time: with a fresh endpoint where notification permission is
- * granted, and by removing it otherwise.
- *
- * A device subscription already replaced since the probe, by a repair in
- * another tab, is left as it is.
- *
- * Once `stop` fires, polling ends and nothing more is changed.
- *
- * @returns `gone` where Internet Identity dropped the subscription during the
- *   probe, which leaves registering one again to the caller.
- */
-export async function repairSubscription(
-  inbox: PwaNotifications,
-  registered: RegisteredSubscription,
-  registration: ServiceWorkerRegistration | undefined,
-  stop: AbortSignal,
-): Promise<'repaired' | 'gone' | 'stopped'> {
-  // A probe an earlier repair sent and nobody saw answered is waited on again, not sent again.
-  const outcome = await probeOutcome(
-    inbox,
-    registered.unansweredSinceNs ?? BigInt(0),
-    registered.probeSentAtNs !== undefined,
-    stop,
-  );
-  if (outcome === 'answered') return 'repaired';
-  if (outcome !== 'unanswered') return outcome;
-  if (globalThis.Notification?.permission !== 'granted' || registration === undefined) {
-    await inbox.set(null);
-    return 'repaired';
-  }
-  const held = await registration.pushManager.getSubscription();
-  if (stop.aborted) return 'stopped';
-  if (held !== null && held.endpoint !== registered.endpoint) return 'repaired';
-  await subscribeFresh(inbox, registration, held, stop);
-  return 'repaired';
 }
 
 /** Internet Identity's page that claims a same-device link from Safari. */

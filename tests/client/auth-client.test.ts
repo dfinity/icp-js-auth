@@ -3068,8 +3068,11 @@ describe("AuthClient and this origin's push subscription", () => {
     vi.stubGlobal('registration', registration);
   }
 
-  /** Internet Identity's subscription calls, holding `registered` to begin with. */
-  function fakeCalls(registered?: string) {
+  /**
+   * Internet Identity's subscription calls, holding `registered` to begin with,
+   * with pushes to it unanswered past the limit where `isPastLimit` is set.
+   */
+  function fakeCalls(registered?: string, isPastLimit = false) {
     // Reports what the last set registered, as the canister does.
     let held = registered;
     const set = vi.fn(async (subscription: { endpoint: string } | null) => {
@@ -3090,7 +3093,9 @@ describe("AuthClient and this origin's push subscription", () => {
       };
     });
     const registeredSubscription = vi.fn(async () =>
-      held === undefined ? undefined : { endpoint: held, isPastLimit: false },
+      held === undefined
+        ? undefined
+        : { endpoint: held, isPastLimit: isPastLimit && held === registered },
     );
     const create = vi.spyOn(PwaNotifications, 'create').mockResolvedValue({
       prepare,
@@ -3279,6 +3284,48 @@ describe("AuthClient and this origin's push subscription", () => {
       );
 
       expect(set).not.toHaveBeenCalled();
+    });
+
+    it('moves to a fresh endpoint where Internet Identity reports this one unanswered', async () => {
+      const { subscription, subscribe } = serviceWorker('granted');
+      const client = await signedIn('silent-unanswered');
+      await saveVapidKey(VAPID);
+      const { set } = fakeCalls('https://push.example/1', true);
+
+      await client.subscribeToNotifications({ interactive: false });
+
+      expect(subscription.unsubscribe).toHaveBeenCalled();
+      expect(subscribe).toHaveBeenCalled();
+      expect(set).toHaveBeenCalledWith(
+        expect.objectContaining({ endpoint: 'https://push.example/fresh' }),
+      );
+    });
+
+    it('registers this device again where pushes to another endpoint went unanswered', async () => {
+      const { subscription, subscribe } = serviceWorker('granted');
+      const client = await signedIn('silent-another-unanswered');
+      await saveVapidKey(VAPID);
+      const { set } = fakeCalls('https://push.example/old', true);
+
+      await client.subscribeToNotifications({ interactive: false });
+
+      expect(subscription.unsubscribe).not.toHaveBeenCalled();
+      expect(subscribe).not.toHaveBeenCalled();
+      expect(set).toHaveBeenCalledWith(
+        expect.objectContaining({ endpoint: 'https://push.example/1' }),
+      );
+    });
+
+    it('changes no subscription once the client is disposed', async () => {
+      serviceWorker('granted');
+      const client = await signedIn('silent-disposed');
+      await saveVapidKey(VAPID);
+      const { create } = fakeCalls('https://push.example/old');
+
+      client.dispose();
+      await client.subscribeToNotifications({ interactive: false });
+
+      expect(create).not.toHaveBeenCalled();
     });
 
     it("uses the service worker's own registration inside one", async () => {
