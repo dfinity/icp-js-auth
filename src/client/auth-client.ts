@@ -434,8 +434,6 @@ export class AuthClient {
   #subscribing: Promise<void> = Promise.resolve();
   // Each prepare replaces the link key before it, so concurrent taps share one.
   #linking: Promise<void> | undefined;
-  // Stops queued push subscription work, so a disposed client changes no subscription.
-  readonly #disposal = new AbortController();
   // What `getStatus` answers with, replaced only when the record changes.
   #status: SessionStatus;
   readonly #listeners = new Set<() => void>();
@@ -838,7 +836,6 @@ export class AuthClient {
     // a client disposed while one is in flight would otherwise have an identity
     // installed afterwards, scheduling refreshes nobody can stop.
     this.#disposed = true;
-    this.#disposal.abort();
     if (this.#identity instanceof SessionIdentity) this.#identity.dispose();
     // Its own interaction and no one else's: the locks it holds are released
     // rather than taken, its own channel is closed, and nothing shared is
@@ -1477,8 +1474,7 @@ export class AuthClient {
       const registration = await pushRegistration();
       if (registration === undefined) throw noServiceWorkerError();
       await this.#queueSubscribe(async () => {
-        const inbox = await this.#pwaNotifications();
-        await saveKey(await subscribeDevice(inbox, registration, this.#disposal.signal));
+        await saveVapidKey(await subscribeDevice(await this.#pwaNotifications(), registration));
       });
       return permission;
     }
@@ -1501,11 +1497,11 @@ export class AuthClient {
         const isCurrent =
           held !== null && subscribedWith(held, savedKey) && held.endpoint === registered?.endpoint;
         if (isCurrent && registered?.isPastLimit === true) {
-          await saveKey(await resubscribeDevice(inbox, registration, this.#disposal.signal));
+          await saveVapidKey(await resubscribeDevice(inbox, registration));
           return;
         }
         if (isCurrent) return;
-        await saveKey(await subscribeDevice(inbox, registration, this.#disposal.signal));
+        await saveVapidKey(await subscribeDevice(inbox, registration));
       } catch (error) {
         if (!(error instanceof NotificationsNotAllowedError)) throw error;
       }
@@ -1808,25 +1804,19 @@ export class AuthClient {
         this.#sessionOptions(key, sessionChain),
         globalThis.location.origin,
       );
-      await saveKey(await resubscribeDevice(inbox, registration, this.#disposal.signal));
+      await saveVapidKey(await resubscribeDevice(inbox, registration));
     });
   }
 
   /**
    * Runs `work` once every subscribe queued before it has settled, holding the
    * lock every client, tab and service worker of this origin takes around its
-   * push subscription. Resolves without running it once this client is
-   * disposed.
+   * push subscription.
    */
   #queueSubscribe(work: () => Promise<void>): Promise<void> {
     const next = this.#subscribing
       .catch(() => undefined)
-      .then(() =>
-        withMintLock(PUSH_SUBSCRIPTION_LOCK, async () => {
-          if (this.#disposal.signal.aborted) return;
-          await work();
-        }),
-      );
+      .then(() => withMintLock(PUSH_SUBSCRIPTION_LOCK, work));
     this.#subscribing = next;
     return next;
   }
@@ -2254,11 +2244,6 @@ export class AuthClient {
     const failed = outcomes.find((outcome) => outcome.status === 'rejected');
     if (failed !== undefined) throw failed.reason;
   }
-}
-
-/** Records `vapidPublicKey` where a subscribe bound the push subscription to it. */
-async function saveKey(vapidPublicKey: Uint8Array | undefined): Promise<void> {
-  if (vapidPublicKey !== undefined) await saveVapidKey(vapidPublicKey);
 }
 
 /** The global scope where this runs in a service worker, or `undefined` in a page. */

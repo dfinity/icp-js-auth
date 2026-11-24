@@ -3316,18 +3316,6 @@ describe("AuthClient and this origin's push subscription", () => {
       );
     });
 
-    it('changes no subscription once the client is disposed', async () => {
-      serviceWorker('granted');
-      const client = await signedIn('silent-disposed');
-      await saveVapidKey(VAPID);
-      const { create } = fakeCalls('https://push.example/old');
-
-      client.dispose();
-      await client.subscribeToNotifications({ interactive: false });
-
-      expect(create).not.toHaveBeenCalled();
-    });
-
     it("uses the service worker's own registration inside one", async () => {
       const { registration, getRegistration } = serviceWorker('granted');
       inAServiceWorker(registration);

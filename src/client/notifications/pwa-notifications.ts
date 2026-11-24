@@ -605,18 +605,15 @@ const heldOrNewSubscription = async (
  * Subscribes `registration` with Internet Identity's VAPID key, replacing a
  * subscription under any other key, and registers the subscription for the
  * session behind `inbox`, retrying once on a fresh endpoint where the current
- * one is registered with other keys. Nothing is changed once `stop` fires.
+ * one is registered with other keys.
  *
- * @returns The VAPID key the subscription is bound to, or `undefined` where
- *   `stop` fired first.
+ * @returns The VAPID key the subscription is bound to.
  */
 export async function subscribeDevice(
   inbox: PwaNotifications,
   registration: ServiceWorkerRegistration,
-  stop: AbortSignal,
-): Promise<Uint8Array | undefined> {
+): Promise<Uint8Array> {
   const keys = await inbox.prepare();
-  if (stop.aborted) return undefined;
   const subscription = await heldOrNewSubscription(registration, keys.vapidPublicKey);
   try {
     await inbox.set(await sealSubscription(subscription, keys.transportPublicKey));
@@ -626,24 +623,21 @@ export async function subscribeDevice(
   }
 
   // A fresh prepare follows: the transport key the refused call was sealed to is spent.
-  return subscribeFresh(inbox, registration, subscription, stop);
+  return subscribeFresh(inbox, registration, subscription);
 }
 
 /**
  * Replaces the push subscription `registration` holds with a fresh endpoint,
- * and registers it for the session behind `inbox`. Nothing is changed once
- * `stop` fires.
+ * and registers it for the session behind `inbox`.
  *
- * @returns The VAPID key the subscription is bound to, or `undefined` where
- *   nothing was changed.
+ * @returns The VAPID key the subscription is bound to.
  */
 export async function resubscribeDevice(
   inbox: PwaNotifications,
   registration: ServiceWorkerRegistration,
-  stop: AbortSignal,
-): Promise<Uint8Array | undefined> {
+): Promise<Uint8Array> {
   const held = await registration.pushManager.getSubscription();
-  return subscribeFresh(inbox, registration, held, stop);
+  return subscribeFresh(inbox, registration, held);
 }
 
 /**
@@ -654,10 +648,8 @@ async function subscribeFresh(
   inbox: PwaNotifications,
   registration: ServiceWorkerRegistration,
   held: PushSubscription | null,
-  stop: AbortSignal,
-): Promise<Uint8Array | undefined> {
+): Promise<Uint8Array> {
   const keys = await inbox.prepare();
-  if (stop.aborted) return undefined;
   await held?.unsubscribe();
   const replacement = await registration.pushManager.subscribe({
     userVisibleOnly: true,
