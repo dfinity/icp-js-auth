@@ -1392,7 +1392,10 @@ export class AuthClient {
       // Checked first, since `getIdentity()` answers an anonymous identity when signed out.
       identity: async () => {
         await this.#sessionCallOptions();
-        return this.getIdentity();
+        const identity = await this.getIdentity();
+        // A sign-out between the two leaves the anonymous identity, which no app call is made as.
+        if (identity.getPrincipal().isAnonymous()) throw new SessionGoneError();
+        return identity;
       },
       agentOptions: this.#options.agentOptions,
     };

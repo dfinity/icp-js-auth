@@ -1,4 +1,9 @@
-import type { Identity, PublicKey, SignIdentity } from '@icp-sdk/core/agent';
+import {
+  AnonymousIdentity,
+  type Identity,
+  type PublicKey,
+  type SignIdentity,
+} from '@icp-sdk/core/agent';
 import {
   DelegationChain,
   type DelegationIdentity,
@@ -3456,6 +3461,17 @@ describe("AuthClient and this origin's push subscription", () => {
       expect(create).not.toHaveBeenCalled();
       expect(subscription.unsubscribe).not.toHaveBeenCalled();
     });
+  });
+
+  it('reports a click as SessionGoneError where the session ends before the call is made', async () => {
+    const client = await signedIn('click-after-sign-out');
+    vi.spyOn(client, 'getIdentity').mockResolvedValue(new AnonymousIdentity());
+
+    await expect(
+      client.markNotificationOpened({
+        notification: { data: { canisterId: II_CANISTER.toText(), id: '1' } },
+      } as unknown as Parameters<AuthClient['markNotificationOpened']>[0]),
+    ).rejects.toThrow(SessionGoneError);
   });
 
   it('calls nothing on a load that restores the session', async () => {
