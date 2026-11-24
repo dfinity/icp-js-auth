@@ -36,15 +36,20 @@ import {
 } from './notifications/push-notification.js';
 import {
   isInstalledApp,
+  NotificationsNotAllowedError,
   PwaNotifications,
+  resubscribeDevice,
+  savedVapidKey,
+  saveVapidKey,
   subscribeDevice,
+  subscribedWith,
 } from './notifications/pwa-notifications.js';
 import {
   AccountMismatchError,
   chainAuthorisesKey,
   SessionGoneError,
 } from './session/app-delegation-source.js';
-import { type HeldLock, stealLock, stealMintLock } from './session/app-lock.js';
+import { type HeldLock, stealLock, stealMintLock, withMintLock } from './session/app-lock.js';
 import { requestSessionDelegation } from './session/session-delegation.js';
 import { SessionIdentity } from './session/session-identity.js';
 import { SessionMinter } from './session/session-minter.js';
@@ -67,6 +72,12 @@ import type { SessionState, StateStorage } from './state/state-storage.js';
  * sign-ins, and they still cannot both have the window.
  */
 const CHANNEL_LOCK = 'ic-auth-signer-channel';
+
+/**
+ * The lock over this origin's push subscription. Not namespaced: every client
+ * and tab of the origin, and its service worker, share one registration.
+ */
+const PUSH_SUBSCRIPTION_LOCK = 'ic-auth-push-subscription';
 
 /** The lock over one namespace's sign-in, which `signIn` and `signOut` both move. */
 const signInLockFor = (stateSlot: string): string => `${stateSlot}:sign-in`;
@@ -1094,9 +1105,7 @@ export class AuthClient {
       }
 
       // Awaited only before navigating away, which would abandon it; never fails signIn().
-      const resubscribing = this.#subscribeWhereUnregistered(key, sessionChain).catch(
-        () => undefined,
-      );
+      const resubscribing = this.#subscribeAfterSignIn(key, sessionChain).catch(() => undefined);
 
       // Best-effort — the user is already signed in, so a cleanup failure must not
       // fail signIn(), and the next ceremony overwrites what is left behind.
@@ -1395,31 +1404,92 @@ export class AuthClient {
    * option.
    *
    * Call it from a tap once {@link requestNotificationConsent} returned
-   * `granted: true`. The service worker must already be registered. A push
-   * subscription it holds under another key is replaced, so remove any of the
-   * app's own push code first. Later sign-ins renew the subscription without
-   * asking.
+   * `granted: true`. The service worker must already be registered. It asks for
+   * notification permission, subscribes under Internet Identity's VAPID key,
+   * replacing a push subscription under any other key, so remove any of the
+   * app's own push code first, and registers the subscription at Internet
+   * Identity. The key is recorded on this origin, which is what has later
+   * sign-ins subscribe a fresh endpoint for the new account and sign-outs remove
+   * it.
    *
+   * With `interactive: false` it never prompts, and only keeps a subscription
+   * made here before in order, according to the notification permission:
+   * - `'default'`: does nothing.
+   * - `'denied'`: removes the registration at Internet Identity, which then
+   *   delivers through its own path.
+   * - `'granted'`: registers this device's subscription again where Internet
+   *   Identity holds another endpoint, or none.
+   *
+   * Where nothing was subscribed on this origin before, or the user has not
+   * consented, it changes nothing. Call it this way when the app starts, after
+   * the service worker is registered, and from the service worker's
+   * `pushsubscriptionchange` listener. A service worker can only call it this
+   * way.
+   *
+   * @param options - Subscribe options.
+   * @param options.interactive - Whether it may ask for permission. Defaults to
+   *   `true`.
    * @returns The notification permission; nothing is subscribed unless it is
    *   `'granted'`.
    * @throws {NotificationsUnsupportedError} Where this browser has no Web Push.
    * @throws {SessionGoneError} Where this origin holds no live session.
    * @example
    * const permission = await authClient.subscribeToNotifications();
+   * @example
+   * // service-worker.ts
+   * self.addEventListener('pushsubscriptionchange', (event) => {
+   *   event.waitUntil(authClient.subscribeToNotifications({ interactive: false }));
+   * });
    */
-  async subscribeToNotifications(): Promise<NotificationPermission> {
-    if (globalThis.PushManager === undefined || globalThis.Notification === undefined) {
+  async subscribeToNotifications(
+    options: { interactive?: boolean } = {},
+  ): Promise<NotificationPermission> {
+    const interactive = options.interactive ?? true;
+    if (
+      globalThis.PushManager === undefined ||
+      (interactive && globalThis.Notification === undefined)
+    ) {
       throw new NotificationsUnsupportedError('This browser has no Web Push');
     }
-    const permission = await globalThis.Notification.requestPermission();
-    if (permission !== 'granted') return permission;
-
-    const registration = await globalThis.navigator.serviceWorker.getRegistration();
-    if (registration === undefined) {
-      throw new Error('This origin has no service worker registered to receive notifications');
+    if (interactive && serviceWorkerScope() !== undefined) {
+      throw new Error(
+        'A service worker can only call subscribeToNotifications({ interactive: false })',
+      );
     }
+
+    if (interactive) {
+      const permission = await globalThis.Notification.requestPermission();
+      if (permission !== 'granted') return permission;
+      const registration = await pushRegistration();
+      if (registration === undefined) throw noServiceWorkerError();
+      await this.#queueSubscribe(async () => {
+        await saveVapidKey(await subscribeDevice(await this.#pwaNotifications(), registration));
+      });
+      return permission;
+    }
+
+    const registration = await pushRegistration();
+    if (registration === undefined) throw noServiceWorkerError();
+    const permission = await pushPermission(registration);
+    if (permission === 'default') return permission;
     await this.#queueSubscribe(async () => {
-      await subscribeDevice(await this.#pwaNotifications(), registration, 'replace');
+      const savedKey = await savedVapidKey();
+      if (savedKey === undefined) return;
+      const inbox = await this.#pwaNotifications();
+      try {
+        if (permission === 'denied') {
+          if ((await inbox.registeredEndpoint()) !== undefined) await inbox.set(null);
+          return;
+        }
+        const held = await registration.pushManager.getSubscription();
+        const registered = await inbox.registeredEndpoint();
+        if (held !== null && subscribedWith(held, savedKey) && held.endpoint === registered) {
+          return;
+        }
+        await saveVapidKey(await subscribeDevice(inbox, registration));
+      } catch (error) {
+        if (!(error instanceof NotificationsNotAllowedError)) throw error;
+      }
     });
     return permission;
   }
@@ -1454,7 +1524,7 @@ export class AuthClient {
 
   /** Builds the installed app's subscription and inbox calls, as {@link #consent} does. */
   async #pwaNotifications(): Promise<PwaNotifications> {
-    return PwaNotifications.create(await this.#sessionCallOptions());
+    return PwaNotifications.create(await this.#sessionCallOptions(), globalThis.location.origin);
   }
 
   /** What a call made as the session this origin holds is built from. */
@@ -1528,8 +1598,9 @@ export class AuthClient {
   /**
    * Clears the stored session and resets the client to an anonymous state.
    *
-   * Where this origin's service worker delivers notifications, also removes its
-   * subscription at Internet Identity.
+   * Where this origin's push subscription is the one
+   * {@link subscribeToNotifications} made, also removes it at Internet Identity
+   * and unsubscribes it.
    *
    * @param options - Sign-out options.
    * @param options.returnTo - URL to navigate to after sign-out.
@@ -1637,56 +1708,69 @@ export class AuthClient {
   }
 
   /**
-   * Registers this origin's push subscription where permission and consent are
-   * granted but Internet Identity does not deliver to it yet: in an installed
-   * app always, in a browser tab only where its service worker holds a
-   * subscription already. Never prompts, and leaves a subscription under another
-   * key to a tap.
+   * Subscribes a fresh endpoint for the account just signed in, where an earlier
+   * {@link subscribeToNotifications} recorded a VAPID key on this origin and
+   * notification permission is granted. Without a recorded key it calls
+   * nothing.
    */
-  #subscribeWhereUnregistered(key: SignIdentity, sessionChain: DelegationChain): Promise<void> {
-    return this.#queueSubscribe(() => this.#subscribeIfUnregistered(key, sessionChain));
+  #subscribeAfterSignIn(key: SignIdentity, sessionChain: DelegationChain): Promise<void> {
+    return this.#queueSubscribe(async () => {
+      if ((await savedVapidKey()) === undefined) return;
+      const registration = await pushRegistration();
+      if (registration === undefined || (await pushPermission(registration)) !== 'granted') return;
+      const inbox = await PwaNotifications.create(
+        this.#sessionOptions(key, sessionChain),
+        globalThis.location.origin,
+      );
+      await saveVapidKey(await resubscribeDevice(inbox, registration));
+    });
   }
 
-  /** Runs `work` once every subscribe queued before it has settled. */
+  /**
+   * Runs `work` once every subscribe queued before it has settled, holding the
+   * lock every client, tab and service worker of this origin takes around its
+   * push subscription.
+   */
   #queueSubscribe(work: () => Promise<void>): Promise<void> {
-    const next = this.#subscribing.catch(() => undefined).then(work);
+    const next = this.#subscribing
+      .catch(() => undefined)
+      .then(() => withMintLock(PUSH_SUBSCRIPTION_LOCK, work));
     this.#subscribing = next;
     return next;
   }
 
-  async #subscribeIfUnregistered(key: SignIdentity, sessionChain: DelegationChain): Promise<void> {
-    if (globalThis.Notification?.permission !== 'granted') return;
-    const registration = await globalThis.navigator?.serviceWorker?.getRegistration();
-    if (registration === undefined) return;
-    // A tab whose service worker holds nothing leaves delivery to Internet Identity's.
-    const held = await registration.pushManager.getSubscription();
-    if (!isInstalledApp() && held === null) return;
+  /**
+   * Where this origin's push subscription is the one {@link subscribeToNotifications}
+   * recorded the key of, removes it at Internet Identity and unsubscribes it.
+   * Without a recorded key it calls nothing. Best-effort: delivery stops with the
+   * session anyway.
+   */
+  async #removePwaSubscription(key: SignIdentity, sessionChain: DelegationChain): Promise<void> {
+    try {
+      const savedKey = await savedVapidKey();
+      if (savedKey === undefined) return;
+      const held = await heldPushSubscription();
+      if (held === null || !subscribedWith(held, savedKey)) return;
+      try {
+        const inbox = await PwaNotifications.create(
+          this.#sessionOptions(key, sessionChain),
+          globalThis.location.origin,
+        );
+        await inbox.set(null);
+      } finally {
+        await held.unsubscribe();
+      }
+    } catch {}
+  }
 
-    const options = {
+  /** What a call made as the session `key` and `sessionChain` make up is built from. */
+  #sessionOptions(key: SignIdentity, sessionChain: DelegationChain): NotificationConsentOptions {
+    return {
       sessionKey: key,
       sessionChain,
       canisterId: this.#canisterId,
       agentOptions: this.#options.agentOptions,
     };
-    const inbox = await PwaNotifications.create(options);
-    if (held !== null && held.endpoint === (await inbox.registeredEndpoint())) return;
-    const consent = await NotificationConsent.create(options);
-    if (!(await consent.status()).granted) return;
-    await subscribeDevice(inbox, registration, 'keep');
-  }
-
-  /** Best-effort: delivery stops with the session anyway. */
-  async #removePwaSubscription(key: SignIdentity, sessionChain: DelegationChain): Promise<void> {
-    try {
-      if (!isInstalledApp() && (await heldPushSubscription()) === null) return;
-      const inbox = await PwaNotifications.create({
-        sessionKey: key,
-        sessionChain,
-        canisterId: this.#canisterId,
-        agentOptions: this.#options.agentOptions,
-      });
-      await inbox.set(null);
-    } catch {}
   }
 
   /** Removes this device's notification subscription, then ends the session. */
@@ -1966,8 +2050,6 @@ export class AuthClient {
       return;
     }
     this.#installIdentity(identity);
-    // Not awaited: a load must not wait on update calls.
-    this.#subscribeWhereUnregistered(key, chain).catch(() => undefined);
   }
 
   /**
@@ -2072,9 +2154,38 @@ export class AuthClient {
   }
 }
 
+/** The global scope where this runs in a service worker, or `undefined` in a page. */
+function serviceWorkerScope(): { registration: ServiceWorkerRegistration } | undefined {
+  const scope = (globalThis as { ServiceWorkerGlobalScope?: abstract new () => unknown })
+    .ServiceWorkerGlobalScope;
+  if (scope === undefined || !(globalThis instanceof scope)) return undefined;
+  return globalThis as unknown as { registration: ServiceWorkerRegistration };
+}
+
+/**
+ * The service worker registration that holds this origin's push subscription:
+ * the worker's own inside a service worker, otherwise the page's.
+ */
+async function pushRegistration(): Promise<ServiceWorkerRegistration | undefined> {
+  const worker = serviceWorkerScope();
+  if (worker !== undefined) return worker.registration;
+  return globalThis.navigator?.serviceWorker?.getRegistration();
+}
+
+const noServiceWorkerError = (): Error =>
+  new Error('This origin has no service worker registered to receive notifications');
+
+/** The notification permission as the push manager reads it, which needs no window. */
+async function pushPermission(
+  registration: ServiceWorkerRegistration,
+): Promise<NotificationPermission> {
+  const state = await registration.pushManager.permissionState({ userVisibleOnly: true });
+  return state === 'prompt' ? 'default' : state;
+}
+
 /** The push subscription this origin's service worker holds, where it has one. */
 async function heldPushSubscription(): Promise<PushSubscription | null> {
-  const registration = await globalThis.navigator?.serviceWorker?.getRegistration();
+  const registration = await pushRegistration();
   return (await registration?.pushManager.getSubscription()) ?? null;
 }
 

@@ -2,6 +2,7 @@ import { Actor, HttpAgent } from '@icp-sdk/core/agent';
 import type { IDL } from '@icp-sdk/core/candid';
 import { DelegationIdentity } from '@icp-sdk/core/identity';
 import type { Principal } from '@icp-sdk/core/principal';
+import { IdbKeyVal } from '../db.js';
 import { SessionGoneError } from '../session/app-delegation-source.js';
 import { assertChainReaches } from '../session/session-minter.js';
 import type { NotificationConsentOptions } from './notification-consent.js';
@@ -25,6 +26,7 @@ export type NotShownReason = { PayloadUnreachable: null } | { PayloadRejected: n
 type PrepareError =
   | { NoSuchSession: null }
   | { NotificationsNotAllowed: null }
+  | { UnlistedFrontend: null }
   | { InternalCanisterError: string };
 
 /** Why Internet Identity did not register or remove a subscription. */
@@ -52,26 +54,38 @@ export interface PwaNotification {
   id: bigint;
 }
 
+/**
+ * The frontend a subscription call is made for, which Internet Identity keeps a
+ * subscription per browser for.
+ */
+interface FrontendRequest {
+  frontend_origin: [] | [string];
+}
+
 /** The Internet Identity methods an installed app's subscription is made of. */
 export interface PwaNotificationService {
-  app_prepare_pwa_webpush_subscription(): Promise<
+  app_prepare_pwa_webpush_subscription(
+    request: [] | [FrontendRequest],
+  ): Promise<
     | { Ok: { vapid_public_key: Uint8Array; transport_public_key: Uint8Array } }
     | { Pending: null }
     | { Err: PrepareError }
   >;
-  app_set_pwa_webpush_subscription(request: {
-    subscription: [] | [SealedSubscription];
-  }): Promise<{ Ok: null } | { Err: SubscriptionError }>;
-  app_get_pwa_webpush_subscription_status(): Promise<
-    { Ok: [] | [{ endpoint: string }] } | { Err: NotificationError }
-  >;
+  app_set_pwa_webpush_subscription(
+    request: FrontendRequest & { subscription: [] | [SealedSubscription] },
+  ): Promise<{ Ok: null } | { Err: SubscriptionError }>;
+  app_get_pwa_webpush_subscription_status(
+    request: [] | [FrontendRequest],
+  ): Promise<{ Ok: [] | [{ endpoint: string }] } | { Err: NotificationError }>;
   app_get_pwa_notification(request: {
     inbox_notification_id: bigint;
   }): Promise<{ Ok: { notification: [] | [PwaNotification] } } | { Err: NotificationError }>;
-  app_remove_pwa_notification(request: {
-    inbox_notification_id: bigint;
-    not_shown: [] | [NotShownReason];
-  }): Promise<{ Ok: Record<string, never> } | { Err: NotificationError }>;
+  app_remove_pwa_notification(
+    request: FrontendRequest & {
+      inbox_notification_id: bigint;
+      not_shown: [] | [NotShownReason];
+    },
+  ): Promise<{ Ok: Record<string, never> } | { Err: NotificationError }>;
 }
 
 /** Written out because this package carries no Internet Identity declarations. */
@@ -79,8 +93,10 @@ const idlFactory: IDL.InterfaceFactory = ({ IDL }) => {
   const PrepareError = IDL.Variant({
     NoSuchSession: IDL.Null,
     NotificationsNotAllowed: IDL.Null,
+    UnlistedFrontend: IDL.Null,
     InternalCanisterError: IDL.Text,
   });
+  const FrontendRequest = IDL.Record({ frontend_origin: IDL.Opt(IDL.Text) });
   const SubscriptionError = IDL.Variant({
     NoSuchSession: IDL.Null,
     NotificationsNotAllowed: IDL.Null,
@@ -96,7 +112,7 @@ const idlFactory: IDL.InterfaceFactory = ({ IDL }) => {
   const NotShownReason = IDL.Variant({ PayloadUnreachable: IDL.Null, PayloadRejected: IDL.Null });
   return IDL.Service({
     app_prepare_pwa_webpush_subscription: IDL.Func(
-      [],
+      [IDL.Opt(FrontendRequest)],
       [
         IDL.Variant({
           Ok: IDL.Record({
@@ -120,13 +136,14 @@ const idlFactory: IDL.InterfaceFactory = ({ IDL }) => {
               sealed_auth: IDL.Vec(IDL.Nat8),
             }),
           ),
+          frontend_origin: IDL.Opt(IDL.Text),
         }),
       ],
       [IDL.Variant({ Ok: IDL.Null, Err: SubscriptionError })],
       [],
     ),
     app_get_pwa_webpush_subscription_status: IDL.Func(
-      [],
+      [IDL.Opt(FrontendRequest)],
       [
         IDL.Variant({
           Ok: IDL.Opt(IDL.Record({ endpoint: IDL.Text })),
@@ -150,6 +167,7 @@ const idlFactory: IDL.InterfaceFactory = ({ IDL }) => {
         IDL.Record({
           inbox_notification_id: IDL.Nat64,
           not_shown: IDL.Opt(NotShownReason),
+          frontend_origin: IDL.Opt(IDL.Text),
         }),
       ],
       [IDL.Variant({ Ok: IDL.Record({}), Err: NotificationError })],
@@ -170,6 +188,17 @@ class EndpointInUseError extends Error {
   }
 }
 
+/**
+ * Thrown where the identity has not allowed this application to notify it, so
+ * Internet Identity holds no subscription for it.
+ */
+export class NotificationsNotAllowedError extends Error {
+  constructor() {
+    super('The user has not allowed this application to notify them');
+    this.name = 'NotificationsNotAllowedError';
+  }
+}
+
 const unwrapSubscription = <T>(
   result: { Ok: T } | { Err: PrepareError | SubscriptionError },
 ): T => {
@@ -177,8 +206,9 @@ const unwrapSubscription = <T>(
   const error = result.Err;
   if ('NoSuchSession' in error) throw new SessionGoneError();
   if ('EndpointInUse' in error) throw new EndpointInUseError();
-  if ('NotificationsNotAllowed' in error) {
-    throw new Error('The user has not allowed this application to notify them');
+  if ('NotificationsNotAllowed' in error) throw new NotificationsNotAllowedError();
+  if ('UnlistedFrontend' in error) {
+    throw new Error('This application does not list this page among its alternative origins');
   }
   if ('TransportKeyExpired' in error) {
     throw new Error('Internet Identity no longer holds the key this subscription was sealed to');
@@ -217,17 +247,25 @@ export interface SubscriptionKeys {
 
 /**
  * An installed app's push subscription and inbox at Internet Identity, called as
- * the session.
+ * the session, for the frontend this page is served from.
  */
 export class PwaNotifications {
   readonly #service: PwaNotificationService;
+  readonly #frontend: FrontendRequest;
 
-  private constructor(service: PwaNotificationService) {
+  private constructor(service: PwaNotificationService, frontendOrigin: string) {
     this.#service = service;
+    this.#frontend = { frontend_origin: [frontendOrigin] };
   }
 
-  /** As the session, which is what Internet Identity reads the identity, browser and app from. */
-  static async create(options: NotificationConsentOptions): Promise<PwaNotifications> {
+  /**
+   * As the session, which is what Internet Identity reads the identity, browser
+   * and app from, for the frontend at `frontendOrigin`.
+   */
+  static async create(
+    options: NotificationConsentOptions,
+    frontendOrigin: string,
+  ): Promise<PwaNotifications> {
     const { canisterId } = options;
     assertChainReaches(options.sessionChain, canisterId);
     const agent = await HttpAgent.create({
@@ -236,6 +274,7 @@ export class PwaNotifications {
     });
     return new PwaNotifications(
       Actor.createActor<PwaNotificationService>(idlFactory, { agent, canisterId }),
+      frontendOrigin,
     );
   }
 
@@ -246,7 +285,7 @@ export class PwaNotifications {
   async prepare(): Promise<SubscriptionKeys> {
     for (let attempt = 0; attempt < PREPARE_ATTEMPTS; attempt++) {
       if (attempt > 0) await wait(attempt * PREPARE_RETRY_STEP_MS);
-      const response = await this.#service.app_prepare_pwa_webpush_subscription();
+      const response = await this.#service.app_prepare_pwa_webpush_subscription([this.#frontend]);
       if ('Pending' in response) continue;
       const keys = unwrapSubscription(response);
       return {
@@ -261,18 +300,19 @@ export class PwaNotifications {
   async set(subscription: SealedSubscription | null): Promise<void> {
     unwrapSubscription(
       await this.#service.app_set_pwa_webpush_subscription({
+        ...this.#frontend,
         subscription: subscription === null ? [] : [subscription],
       }),
     );
   }
 
   /**
-   * The endpoint Internet Identity delivers to for this session's browser and
-   * account, or `undefined` where it holds none for them.
+   * The endpoint Internet Identity delivers to for this session's browser,
+   * account and frontend, or `undefined` where it holds none for them.
    */
   async registeredEndpoint(): Promise<string | undefined> {
     const status = unwrapNotification(
-      await this.#service.app_get_pwa_webpush_subscription_status(),
+      await this.#service.app_get_pwa_webpush_subscription_status([this.#frontend]),
       'Internet Identity could not read this subscription',
     );
     return status[0]?.endpoint;
@@ -293,6 +333,7 @@ export class PwaNotifications {
   async remove(inboxNotificationId: bigint, notShown?: NotShownReason): Promise<void> {
     unwrapNotification(
       await this.#service.app_remove_pwa_notification({
+        ...this.#frontend,
         inbox_notification_id: inboxNotificationId,
         not_shown: notShown === undefined ? [] : [notShown],
       }),
@@ -402,7 +443,10 @@ export async function sealSubscription(
 }
 
 /** Whether `subscription` was minted with `applicationServerKey`. */
-const subscribedWith = (subscription: PushSubscription, applicationServerKey: Uint8Array) => {
+export const subscribedWith = (
+  subscription: PushSubscription,
+  applicationServerKey: Uint8Array,
+): boolean => {
   const minted = subscription.options.applicationServerKey;
   if (minted === null || minted === undefined) return false;
   const bytes = new Uint8Array(minted);
@@ -412,22 +456,16 @@ const subscribedWith = (subscription: PushSubscription, applicationServerKey: Ui
   );
 };
 
-/** What to do with a push subscription the service worker holds under another key. */
-export type OtherKeySubscription = 'replace' | 'keep';
-
 /**
  * The registration's push subscription where it is bound to `vapidPublicKey`,
- * otherwise a new one replacing it, or `undefined` where one under another key
- * is kept.
+ * otherwise a new one replacing it.
  */
 const heldOrNewSubscription = async (
   registration: ServiceWorkerRegistration,
   vapidPublicKey: Uint8Array,
-  otherKey: OtherKeySubscription,
-): Promise<PushSubscription | undefined> => {
+): Promise<PushSubscription> => {
   const held = await registration.pushManager.getSubscription();
   if (held !== null && subscribedWith(held, vapidPublicKey)) return held;
-  if (held !== null && otherKey === 'keep') return undefined;
   await held?.unsubscribe();
   return registration.pushManager.subscribe({
     userVisibleOnly: true,
@@ -436,31 +474,88 @@ const heldOrNewSubscription = async (
 };
 
 /**
- * Subscribes `registration` with Internet Identity's VAPID key and registers the
- * subscription for the session behind `inbox`, retrying once on a fresh
- * endpoint where the current one is registered with other keys.
+ * Subscribes `registration` with Internet Identity's VAPID key, replacing a
+ * subscription under any other key, and registers the subscription for the
+ * session behind `inbox`, retrying once on a fresh endpoint where the current
+ * one is registered with other keys.
+ *
+ * @returns The VAPID key the subscription is bound to.
  */
 export async function subscribeDevice(
   inbox: PwaNotifications,
   registration: ServiceWorkerRegistration,
-  otherKey: OtherKeySubscription,
-): Promise<void> {
+): Promise<Uint8Array> {
   const keys = await inbox.prepare();
-  const subscription = await heldOrNewSubscription(registration, keys.vapidPublicKey, otherKey);
-  if (subscription === undefined) return;
+  const subscription = await heldOrNewSubscription(registration, keys.vapidPublicKey);
   try {
     await inbox.set(await sealSubscription(subscription, keys.transportPublicKey));
-    return;
+    return keys.vapidPublicKey;
   } catch (error) {
     if (!(error instanceof EndpointInUseError)) throw error;
   }
 
-  await subscription.unsubscribe();
-  // A fresh prepare: the transport key the refused call was sealed to is spent.
-  const fresh = await inbox.prepare();
+  // A fresh prepare follows: the transport key the refused call was sealed to is spent.
+  return subscribeFresh(inbox, registration, subscription);
+}
+
+/**
+ * Replaces the push subscription `registration` holds with a fresh endpoint,
+ * and registers it for the session behind `inbox`.
+ *
+ * @returns The VAPID key the subscription is bound to.
+ */
+export async function resubscribeDevice(
+  inbox: PwaNotifications,
+  registration: ServiceWorkerRegistration,
+): Promise<Uint8Array> {
+  const held = await registration.pushManager.getSubscription();
+  return subscribeFresh(inbox, registration, held);
+}
+
+/**
+ * Unsubscribes `held`, subscribes `registration` anew, and registers the new
+ * endpoint. Keys come first, so `held` survives where they cannot be had.
+ */
+async function subscribeFresh(
+  inbox: PwaNotifications,
+  registration: ServiceWorkerRegistration,
+  held: PushSubscription | null,
+): Promise<Uint8Array> {
+  const keys = await inbox.prepare();
+  await held?.unsubscribe();
   const replacement = await registration.pushManager.subscribe({
     userVisibleOnly: true,
-    applicationServerKey: bytesOf(fresh.vapidPublicKey),
+    applicationServerKey: bytesOf(keys.vapidPublicKey),
   });
-  await inbox.set(await sealSubscription(replacement, fresh.transportPublicKey));
+  await inbox.set(await sealSubscription(replacement, keys.transportPublicKey));
+  return keys.vapidPublicKey;
+}
+
+/**
+ * Where the VAPID key a subscribe bound this origin's push subscription to is
+ * kept. A database of its own, apart from the session state a sign-out clears
+ * and readable from the service worker, so it outlives every sign-in.
+ */
+const VAPID_KEY_DB = { dbName: 'auth-client-notifications', storeName: 'ic-keyval' };
+const VAPID_KEY = 'vapid-public-key';
+
+/**
+ * The VAPID key `AuthClient.subscribeToNotifications` last bound this origin's push
+ * subscription to, or `undefined` where it never ran here or the key cannot be
+ * read.
+ */
+export async function savedVapidKey(): Promise<Uint8Array | undefined> {
+  try {
+    const db = await IdbKeyVal.create(VAPID_KEY_DB);
+    const saved = await db.get<Uint8Array>(VAPID_KEY);
+    return saved === null ? undefined : new Uint8Array(saved);
+  } catch {
+    return undefined;
+  }
+}
+
+/** Records `vapidPublicKey` as the one this origin's push subscription is bound to. */
+export async function saveVapidKey(vapidPublicKey: Uint8Array): Promise<void> {
+  const db = await IdbKeyVal.create(VAPID_KEY_DB);
+  await db.set(VAPID_KEY, vapidPublicKey);
 }

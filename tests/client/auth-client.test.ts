@@ -20,11 +20,13 @@ import type {
 import { IdbCredentialStorage } from '../../src/client/credentials/idb-credential-storage.ts';
 import { MemoryCredentialStorage } from '../../src/client/credentials/memory-credential-storage.ts';
 import { IdbKeyVal } from '../../src/client/db.ts';
+import { NotificationsUnsupportedError } from '../../src/client/notifications/notification-consent.ts';
 import {
-  NotificationConsent,
-  NotificationsUnsupportedError,
-} from '../../src/client/notifications/notification-consent.ts';
-import { PwaNotifications } from '../../src/client/notifications/pwa-notifications.ts';
+  NotificationsNotAllowedError,
+  PwaNotifications,
+  savedVapidKey,
+  saveVapidKey,
+} from '../../src/client/notifications/pwa-notifications.ts';
 import { SessionGoneError } from '../../src/client/session/app-delegation-source.ts';
 import { stealLock } from '../../src/client/session/app-lock.ts';
 import { InteractionRequiredError } from '../../src/client/session/session-delegation.ts';
@@ -2990,14 +2992,14 @@ describe('AuthClient SSO domain status', () => {
   });
 });
 
-describe('AuthClient re-subscribing an installed app after sign-in', () => {
+describe("AuthClient and this origin's push subscription", () => {
   const VAPID = new Uint8Array([4, 1, 2, 3]);
 
-  /** An installed app whose worker holds a subscription made with II's key. */
-  function installedApp(permission: NotificationPermission, applicationServerKey = VAPID) {
-    vi.stubGlobal('matchMedia', (query: string) => ({
-      matches: query === '(display-mode: standalone)',
-    }));
+  /**
+   * A page whose service worker holds a subscription made with II's key, and
+   * whose notification permission is `permission`.
+   */
+  function serviceWorker(permission: NotificationPermission, applicationServerKey = VAPID) {
     const requestPermission = vi.fn(async () => permission);
     vi.stubGlobal('Notification', { permission, requestPermission });
     vi.stubGlobal('PushManager', class {});
@@ -3010,25 +3012,44 @@ describe('AuthClient re-subscribing an installed app after sign-in', () => {
     };
     const subscribe = vi.fn(async () => ({
       ...subscription,
+      endpoint: 'https://push.example/fresh',
       options: { applicationServerKey: VAPID.buffer },
     }));
     const getSubscription = vi.fn(async (): Promise<typeof subscription | null> => subscription);
-    const registration = { pushManager: { getSubscription, subscribe } };
+    const permissionState = vi.fn(
+      async (): Promise<PermissionState> => (permission === 'default' ? 'prompt' : permission),
+    );
+    const registration = { pushManager: { getSubscription, subscribe, permissionState } };
+    const getRegistration = vi.fn(async () => registration);
     Object.defineProperty(navigator, 'serviceWorker', {
       configurable: true,
-      value: { getRegistration: async () => registration },
+      value: { getRegistration },
     });
-    return { requestPermission, subscription, subscribe, getSubscription };
+    return {
+      requestPermission,
+      subscription,
+      subscribe,
+      getSubscription,
+      getRegistration,
+      registration,
+    };
   }
 
-  /** A browser tab rather than an installed app. */
-  const inATab = () => vi.stubGlobal('matchMedia', () => ({ matches: false }));
+  /** Runs what follows as a service worker whose own registration is `registration`. */
+  function inAServiceWorker(registration: unknown) {
+    vi.stubGlobal(
+      'ServiceWorkerGlobalScope',
+      class {
+        static [Symbol.hasInstance]() {
+          return true;
+        }
+      },
+    );
+    vi.stubGlobal('registration', registration);
+  }
 
-  function fakeCalls(granted: boolean, registered?: string) {
-    const status = vi.fn(async () => ({ granted }));
-    vi.spyOn(NotificationConsent, 'create').mockResolvedValue({
-      status,
-    } as unknown as NotificationConsent);
+  /** Internet Identity's subscription calls, holding `registered` to begin with. */
+  function fakeCalls(registered?: string) {
     // Reports what the last set registered, as the canister does.
     let held = registered;
     const set = vi.fn(async (subscription: { endpoint: string } | null) => {
@@ -3049,12 +3070,24 @@ describe('AuthClient re-subscribing an installed app after sign-in', () => {
       };
     });
     const registeredEndpoint = vi.fn(async () => held);
-    vi.spyOn(PwaNotifications, 'create').mockResolvedValue({
+    const create = vi.spyOn(PwaNotifications, 'create').mockResolvedValue({
       prepare,
       set,
       registeredEndpoint,
     } as unknown as PwaNotifications);
-    return { status, set, prepare };
+    return { set, prepare, registeredEndpoint, create };
+  }
+
+  /**
+   * A client signed in under a namespace of its own, so no client an earlier test
+   * left restores this session. Tests save a key only after it, so the sign-in
+   * itself subscribes nothing.
+   */
+  async function signedIn(namespace: string) {
+    const client = track(new AuthClient({ namespace }));
+    handleSignIn(FakeTransport.last());
+    await client.signIn();
+    return client;
   }
 
   afterEach(() => {
@@ -3062,311 +3095,371 @@ describe('AuthClient re-subscribing an installed app after sign-in', () => {
     vi.restoreAllMocks();
   });
 
-  it('registers the subscription again without asking, where permission and consent hold', async () => {
-    const { requestPermission } = installedApp('granted');
-    const { set } = fakeCalls(true);
-    const client = track(new AuthClient());
-    handleSignIn(FakeTransport.last());
+  describe('subscribeToNotifications', () => {
+    it('asks for permission, registers the subscription, and saves the VAPID key', async () => {
+      const { requestPermission } = serviceWorker('granted');
+      const client = await signedIn('subscribes-on-a-tap');
+      const { set } = fakeCalls();
 
-    await client.signIn();
+      await expect(client.subscribeToNotifications()).resolves.toBe('granted');
 
-    // At least once: a client an earlier test left on this page restores the
-    // same session and may register it too.
-    await vi.waitFor(() => expect(set).toHaveBeenCalled());
-    expect(set.mock.calls[0]).toEqual([
-      expect.objectContaining({ endpoint: 'https://push.example/1' }),
-    ]);
-    expect(requestPermission).not.toHaveBeenCalled();
-  });
-
-  it('runs one subscribe at a time across taps and the check after sign-in', async () => {
-    installedApp('granted');
-    const { prepare } = fakeCalls(true);
-    let running = 0;
-    let most = 0;
-    const keys = prepare.getMockImplementation();
-    prepare.mockImplementation(async () => {
-      running++;
-      most = Math.max(most, running);
-      await new Promise((resolve) => setTimeout(resolve, 5));
-      running--;
-      return (await keys?.()) as Awaited<ReturnType<NonNullable<typeof keys>>>;
-    });
-    // A namespace of its own, so no client an earlier test left restores this session too.
-    const client = track(new AuthClient({ namespace: 'one-subscribe-at-a-time' }));
-    handleSignIn(FakeTransport.last());
-    await client.signIn();
-
-    await Promise.all([client.subscribeToNotifications(), client.subscribeToNotifications()]);
-
-    expect(prepare.mock.calls.length).toBeGreaterThanOrEqual(2);
-    expect(most).toBe(1);
-  });
-
-  it("leaves the app's own push subscription alone after sign-in, and replaces it on a tap", async () => {
-    const { subscription, subscribe } = installedApp('granted', new Uint8Array([4, 7, 7, 7]));
-    const { set, prepare } = fakeCalls(true);
-    const client = track(new AuthClient({ namespace: 'keeps-the-apps-own-subscription' }));
-    handleSignIn(FakeTransport.last());
-
-    await client.signIn();
-    await vi.waitFor(() => expect(prepare).toHaveBeenCalled());
-    await new Promise((resolve) => setTimeout(resolve, 0));
-
-    expect(subscription.unsubscribe).not.toHaveBeenCalled();
-    expect(set).not.toHaveBeenCalled();
-
-    await client.subscribeToNotifications();
-
-    expect(subscription.unsubscribe).toHaveBeenCalled();
-    expect(subscribe).toHaveBeenCalled();
-    expect(set).toHaveBeenCalledTimes(1);
-  });
-
-  it('registers nothing where the identity has not consented', async () => {
-    installedApp('granted');
-    const { status, set } = fakeCalls(false);
-    const client = track(new AuthClient());
-    handleSignIn(FakeTransport.last());
-
-    await client.signIn();
-
-    await vi.waitFor(() => expect(status).toHaveBeenCalled());
-    expect(set).not.toHaveBeenCalled();
-  });
-
-  it('asks Internet Identity nothing where notification permission is not granted', async () => {
-    installedApp('default');
-    const { status } = fakeCalls(true);
-    const client = track(new AuthClient());
-    handleSignIn(FakeTransport.last());
-
-    await client.signIn();
-    await new Promise((resolve) => setTimeout(resolve, 0));
-
-    expect(status).not.toHaveBeenCalled();
-  });
-
-  it('finishes registering before a returnTo navigates away from the page', async () => {
-    installedApp('granted');
-    const { set } = fakeCalls(true);
-    let land: () => void = () => undefined;
-    set.mockImplementation(
-      () =>
-        new Promise<undefined>((resolve) => {
-          land = () => resolve(undefined);
-        }),
-    );
-    const replace = vi.fn();
-    vi.stubGlobal('location', {
-      replace,
-      reload: vi.fn(),
-      href: 'http://localhost/sign-in',
-      origin: 'http://localhost',
-    });
-    // A namespace of its own, so no client an earlier test left restores this session and takes the held set.
-    const client = track(new AuthClient({ namespace: 'finishes-registering-before-return-to' }));
-    handleSignIn(FakeTransport.last());
-
-    const signingIn = client.signIn({ returnTo: '/app' });
-    await vi.waitFor(() => expect(set).toHaveBeenCalled());
-    expect(replace).not.toHaveBeenCalled();
-
-    land();
-    await signingIn;
-    expect(replace).toHaveBeenCalledWith('http://localhost/app');
-  });
-
-  it('does not navigate where a sign-out takes over while registering is pending', async () => {
-    stubLocks();
-    installedApp('granted');
-    const { set } = fakeCalls(true);
-    let land: () => void = () => undefined;
-    set.mockImplementationOnce(
-      () =>
-        new Promise<undefined>((resolve) => {
-          land = () => resolve(undefined);
-        }),
-    );
-    const replace = vi.fn();
-    vi.stubGlobal('location', {
-      replace,
-      reload: vi.fn(),
-      href: 'http://localhost/sign-in',
-      origin: 'http://localhost',
-    });
-    // A namespace of its own, so no client an earlier test left restores this session and takes the held set.
-    const client = track(new AuthClient({ namespace: 'sign-out-takes-over-registering' }));
-    handleSignIn(FakeTransport.last());
-
-    const signingIn = client.signIn({ returnTo: '/app' });
-    await vi.waitFor(() => expect(set).toHaveBeenCalled());
-    await client.signOut();
-
-    land();
-    await expect(signingIn).rejects.toBeInstanceOf(SupersededError);
-    expect(replace).not.toHaveBeenCalled();
-  });
-
-  it("subscribes a tab's service worker on a tap", async () => {
-    const { requestPermission } = installedApp('granted');
-    inATab();
-    const { set } = fakeCalls(true);
-    const client = track(new AuthClient({ namespace: 'subscribes-a-tab' }));
-    handleSignIn(FakeTransport.last());
-    await client.signIn();
-
-    await expect(client.subscribeToNotifications()).resolves.toBe('granted');
-
-    expect(requestPermission).toHaveBeenCalled();
-    expect(set).toHaveBeenCalledWith(
-      expect.objectContaining({ endpoint: 'https://push.example/1' }),
-    );
-  });
-
-  it("removes a tab's subscription at Internet Identity on sign-out", async () => {
-    installedApp('granted');
-    inATab();
-    const { set } = fakeCalls(true, 'https://push.example/1');
-    const client = track(new AuthClient({ namespace: 'tab-sign-out-removes' }));
-    handleSignIn(FakeTransport.last());
-    await client.signIn();
-
-    await client.signOut();
-
-    expect(set).toHaveBeenCalledWith(null);
-  });
-
-  it('asks Internet Identity nothing on sign-out in a tab whose service worker holds no subscription', async () => {
-    const { getSubscription } = installedApp('granted');
-    getSubscription.mockResolvedValue(null);
-    inATab();
-    const { set } = fakeCalls(true);
-    const client = track(new AuthClient({ namespace: 'tab-sign-out-asks-nothing' }));
-    handleSignIn(FakeTransport.last());
-    await client.signIn();
-
-    await client.signOut();
-
-    expect(set).not.toHaveBeenCalled();
-  });
-
-  it('navigates to a returnTo even where registering fails', async () => {
-    installedApp('granted');
-    fakeCalls(true);
-    vi.spyOn(PwaNotifications, 'create').mockRejectedValue(new Error('the canister is down'));
-    const replace = vi.fn();
-    vi.stubGlobal('location', {
-      replace,
-      reload: vi.fn(),
-      href: 'http://localhost/sign-in',
-      origin: 'http://localhost',
-    });
-    const client = track(new AuthClient());
-    handleSignIn(FakeTransport.last());
-
-    await client.signIn({ returnTo: '/app' });
-
-    expect(replace).toHaveBeenCalledWith('http://localhost/app');
-  });
-
-  it('signs in whatever registering fails with', async () => {
-    installedApp('granted');
-    fakeCalls(true);
-    vi.spyOn(PwaNotifications, 'create').mockRejectedValue(new Error('the canister is down'));
-    const client = track(new AuthClient());
-    handleSignIn(FakeTransport.last());
-
-    await expect(client.signIn()).resolves.toBeDefined();
-  });
-
-  it('registers nothing where Internet Identity already delivers to this endpoint', async () => {
-    installedApp('granted');
-    const { status, prepare } = fakeCalls(true, 'https://push.example/1');
-    const client = track(new AuthClient());
-    handleSignIn(FakeTransport.last());
-
-    await client.signIn();
-    await new Promise((resolve) => setTimeout(resolve, 0));
-
-    expect(prepare).not.toHaveBeenCalled();
-    expect(status).not.toHaveBeenCalled();
-  });
-
-  describe('on a load that restores the session', () => {
-    const secrets = [
-      '302a300506032b6570032100d1fa89134802051c8b5d4e53c08b87381b87097bca4c4f348611eb8ce6c91809',
-      '4bbff6b476463558d7be318aa342d1a97778d70833038680187950e9e02486c0d1fa89134802051c8b5d4e53c08b87381b87097bca4c4f348611eb8ce6c91809',
-    ];
-
-    async function restoredClient() {
-      const key = Ed25519KeyIdentity.fromJSON(JSON.stringify(secrets));
-      const chain = await createTestDelegation(key, new Date(Date.now() + 24 * 60 * 60 * 1000));
-      const client = track(
-        new AuthClient({
-          credentialStorage: spyStorage({ identity: key, chain }),
-          stateStorage: stateFor(chain),
-        }),
-      );
-      await client.getIdentity();
-      return client;
-    }
-
-    it('registers the subscription where Internet Identity holds no endpoint for it', async () => {
-      const { requestPermission } = installedApp('granted');
-      const { set } = fakeCalls(true);
-
-      await restoredClient();
-
-      await vi.waitFor(() => expect(set).toHaveBeenCalledTimes(1));
-      expect(set.mock.calls[0]).toEqual([
+      expect(requestPermission).toHaveBeenCalled();
+      expect(set).toHaveBeenCalledWith(
         expect.objectContaining({ endpoint: 'https://push.example/1' }),
+      );
+      await expect(savedVapidKey()).resolves.toEqual(VAPID);
+    });
+
+    it('replaces a push subscription under another key', async () => {
+      const { subscription, subscribe } = serviceWorker('granted', new Uint8Array([4, 7, 7, 7]));
+      const client = await signedIn('replaces-the-apps-own-subscription');
+      const { set } = fakeCalls();
+
+      await client.subscribeToNotifications();
+
+      expect(subscription.unsubscribe).toHaveBeenCalled();
+      expect(subscribe).toHaveBeenCalled();
+      expect(set).toHaveBeenCalledWith(
+        expect.objectContaining({ endpoint: 'https://push.example/fresh' }),
+      );
+    });
+
+    it('subscribes nothing where permission is refused', async () => {
+      serviceWorker('denied');
+      const client = await signedIn('refused-permission');
+      const { create } = fakeCalls();
+
+      await expect(client.subscribeToNotifications()).resolves.toBe('denied');
+
+      expect(create).not.toHaveBeenCalled();
+      await expect(savedVapidKey()).resolves.toBeUndefined();
+    });
+
+    it('runs one subscribe at a time', async () => {
+      serviceWorker('granted');
+      const client = await signedIn('one-subscribe-at-a-time');
+      const { prepare } = fakeCalls();
+      let running = 0;
+      let most = 0;
+      const keys = prepare.getMockImplementation();
+      prepare.mockImplementation(async () => {
+        running++;
+        most = Math.max(most, running);
+        await new Promise((resolve) => setTimeout(resolve, 5));
+        running--;
+        return (await keys?.()) as Awaited<ReturnType<NonNullable<typeof keys>>>;
+      });
+
+      await Promise.all([client.subscribeToNotifications(), client.subscribeToNotifications()]);
+
+      expect(prepare).toHaveBeenCalledTimes(2);
+      expect(most).toBe(1);
+    });
+
+    it('refuses to prompt from a service worker', async () => {
+      const { registration, requestPermission } = serviceWorker('granted');
+      inAServiceWorker(registration);
+      const client = track(new AuthClient({ namespace: 'prompts-from-a-worker' }));
+
+      await expect(client.subscribeToNotifications()).rejects.toThrow('interactive: false');
+      expect(requestPermission).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('subscribeToNotifications with interactive: false', () => {
+    it('never prompts, and does nothing while permission is undecided', async () => {
+      const { requestPermission } = serviceWorker('default');
+      const client = await signedIn('silent-undecided');
+      await saveVapidKey(VAPID);
+      const { create } = fakeCalls();
+
+      await expect(client.subscribeToNotifications({ interactive: false })).resolves.toBe(
+        'default',
+      );
+
+      expect(requestPermission).not.toHaveBeenCalled();
+      expect(create).not.toHaveBeenCalled();
+    });
+
+    it('calls nothing where no subscribe saved a key on this origin', async () => {
+      serviceWorker('granted');
+      const client = await signedIn('silent-without-a-key');
+      const { create } = fakeCalls('https://push.example/old');
+
+      await expect(client.subscribeToNotifications({ interactive: false })).resolves.toBe(
+        'granted',
+      );
+
+      expect(create).not.toHaveBeenCalled();
+    });
+
+    it('registers this device again where Internet Identity holds another endpoint', async () => {
+      const { requestPermission } = serviceWorker('granted');
+      const client = await signedIn('silent-registers-again');
+      await saveVapidKey(VAPID);
+      const { set } = fakeCalls('https://push.example/old');
+
+      await client.subscribeToNotifications({ interactive: false });
+
+      expect(requestPermission).not.toHaveBeenCalled();
+      expect(set).toHaveBeenCalledWith(
+        expect.objectContaining({ endpoint: 'https://push.example/1' }),
+      );
+    });
+
+    it('subscribes again where the service worker holds no subscription', async () => {
+      const { getSubscription, subscribe } = serviceWorker('granted');
+      getSubscription.mockResolvedValue(null);
+      const client = await signedIn('silent-subscribes-again');
+      await saveVapidKey(VAPID);
+      const { set } = fakeCalls('https://push.example/1');
+
+      await client.subscribeToNotifications({ interactive: false });
+
+      expect(subscribe).toHaveBeenCalled();
+      expect(set).toHaveBeenCalledWith(
+        expect.objectContaining({ endpoint: 'https://push.example/fresh' }),
+      );
+    });
+
+    it('registers nothing where Internet Identity already delivers to this endpoint', async () => {
+      serviceWorker('granted');
+      const client = await signedIn('silent-already-registered');
+      await saveVapidKey(VAPID);
+      const { prepare, set } = fakeCalls('https://push.example/1');
+
+      await client.subscribeToNotifications({ interactive: false });
+
+      expect(prepare).not.toHaveBeenCalled();
+      expect(set).not.toHaveBeenCalled();
+    });
+
+    it('removes the registration at Internet Identity where permission is denied', async () => {
+      serviceWorker('denied');
+      const client = await signedIn('silent-denied');
+      await saveVapidKey(VAPID);
+      const { set } = fakeCalls('https://push.example/1');
+
+      await expect(client.subscribeToNotifications({ interactive: false })).resolves.toBe('denied');
+
+      expect(set).toHaveBeenCalledWith(null);
+    });
+
+    it('changes nothing where the identity has not consented', async () => {
+      serviceWorker('granted');
+      const client = await signedIn('silent-without-consent');
+      await saveVapidKey(VAPID);
+      const { prepare, set } = fakeCalls('https://push.example/old');
+      prepare.mockRejectedValue(new NotificationsNotAllowedError());
+
+      await expect(client.subscribeToNotifications({ interactive: false })).resolves.toBe(
+        'granted',
+      );
+
+      expect(set).not.toHaveBeenCalled();
+    });
+
+    it("uses the service worker's own registration inside one", async () => {
+      const { registration, getRegistration } = serviceWorker('granted');
+      inAServiceWorker(registration);
+      const client = await signedIn('silent-in-a-worker');
+      await saveVapidKey(VAPID);
+      const { set } = fakeCalls('https://push.example/old');
+
+      await client.subscribeToNotifications({ interactive: false });
+
+      expect(getRegistration).not.toHaveBeenCalled();
+      expect(set).toHaveBeenCalledWith(
+        expect.objectContaining({ endpoint: 'https://push.example/1' }),
+      );
+    });
+  });
+
+  describe('signIn', () => {
+    it('subscribes a fresh endpoint for the new account where a key is saved', async () => {
+      const { subscription, subscribe, requestPermission } = serviceWorker('granted');
+      await saveVapidKey(VAPID);
+      const { set } = fakeCalls();
+
+      await signedIn('sign-in-subscribes-fresh');
+
+      await vi.waitFor(() => expect(set).toHaveBeenCalled());
+      expect(subscription.unsubscribe).toHaveBeenCalled();
+      expect(subscribe).toHaveBeenCalled();
+      expect(set.mock.calls[0]).toEqual([
+        expect.objectContaining({ endpoint: 'https://push.example/fresh' }),
       ]);
       expect(requestPermission).not.toHaveBeenCalled();
     });
 
-    it('registers nothing where Internet Identity already delivers to this endpoint', async () => {
-      installedApp('granted');
-      const { prepare } = fakeCalls(true, 'https://push.example/1');
+    it('touches no push subscription and calls nothing where no key is saved', async () => {
+      const { subscription, getSubscription } = serviceWorker('granted');
+      const { create } = fakeCalls();
 
-      await restoredClient();
+      await signedIn('sign-in-without-a-key');
       await new Promise((resolve) => setTimeout(resolve, 0));
 
-      expect(prepare).not.toHaveBeenCalled();
+      expect(create).not.toHaveBeenCalled();
+      expect(getSubscription).not.toHaveBeenCalled();
+      expect(subscription.unsubscribe).not.toHaveBeenCalled();
     });
 
-    it('registers again where Internet Identity holds another endpoint', async () => {
-      installedApp('granted');
-      const { set } = fakeCalls(true, 'https://push.example/old');
+    it('subscribes nothing where permission is not granted', async () => {
+      serviceWorker('default');
+      await saveVapidKey(VAPID);
+      const { create } = fakeCalls();
 
-      await restoredClient();
-
-      await vi.waitFor(() => expect(set).toHaveBeenCalledTimes(1));
-    });
-
-    it('asks Internet Identity nothing in a tab whose service worker holds no subscription', async () => {
-      const { getSubscription } = installedApp('granted');
-      getSubscription.mockResolvedValue(null);
-      inATab();
-      const create = vi.spyOn(PwaNotifications, 'create');
-
-      await restoredClient();
+      await signedIn('sign-in-without-permission');
       await new Promise((resolve) => setTimeout(resolve, 0));
 
       expect(create).not.toHaveBeenCalled();
     });
 
-    it("registers a tab's subscription again where its service worker holds one", async () => {
-      installedApp('granted');
-      inATab();
-      const { set } = fakeCalls(true, 'https://push.example/old');
+    it('finishes subscribing before a returnTo navigates away from the page', async () => {
+      serviceWorker('granted');
+      await saveVapidKey(VAPID);
+      const { set } = fakeCalls();
+      let land: () => void = () => undefined;
+      set.mockImplementation(
+        () =>
+          new Promise<undefined>((resolve) => {
+            land = () => resolve(undefined);
+          }),
+      );
+      const replace = vi.fn();
+      vi.stubGlobal('location', {
+        replace,
+        reload: vi.fn(),
+        href: 'http://localhost/sign-in',
+        origin: 'http://localhost',
+      });
+      const client = track(new AuthClient({ namespace: 'finishes-subscribing-before-return-to' }));
+      handleSignIn(FakeTransport.last());
 
-      await restoredClient();
+      const signingIn = client.signIn({ returnTo: '/app' });
+      await vi.waitFor(() => expect(set).toHaveBeenCalled());
+      expect(replace).not.toHaveBeenCalled();
 
-      await vi.waitFor(() => expect(set).toHaveBeenCalledTimes(1));
-      expect(set.mock.calls[0]).toEqual([
-        expect.objectContaining({ endpoint: 'https://push.example/1' }),
-      ]);
+      land();
+      await signingIn;
+      expect(replace).toHaveBeenCalledWith('http://localhost/app');
     });
+
+    it('does not navigate where a sign-out takes over while subscribing is pending', async () => {
+      stubLocks();
+      serviceWorker('granted');
+      await saveVapidKey(VAPID);
+      const { set } = fakeCalls();
+      let land: () => void = () => undefined;
+      set.mockImplementationOnce(
+        () =>
+          new Promise<undefined>((resolve) => {
+            land = () => resolve(undefined);
+          }),
+      );
+      const replace = vi.fn();
+      vi.stubGlobal('location', {
+        replace,
+        reload: vi.fn(),
+        href: 'http://localhost/sign-in',
+        origin: 'http://localhost',
+      });
+      const client = track(new AuthClient({ namespace: 'sign-out-takes-over-subscribing' }));
+      handleSignIn(FakeTransport.last());
+
+      const signingIn = client.signIn({ returnTo: '/app' });
+      await vi.waitFor(() => expect(set).toHaveBeenCalled());
+      await client.signOut();
+
+      land();
+      await expect(signingIn).rejects.toBeInstanceOf(SupersededError);
+      expect(replace).not.toHaveBeenCalled();
+    });
+
+    it('navigates to a returnTo even where subscribing fails', async () => {
+      serviceWorker('granted');
+      await saveVapidKey(VAPID);
+      vi.spyOn(PwaNotifications, 'create').mockRejectedValue(new Error('the canister is down'));
+      const replace = vi.fn();
+      vi.stubGlobal('location', {
+        replace,
+        reload: vi.fn(),
+        href: 'http://localhost/sign-in',
+        origin: 'http://localhost',
+      });
+      const client = track(new AuthClient({ namespace: 'navigates-where-subscribing-fails' }));
+      handleSignIn(FakeTransport.last());
+
+      await client.signIn({ returnTo: '/app' });
+
+      expect(replace).toHaveBeenCalledWith('http://localhost/app');
+    });
+
+    it('signs in whatever subscribing fails with', async () => {
+      serviceWorker('granted');
+      await saveVapidKey(VAPID);
+      vi.spyOn(PwaNotifications, 'create').mockRejectedValue(new Error('the canister is down'));
+      const client = track(new AuthClient({ namespace: 'signs-in-where-subscribing-fails' }));
+      handleSignIn(FakeTransport.last());
+
+      await expect(client.signIn()).resolves.toBeDefined();
+    });
+  });
+
+  describe('signOut', () => {
+    it('removes the subscription under the saved key at Internet Identity and unsubscribes it', async () => {
+      const { subscription } = serviceWorker('granted');
+      const client = await signedIn('sign-out-removes');
+      await saveVapidKey(VAPID);
+      const { set } = fakeCalls('https://push.example/1');
+
+      await client.signOut();
+
+      expect(set).toHaveBeenCalledWith(null);
+      expect(subscription.unsubscribe).toHaveBeenCalled();
+    });
+
+    it('touches no push subscription and calls nothing where no key is saved', async () => {
+      const { subscription } = serviceWorker('granted');
+      const client = await signedIn('sign-out-without-a-key');
+      const { create } = fakeCalls('https://push.example/1');
+
+      await client.signOut();
+
+      expect(create).not.toHaveBeenCalled();
+      expect(subscription.unsubscribe).not.toHaveBeenCalled();
+    });
+
+    it('leaves a subscription under another key alone', async () => {
+      const { subscription } = serviceWorker('granted', new Uint8Array([4, 7, 7, 7]));
+      const client = await signedIn('sign-out-other-key');
+      await saveVapidKey(VAPID);
+      const { create } = fakeCalls('https://push.example/1');
+
+      await client.signOut();
+
+      expect(create).not.toHaveBeenCalled();
+      expect(subscription.unsubscribe).not.toHaveBeenCalled();
+    });
+  });
+
+  it('calls nothing on a load that restores the session', async () => {
+    const { getSubscription } = serviceWorker('granted');
+    await saveVapidKey(VAPID);
+    const { create } = fakeCalls('https://push.example/old');
+    const key = Ed25519KeyIdentity.generate();
+    const chain = await createTestDelegation(key, new Date(Date.now() + 24 * 60 * 60 * 1000));
+    const client = track(
+      new AuthClient({
+        credentialStorage: spyStorage({ identity: key, chain }),
+        stateStorage: stateFor(chain),
+      }),
+    );
+
+    await client.getIdentity();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(create).not.toHaveBeenCalled();
+    expect(getSubscription).not.toHaveBeenCalled();
   });
 });

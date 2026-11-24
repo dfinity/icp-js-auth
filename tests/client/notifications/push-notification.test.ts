@@ -16,8 +16,16 @@ import {
 import { SessionGoneError } from '../../../src/client/session/app-delegation-source.ts';
 
 /** The private constructor, which is how `notification-consent.test.ts` reaches its own. */
+/** The frontend the inbox is read for. */
+const FRONTEND = 'https://app.example.com';
+
 const over = (service: unknown): PwaNotifications =>
-  new (PwaNotifications as unknown as new (service: unknown) => PwaNotifications)(service);
+  new (
+    PwaNotifications as unknown as new (
+      service: unknown,
+      frontendOrigin: string,
+    ) => PwaNotifications
+  )(service, FRONTEND);
 
 function fakeService(answers: Partial<PwaNotificationService>): PwaNotificationService {
   return {
@@ -74,7 +82,11 @@ const fetchAndSettle = async (
 });
 
 const removeOf = (remove: ReturnType<typeof vi.fn>, id: number, notShown: unknown[] = []) =>
-  expect(remove).toHaveBeenCalledWith({ inbox_notification_id: BigInt(id), not_shown: notShown });
+  expect(remove).toHaveBeenCalledWith({
+    inbox_notification_id: BigInt(id),
+    not_shown: notShown,
+    frontend_origin: [FRONTEND],
+  });
 
 afterEach(() => {
   vi.restoreAllMocks();

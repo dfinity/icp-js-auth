@@ -3,14 +3,25 @@ import {
   isInstalledApp,
   type PwaNotificationService,
   PwaNotifications,
+  resubscribeDevice,
+  savedVapidKey,
+  saveVapidKey,
   sealSubscription,
   subscribeDevice,
 } from '../../../src/client/notifications/pwa-notifications.ts';
 import { SessionGoneError } from '../../../src/client/session/app-delegation-source.ts';
 
+/** The frontend every call below is made for. */
+const FRONTEND = 'https://app.example.com';
+
 /** The private constructor, which is how `notification-consent.test.ts` reaches its own. */
 const over = (service: unknown): PwaNotifications =>
-  new (PwaNotifications as unknown as new (service: unknown) => PwaNotifications)(service);
+  new (
+    PwaNotifications as unknown as new (
+      service: unknown,
+      frontendOrigin: string,
+    ) => PwaNotifications
+  )(service, FRONTEND);
 
 const KEYS = {
   vapid_public_key: new Uint8Array([4, 1, 2, 3]),
@@ -90,7 +101,24 @@ describe('PwaNotifications', () => {
 
     await over(fakeService({ app_set_pwa_webpush_subscription: set })).set(null);
 
-    expect(set).toHaveBeenCalledWith({ subscription: [] });
+    expect(set).toHaveBeenCalledWith({ subscription: [], frontend_origin: [FRONTEND] });
+  });
+
+  it('names the frontend in every subscription call', async () => {
+    const prepare = vi.fn(async () => ({ Ok: KEYS }));
+    const status = vi.fn(async () => ({ Ok: [] as [] }));
+    const inbox = over(
+      fakeService({
+        app_prepare_pwa_webpush_subscription: prepare,
+        app_get_pwa_webpush_subscription_status: status,
+      }),
+    );
+
+    await inbox.prepare();
+    await inbox.registeredEndpoint();
+
+    expect(prepare).toHaveBeenCalledWith([{ frontend_origin: [FRONTEND] }]);
+    expect(status).toHaveBeenCalledWith([{ frontend_origin: [FRONTEND] }]);
   });
 
   it('removes an entry with why it was not shown', async () => {
@@ -103,6 +131,7 @@ describe('PwaNotifications', () => {
     expect(remove).toHaveBeenCalledWith({
       inbox_notification_id: BigInt(7),
       not_shown: [{ PayloadRejected: null }],
+      frontend_origin: [FRONTEND],
     });
   });
 });
@@ -215,7 +244,7 @@ describe('subscribeDevice', () => {
   it('subscribes with the VAPID key and registers the sealed subscription', async () => {
     const { inbox, registration, set, subscribe } = await setUp([{ Ok: null }]);
 
-    await subscribeDevice(inbox, registration, 'replace');
+    await expect(subscribeDevice(inbox, registration)).resolves.toEqual(KEYS.vapid_public_key);
 
     expect(subscribe).toHaveBeenCalledWith(expect.objectContaining({ userVisibleOnly: true }));
     expect(set).toHaveBeenCalledTimes(1);
@@ -228,7 +257,7 @@ describe('subscribeDevice', () => {
       first as unknown as PushSubscription,
     );
 
-    await subscribeDevice(inbox, registration, 'replace');
+    await subscribeDevice(inbox, registration);
 
     expect(subscribe).not.toHaveBeenCalled();
     expect(set.mock.calls[0][0].subscription[0].endpoint).toBe('https://push.example/1');
@@ -244,28 +273,11 @@ describe('subscribeDevice', () => {
       other as unknown as PushSubscription,
     );
 
-    await subscribeDevice(inbox, registration, 'replace');
+    await subscribeDevice(inbox, registration);
 
     expect(other.unsubscribe).toHaveBeenCalled();
     expect(subscribe).toHaveBeenCalledWith(expect.objectContaining({ userVisibleOnly: true }));
     expect(set.mock.calls[0][0].subscription[0].endpoint).toBe('https://push.example/1');
-  });
-
-  it('keeps a push subscription bound to another key where asked to', async () => {
-    const { inbox, registration, set, subscribe } = await setUp([{ Ok: null }]);
-    const other = await fakeSubscription(
-      'https://push.example/other',
-      new Uint8Array([4, 7, 7, 7]),
-    );
-    vi.mocked(registration.pushManager.getSubscription).mockResolvedValueOnce(
-      other as unknown as PushSubscription,
-    );
-
-    await subscribeDevice(inbox, registration, 'keep');
-
-    expect(other.unsubscribe).not.toHaveBeenCalled();
-    expect(subscribe).not.toHaveBeenCalled();
-    expect(set).not.toHaveBeenCalled();
   });
 
   it('moves to a fresh endpoint once where the endpoint is held with other keys', async () => {
@@ -274,7 +286,7 @@ describe('subscribeDevice', () => {
       { Ok: null },
     ]);
 
-    await subscribeDevice(inbox, registration, 'replace');
+    await subscribeDevice(inbox, registration);
 
     expect(first.unsubscribe).toHaveBeenCalled();
     expect(set).toHaveBeenCalledTimes(2);
@@ -287,8 +299,56 @@ describe('subscribeDevice', () => {
       { Err: { EndpointInUse: null } },
     ]);
 
-    await expect(subscribeDevice(inbox, registration, 'replace')).rejects.toThrow(
+    await expect(subscribeDevice(inbox, registration)).rejects.toThrow(
       'This push endpoint is registered with other keys',
     );
+  });
+});
+
+describe('resubscribeDevice', () => {
+  it('replaces the held subscription with a fresh endpoint and registers that', async () => {
+    const transport = await crypto.subtle.generateKey(
+      { name: 'ECDH', namedCurve: 'P-256' },
+      false,
+      ['deriveBits'],
+    );
+    const keys = {
+      vapid_public_key: KEYS.vapid_public_key,
+      transport_public_key: new Uint8Array(
+        await crypto.subtle.exportKey('raw', transport.publicKey),
+      ),
+    };
+    const set = vi.fn(async () => ({ Ok: null }));
+    const inbox = over(
+      fakeService({
+        app_prepare_pwa_webpush_subscription: vi.fn(async () => ({ Ok: keys })),
+        app_set_pwa_webpush_subscription: set,
+      }),
+    );
+    const held = await fakeSubscription('https://push.example/old', KEYS.vapid_public_key);
+    const fresh = await fakeSubscription('https://push.example/new', KEYS.vapid_public_key);
+    const registration = {
+      pushManager: {
+        getSubscription: vi.fn(async () => held),
+        subscribe: vi.fn(async () => fresh),
+      },
+    } as unknown as ServiceWorkerRegistration;
+
+    await expect(resubscribeDevice(inbox, registration)).resolves.toEqual(KEYS.vapid_public_key);
+
+    expect(held.unsubscribe).toHaveBeenCalled();
+    expect(set).toHaveBeenCalledWith(
+      expect.objectContaining({
+        subscription: [expect.objectContaining({ endpoint: 'https://push.example/new' })],
+      }),
+    );
+  });
+});
+
+describe('the saved VAPID key', () => {
+  it('reads back the key last saved', async () => {
+    await saveVapidKey(new Uint8Array([4, 5, 6]));
+
+    await expect(savedVapidKey()).resolves.toEqual(new Uint8Array([4, 5, 6]));
   });
 });
