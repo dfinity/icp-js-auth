@@ -38,7 +38,9 @@ import {
   isSafariInstalledApp,
   NotificationsNotAllowedError,
   PwaNotifications,
+  prepareSameDeviceLinkUrl,
   resubscribeDevice,
+  type SameDeviceLinkStatus,
   savedVapidKey,
   saveVapidKey,
   subscribeDevice,
@@ -416,6 +418,7 @@ export class AuthClient {
   #credentialStorage: CredentialStorage;
   readonly #slots: Slots;
   readonly #canisterId: Principal;
+  readonly #identityProviderOrigin: string;
   #unwatchForeground: (() => void) | undefined;
   #unwatchState: (() => void) | undefined;
   #unwatchActivity: (() => void) | undefined;
@@ -429,6 +432,8 @@ export class AuthClient {
   // One subscribe at a time: each prepare replaces the key the one before it
   // handed out, so two at once would spend each other's.
   #subscribing: Promise<void> = Promise.resolve();
+  // Each prepare replaces the link key before it, so concurrent taps share one.
+  #linking: Promise<void> | undefined;
   // What `getStatus` answers with, replaced only when the record changes.
   #status: SessionStatus;
   readonly #listeners = new Set<() => void>();
@@ -486,6 +491,7 @@ export class AuthClient {
     this.#canisterId = Principal.from(provider.canisterId);
 
     const identityProviderUrl = new URL(provider.authorizeUrl.toString());
+    this.#identityProviderOrigin = identityProviderUrl.origin;
     if (!options.disableBrowserActivity) {
       // The identity decides whether a mint is due; these only say the moment is
       // a good one. Nothing is hooked where there is no DOM.
@@ -1422,7 +1428,8 @@ export class AuthClient {
    * - `'denied'`: removes the registration at Internet Identity, which then
    *   delivers through its own path.
    * - `'granted'`: registers this device's subscription again where Internet
-   *   Identity holds another endpoint, or none.
+   *   Identity holds another endpoint, or none, and moves to a fresh endpoint
+   *   where Internet Identity reports pushes to the current one unanswered.
    *
    * Where nothing was subscribed on this origin before, or the user has not
    * consented, it changes nothing. Call it this way when the app starts, after
@@ -1482,20 +1489,89 @@ export class AuthClient {
       const inbox = await this.#pwaNotifications();
       try {
         if (permission === 'denied') {
-          if ((await inbox.registeredEndpoint()) !== undefined) await inbox.set(null);
+          if ((await inbox.registeredSubscription()) !== undefined) await inbox.set(null);
           return;
         }
         const held = await registration.pushManager.getSubscription();
-        const registered = await inbox.registeredEndpoint();
-        if (held !== null && subscribedWith(held, savedKey) && held.endpoint === registered) {
+        const registered = await inbox.registeredSubscription();
+        const isCurrent =
+          held !== null && subscribedWith(held, savedKey) && held.endpoint === registered?.endpoint;
+        if (isCurrent && registered?.isPastLimit === true) {
+          await saveVapidKey(await resubscribeDevice(inbox, registration));
           return;
         }
+        if (isCurrent) return;
         await saveVapidKey(await subscribeDevice(inbox, registration));
       } catch (error) {
         if (!(error instanceof NotificationsNotAllowedError)) throw error;
       }
     });
     return permission;
+  }
+
+  /**
+   * Whether this installed web app is linked to Safari on the same device, and
+   * if not, whether linking it would stop a second copy of each notification.
+   *
+   * On iOS a Home Screen app and Safari keep separate storage, so Internet
+   * Identity knows them as two browsers of the identity and may deliver this
+   * application's notifications to both. Offer {@link requestSameDeviceLink}
+   * where this answers `other-path-may-deliver`.
+   *
+   * Check it where notifications are turned on: right after
+   * {@link subscribeToNotifications} answers `granted`, and wherever the app
+   * shows its notification settings.
+   *
+   * Asks Internet Identity only in an installed web app of Safari, the one
+   * browser whose installed apps keep storage of their own. Elsewhere it answers
+   * `no-other-path`.
+   *
+   * @returns Whether this app is linked, or there is something to link.
+   * @throws {SessionGoneError} Where this origin holds no live session.
+   * @example
+   * const offer = (await authClient.getSameDeviceLinkStatus()) === 'other-path-may-deliver';
+   */
+  async getSameDeviceLinkStatus(): Promise<SameDeviceLinkStatus> {
+    if (!isSafariInstalledApp()) return 'no-other-path';
+    return (await this.#pwaNotifications()).sameDeviceLinkStatus();
+  }
+
+  /**
+   * Links this installed web app to Safari on the same device, so this
+   * application's notifications on it arrive only here.
+   *
+   * Registers a one-shot key with Internet Identity and opens its page in
+   * Safari, which claims the link with Safari's sign-in. The page leaves the app
+   * for Safari, so call it from a tap. Offer it where
+   * {@link getSameDeviceLinkStatus} answers `other-path-may-deliver`, which is
+   * checked where notifications are turned on: right after
+   * {@link subscribeToNotifications} answers `granted`, and wherever the app
+   * shows its notification settings.
+   *
+   * @throws {NotificationsUnsupportedError} Outside an installed web app of Safari.
+   * @throws {SessionGoneError} Where this origin holds no live session.
+   * @example
+   * await authClient.requestSameDeviceLink();
+   */
+  async requestSameDeviceLink(): Promise<void> {
+    if (!isSafariInstalledApp()) {
+      throw new NotificationsUnsupportedError(
+        'A same-device link is made only in an installed web app of Safari',
+      );
+    }
+    this.#linking ??= this.#openSameDeviceLink().finally(() => {
+      this.#linking = undefined;
+    });
+    return this.#linking;
+  }
+
+  async #openSameDeviceLink(): Promise<void> {
+    const url = await prepareSameDeviceLinkUrl(
+      await this.#pwaNotifications(),
+      this.#identityProviderOrigin,
+    );
+    // A link inside the app opens in the app's own view, which holds no Safari sign-in.
+    globalThis.location.href = url.replace(/^https:/, 'x-safari-https:');
   }
 
   /**

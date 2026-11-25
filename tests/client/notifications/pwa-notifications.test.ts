@@ -3,6 +3,7 @@ import {
   isSafariInstalledApp,
   type PwaNotificationService,
   PwaNotifications,
+  prepareSameDeviceLinkUrl,
   resubscribeDevice,
   savedVapidKey,
   saveVapidKey,
@@ -32,7 +33,7 @@ function fakeService(answers: Partial<PwaNotificationService>): PwaNotificationS
   return {
     app_prepare_pwa_webpush_subscription: vi.fn(async () => ({ Ok: KEYS })),
     app_set_pwa_webpush_subscription: vi.fn(async () => ({ Ok: null })),
-    app_get_pwa_notification: vi.fn(async () => ({ Ok: { notification: [] } })),
+    app_get_pwa_notification: vi.fn(async () => ({ Ok: { notification: [], event: [] } })),
     app_remove_pwa_notification: vi.fn(async () => ({ Ok: {} })),
     ...answers,
   } as PwaNotificationService;
@@ -101,6 +102,24 @@ describe('PwaNotifications', () => {
     expect(set).toHaveBeenCalledWith({ subscription: [], frontend_origin: [FRONTEND] });
   });
 
+  it('reads whether pushes to the registered endpoint went unanswered past the limit', async () => {
+    const unanswered = { count: 3, first_sent_at_ns: BigInt(1), is_past_limit: true };
+    const inbox = over(
+      fakeService({
+        app_get_pwa_webpush_subscription_status: vi.fn(async () => ({
+          Ok: [{ endpoint: 'https://push.example/1', unanswered_pushes: [unanswered] }] as [
+            { endpoint: string; unanswered_pushes: [typeof unanswered] },
+          ],
+        })),
+      }),
+    );
+
+    await expect(inbox.registeredSubscription()).resolves.toEqual({
+      endpoint: 'https://push.example/1',
+      isPastLimit: true,
+    });
+  });
+
   it('names the frontend in every subscription call', async () => {
     const prepare = vi.fn(async () => ({ Ok: KEYS }));
     const status = vi.fn(async () => ({ Ok: [] as [] }));
@@ -112,7 +131,7 @@ describe('PwaNotifications', () => {
     );
 
     await inbox.prepare();
-    await inbox.registeredEndpoint();
+    await inbox.registeredSubscription();
 
     expect(prepare).toHaveBeenCalledWith([{ frontend_origin: [FRONTEND] }]);
     expect(status).toHaveBeenCalledWith([{ frontend_origin: [FRONTEND] }]);
@@ -340,6 +359,29 @@ describe('resubscribeDevice', () => {
       }),
     );
   });
+
+  it('keeps the held subscription where keys for its replacement cannot be had', async () => {
+    const set = vi.fn(async () => ({ Ok: null }));
+    const inbox = over(
+      fakeService({
+        app_prepare_pwa_webpush_subscription: vi.fn(async () => ({
+          Err: { InternalCanisterError: 'offline' },
+        })),
+        app_set_pwa_webpush_subscription: set,
+      }),
+    );
+    const held = await fakeSubscription('https://push.example/old', KEYS.vapid_public_key);
+    const subscribe = vi.fn();
+    const registration = {
+      pushManager: { getSubscription: vi.fn(async () => held), subscribe },
+    } as unknown as ServiceWorkerRegistration;
+
+    await expect(resubscribeDevice(inbox, registration)).rejects.toThrow('offline');
+
+    expect(held.unsubscribe).not.toHaveBeenCalled();
+    expect(subscribe).not.toHaveBeenCalled();
+    expect(set).not.toHaveBeenCalled();
+  });
 });
 
 describe('the saved VAPID key', () => {
@@ -347,5 +389,87 @@ describe('the saved VAPID key', () => {
     await saveVapidKey(new Uint8Array([4, 5, 6]));
 
     await expect(savedVapidKey()).resolves.toEqual(new Uint8Array([4, 5, 6]));
+  });
+});
+describe('same-device link', () => {
+  it.each([
+    [{ Linked: null }, 'linked'],
+    [{ OtherPathMayDeliver: null }, 'other-path-may-deliver'],
+    [{ NoOtherPath: null }, 'no-other-path'],
+  ])('reads %o as %s', async (answer, status) => {
+    const inbox = over(
+      fakeService({ app_get_same_device_link_status: vi.fn(async () => ({ Ok: answer })) }),
+    );
+
+    await expect(inbox.sameDeviceLinkStatus()).resolves.toBe(status);
+  });
+
+  it('refuses a status it has no arm for, rather than reading it as nothing to link', async () => {
+    const inbox = over(
+      fakeService({
+        app_get_same_device_link_status: vi.fn(async () => ({
+          Ok: { Unknown: null } as unknown as { Linked: null },
+        })),
+      }),
+    );
+
+    await expect(inbox.sameDeviceLinkStatus()).rejects.toThrow('unknown link status');
+  });
+
+  it('registers the public half of the key whose private half the URL carries', async () => {
+    const prepare = vi.fn(async (_: { link_public_key: Uint8Array }) => ({ Ok: null }));
+    const inbox = over(fakeService({ app_prepare_same_device_link: prepare }));
+
+    const url = new URL(await prepareSameDeviceLinkUrl(inbox, 'https://id.example'));
+
+    expect(url.origin + url.pathname).toBe('https://id.example/ios-installed-app');
+    expect(url.search).toBe('');
+    const key = new URLSearchParams(url.hash.slice(1)).get('key') ?? '';
+    const bytes = Uint8Array.from(
+      atob(key.replace(/-/g, '+').replace(/_/g, '/').padEnd(128, '=')),
+      (char) => char.charCodeAt(0),
+    );
+    expect(bytes).toHaveLength(96);
+    const coordinate = (at: number) =>
+      btoa(String.fromCharCode(...bytes.subarray(at * 32, (at + 1) * 32)))
+        .replace(/\+/g, '-')
+        .replace(/\//g, '_')
+        .replace(/=+$/, '');
+    const privateKey = await crypto.subtle.importKey(
+      'jwk',
+      { kty: 'EC', crv: 'P-256', d: coordinate(0), x: coordinate(1), y: coordinate(2) },
+      { name: 'ECDSA', namedCurve: 'P-256' },
+      false,
+      ['sign'],
+    );
+    const registered = await crypto.subtle.importKey(
+      'spki',
+      prepare.mock.calls[0][0].link_public_key as Uint8Array<ArrayBuffer>,
+      { name: 'ECDSA', namedCurve: 'P-256' },
+      false,
+      ['verify'],
+    );
+    const message = new TextEncoder().encode('claim');
+    const signature = await crypto.subtle.sign(
+      { name: 'ECDSA', hash: 'SHA-256' },
+      privateKey,
+      message,
+    );
+
+    await expect(
+      crypto.subtle.verify({ name: 'ECDSA', hash: 'SHA-256' }, registered, signature, message),
+    ).resolves.toBe(true);
+  });
+
+  it('hands out no URL where Internet Identity refuses the key', async () => {
+    const inbox = over(
+      fakeService({
+        app_prepare_same_device_link: vi.fn(async () => ({ Err: { NoSuchSession: null } })),
+      }),
+    );
+
+    await expect(prepareSameDeviceLinkUrl(inbox, 'https://id.example')).rejects.toThrow(
+      SessionGoneError,
+    );
   });
 });

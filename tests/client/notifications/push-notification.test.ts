@@ -29,7 +29,7 @@ const over = (service: unknown): PwaNotifications =>
 
 function fakeService(answers: Partial<PwaNotificationService>): PwaNotificationService {
   return {
-    app_get_pwa_notification: vi.fn(async () => ({ Ok: { notification: [] } })),
+    app_get_pwa_notification: vi.fn(async () => ({ Ok: { notification: [], event: [] } })),
     app_remove_pwa_notification: vi.fn(async () => ({ Ok: {} })),
     ...answers,
   } as PwaNotificationService;
@@ -258,6 +258,36 @@ describe('fetchPushNotification', () => {
     ).rejects.toThrow(SessionGoneError);
   });
 
+  it('answers Internet Identity\'s probe as "All set", and clears it, which answers the probe', async () => {
+    const remove = vi.fn(async () => ({ Ok: {} }));
+    const { scope } = fakeScope();
+    const inbox = over(
+      fakeService({
+        app_get_pwa_notification: vi.fn(async () => ({
+          Ok: {
+            notification: [] as [],
+            event: [{ NotificationsOn: null }] as [{ NotificationsOn: null }],
+          },
+        })),
+        app_remove_pwa_notification: remove,
+      }),
+    );
+
+    const notification = await fetchAndSettle(
+      source(async () => inbox),
+      push({ inbox_notification_id: 4 }),
+      scope,
+    );
+
+    expect(notification.title).toBe('All set');
+    expect(notification.options).toEqual({
+      body: 'Notifications will show up here.',
+      tag: 'ii-notification:probe',
+    });
+    await notification.settled();
+    removeOf(remove, 4);
+  });
+
   describe("with the app's content", () => {
     const CANISTER = Principal.fromText('aaaaa-aa');
 
@@ -276,6 +306,7 @@ describe('fetchPushNotification', () => {
               notification: [{ canister_id: CANISTER, id: BigInt(5) }] as [
                 { canister_id: Principal; id: bigint },
               ],
+              event: [] as [],
             },
           })),
           app_remove_pwa_notification: remove,
