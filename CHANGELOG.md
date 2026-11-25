@@ -1,3 +1,10 @@
+## Unreleased
+
+### Feat
+
+- link an installed Safari web app to Safari and repair its push subscription (#221)
+- notifications for installed web apps (#220)
+
 ## 11.2.1 (2026-11-17)
 
 ### Fix
