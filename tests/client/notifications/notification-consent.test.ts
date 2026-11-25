@@ -7,9 +7,9 @@ import {
   type NotificationConsentService,
   NotificationsUnsupportedError,
   requestNotificationConsent,
-} from '../../src/client/notification-consent.ts';
-import { SessionGoneError } from '../../src/client/session/app-delegation-source.ts';
-import { InteractionRequiredError } from '../../src/client/session/session-delegation.ts';
+} from '../../../src/client/notifications/notification-consent.ts';
+import { SessionGoneError } from '../../../src/client/session/app-delegation-source.ts';
+import { InteractionRequiredError } from '../../../src/client/session/session-delegation.ts';
 
 const II = Principal.fromText('rdmx6-jaaaa-aaaaa-aaadq-cai');
 
@@ -77,6 +77,16 @@ describe('requestNotificationConsent', () => {
 
     expect(sendRequest.mock.calls[0][0]).toMatchObject({
       params: { icrc95DerivationOrigin: 'https://app.example.com' },
+    });
+  });
+
+  it('says so where the application runs as an installed web app', async () => {
+    const { signer, sendRequest } = fakeSigner({ result: { granted: true } });
+
+    await requestNotificationConsent(signer, 'https://app.example.com', true);
+
+    expect(sendRequest.mock.calls[0][0]).toMatchObject({
+      params: { icrc95DerivationOrigin: 'https://app.example.com', installedApp: true },
     });
   });
 

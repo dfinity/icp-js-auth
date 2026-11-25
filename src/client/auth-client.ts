@@ -19,17 +19,37 @@ import { IdbCredentialStorage } from './credentials/idb-credential-storage.js';
 import { watchActivity, watchForeground } from './foreground-refresh.js';
 import {
   NotificationConsent,
+  type NotificationConsentOptions,
   type NotificationConsentStatus,
+  NotificationsUnsupportedError,
   // Aliased: the method below is this library's name for the operation, and this
   // is the request it sends.
   requestNotificationConsent as sendConsentRequest,
-} from './notification-consent.js';
+} from './notifications/notification-consent.js';
+import {
+  fetchPushNotificationPayload,
+  markPushNotificationOpened,
+  type NotificationClickEvent,
+  type NotificationPayload,
+  type NotificationPushEvent,
+  type PushNotificationSource,
+} from './notifications/push-notification.js';
+import {
+  isSafariInstalledApp,
+  NotificationsNotAllowedError,
+  PwaNotifications,
+  resubscribeDevice,
+  savedVapidKey,
+  saveVapidKey,
+  subscribeDevice,
+  subscribedWith,
+} from './notifications/pwa-notifications.js';
 import {
   AccountMismatchError,
   chainAuthorisesKey,
   SessionGoneError,
 } from './session/app-delegation-source.js';
-import { type HeldLock, stealLock, stealMintLock } from './session/app-lock.js';
+import { type HeldLock, stealLock, stealMintLock, withMintLock } from './session/app-lock.js';
 import { requestSessionDelegation } from './session/session-delegation.js';
 import { SessionIdentity } from './session/session-identity.js';
 import { SessionMinter } from './session/session-minter.js';
@@ -52,6 +72,12 @@ import type { SessionState, StateStorage } from './state/state-storage.js';
  * sign-ins, and they still cannot both have the window.
  */
 const CHANNEL_LOCK = 'ic-auth-signer-channel';
+
+/**
+ * The lock over this origin's push subscription. Not namespaced: every client
+ * and tab of the origin, and its service worker, share one registration.
+ */
+const PUSH_SUBSCRIPTION_LOCK = 'ic-auth-push-subscription';
 
 /** The lock over one namespace's sign-in, which `signIn` and `signOut` both move. */
 const signInLockFor = (stateSlot: string): string => `${stateSlot}:sign-in`;
@@ -400,6 +426,9 @@ export class AuthClient {
   #disposed = false;
   // Set while a further restore is pending, so a burst of changes is one pass.
   #restoreQueued = false;
+  // One subscribe at a time: each prepare replaces the key the one before it
+  // handed out, so two at once would spend each other's.
+  #subscribing: Promise<void> = Promise.resolve();
   // What `getStatus` answers with, replaced only when the record changes.
   #status: SessionStatus;
   readonly #listeners = new Set<() => void>();
@@ -1075,6 +1104,9 @@ export class AuthClient {
         if (this.#committing === committing) this.#committing = null;
       }
 
+      // Awaited only before navigating away, which would abandon it; never fails signIn().
+      const resubscribing = this.#subscribeAfterSignIn(key, sessionChain).catch(() => undefined);
+
       // Best-effort — the user is already signed in, so a cleanup failure must not
       // fail signIn(), and the next ceremony overwrites what is left behind.
       if (pending) {
@@ -1090,7 +1122,12 @@ export class AuthClient {
       // sign-in page and the redirect chain are not what a back button returns to.
       // `await` above resolved the journaled value to a validated href or null.
       const target = await returnTo;
-      if (typeof target === 'string') location.replace(target);
+      if (typeof target === 'string') {
+        await resubscribing;
+        // A sign-out or later sign-in may have taken over during that wait.
+        this.#assertCurrent(signInLock);
+        globalThis.location.replace(target);
+      }
 
       return this.#identity;
     } finally {
@@ -1250,6 +1287,12 @@ export class AuthClient {
    * user's answer and nothing else can stand in for it. Where they agree, the
    * browser they answered on is registered for delivery.
    *
+   * In a Safari installed web app (iOS, macOS) this records consent only: call
+   * {@link subscribeToNotifications} from a second tap once it returns
+   * `granted: true`. Elsewhere, in a browser tab or a Chromium installed app,
+   * it may be called too, to have the app's own service worker deliver instead
+   * of Internet Identity's.
+   *
    * A refusal is an answer rather than a failure: it returns `granted: false`,
    * and an application renders that. Calling it again where consent is already
    * held returns what is recorded without asking a second time.
@@ -1268,7 +1311,11 @@ export class AuthClient {
     // writes nothing anyone else reads.
     this.#beginInteraction();
     try {
-      const response = sendConsentRequest(this.#signer, this.#options.derivationOrigin?.toString());
+      const response = sendConsentRequest(
+        this.#signer,
+        this.#options.derivationOrigin?.toString(),
+        isSafariInstalledApp(),
+      );
       this.#takeChannelLock();
       return await response;
     } finally {
@@ -1287,6 +1334,168 @@ export class AuthClient {
    */
   async revokeNotificationConsent(): Promise<void> {
     await (await this.#consent()).revoke();
+  }
+
+  /**
+   * Fetches what this application's service worker shows for one push.
+   *
+   * Call it from the service worker's `push` listener, with an AuthClient built
+   * with the page's options. Where the content cannot be read in time, it
+   * answers a generic notification, since iOS requires one for every push.
+   *
+   * @param event - The service worker's `push` event.
+   * @returns The title and options to pass to `showNotification`.
+   * @throws {SessionGoneError} Where this origin holds no live session.
+   * @example
+   * // service-worker.ts
+   * import { AuthClient } from '@icp-sdk/auth/client';
+   *
+   * const authClient = new AuthClient(authClientOptions);
+   *
+   * self.addEventListener('push', (event) => {
+   *   event.waitUntil((async () => {
+   *     const payload = await authClient.fetchNotificationPayload(event);
+   *     await self.registration.showNotification(payload.title, { ...payload.options });
+   *   })());
+   * });
+   */
+  fetchNotificationPayload(event: NotificationPushEvent): Promise<NotificationPayload> {
+    return fetchPushNotificationPayload(this.#pushNotificationSource(), event);
+  }
+
+  /**
+   * Reports a click on this application's notification to its canister.
+   *
+   * Call it from the service worker's `notificationclick` listener, after
+   * opening the window. Clicks on other notifications are ignored.
+   *
+   * @param event - The service worker's `notificationclick` event.
+   * @throws {SessionGoneError} Where this origin holds no live session.
+   * @example
+   * // service-worker.ts
+   * self.addEventListener('notificationclick', (event) => {
+   *   event.waitUntil((async () => {
+   *     event.notification.close();
+   *     await self.clients.openWindow(event.notification.data?.url ?? self.registration.scope);
+   *     await authClient.markNotificationOpened(event);
+   *   })());
+   * });
+   */
+  markNotificationOpened(event: NotificationClickEvent): Promise<void> {
+    return markPushNotificationOpened(this.#pushNotificationSource(), event);
+  }
+
+  /** The session-backed calls behind the service worker's notification handling. */
+  #pushNotificationSource(): PushNotificationSource {
+    return {
+      inbox: () => this.#pwaNotifications(),
+      // Checked first, since `getIdentity()` answers an anonymous identity when signed out.
+      identity: async () => {
+        await this.#sessionCallOptions();
+        const identity = await this.getIdentity();
+        // A sign-out between the two leaves the anonymous identity, which no app call is made as.
+        if (identity.getPrincipal().isAnonymous()) throw new SessionGoneError();
+        return identity;
+      },
+      agentOptions: this.#options.agentOptions,
+    };
+  }
+
+  /**
+   * Subscribes this origin's service worker to the user's notifications from
+   * this application, so it delivers them instead of Internet Identity's. In an
+   * installed web app it is the only way they arrive; in a browser tab it is an
+   * option.
+   *
+   * Call it from a tap once {@link requestNotificationConsent} returned
+   * `granted: true`. The service worker must already be registered. It asks for
+   * notification permission, subscribes under Internet Identity's VAPID key,
+   * replacing a push subscription under any other key, so remove any of the
+   * app's own push code first, and registers the subscription at Internet
+   * Identity. The key is recorded on this origin, which is what has later
+   * sign-ins subscribe a fresh endpoint for the new account and sign-outs remove
+   * it.
+   *
+   * With `interactive: false` it never prompts, and only keeps a subscription
+   * made here before in order, according to the notification permission:
+   * - `'default'`: does nothing.
+   * - `'denied'`: removes the registration at Internet Identity, which then
+   *   delivers through its own path.
+   * - `'granted'`: registers this device's subscription again where Internet
+   *   Identity holds another endpoint, or none.
+   *
+   * Where nothing was subscribed on this origin before, or the user has not
+   * consented, it changes nothing. Call it this way when the app starts, after
+   * the service worker is registered, and from the service worker's
+   * `pushsubscriptionchange` listener. A service worker can only call it this
+   * way.
+   *
+   * @param options - Subscribe options.
+   * @param options.interactive - Whether it may ask for permission. Defaults to
+   *   `true`.
+   * @returns The notification permission; nothing is subscribed unless it is
+   *   `'granted'`.
+   * @throws {NotificationsUnsupportedError} Where this browser has no Web Push.
+   * @throws {SessionGoneError} Where this origin holds no live session.
+   * @example
+   * const permission = await authClient.subscribeToNotifications();
+   * @example
+   * // service-worker.ts
+   * self.addEventListener('pushsubscriptionchange', (event) => {
+   *   event.waitUntil(authClient.subscribeToNotifications({ interactive: false }));
+   * });
+   */
+  async subscribeToNotifications(
+    options: { interactive?: boolean } = {},
+  ): Promise<NotificationPermission> {
+    const interactive = options.interactive ?? true;
+    if (
+      globalThis.PushManager === undefined ||
+      (interactive && globalThis.Notification === undefined)
+    ) {
+      throw new NotificationsUnsupportedError('This browser has no Web Push');
+    }
+    if (interactive && serviceWorkerScope() !== undefined) {
+      throw new Error(
+        'A service worker can only call subscribeToNotifications({ interactive: false })',
+      );
+    }
+
+    if (interactive) {
+      const permission = await globalThis.Notification.requestPermission();
+      if (permission !== 'granted') return permission;
+      const registration = await pushRegistration();
+      if (registration === undefined) throw noServiceWorkerError();
+      await this.#queueSubscribe(async () => {
+        await saveVapidKey(await subscribeDevice(await this.#pwaNotifications(), registration));
+      });
+      return permission;
+    }
+
+    const registration = await pushRegistration();
+    if (registration === undefined) throw noServiceWorkerError();
+    const permission = await pushPermission(registration);
+    if (permission === 'default') return permission;
+    await this.#queueSubscribe(async () => {
+      const savedKey = await savedVapidKey();
+      if (savedKey === undefined) return;
+      const inbox = await this.#pwaNotifications();
+      try {
+        if (permission === 'denied') {
+          if ((await inbox.registeredEndpoint()) !== undefined) await inbox.set(null);
+          return;
+        }
+        const held = await registration.pushManager.getSubscription();
+        const registered = await inbox.registeredEndpoint();
+        if (held !== null && subscribedWith(held, savedKey) && held.endpoint === registered) {
+          return;
+        }
+        await saveVapidKey(await subscribeDevice(inbox, registration));
+      } catch (error) {
+        if (!(error instanceof NotificationsNotAllowedError)) throw error;
+      }
+    });
+    return permission;
   }
 
   /**
@@ -1314,6 +1523,16 @@ export class AuthClient {
    * is instead of answered from a stale actor.
    */
   async #consent(): Promise<NotificationConsent> {
+    return NotificationConsent.create(await this.#sessionCallOptions());
+  }
+
+  /** Builds the installed app's subscription and inbox calls, as {@link #consent} does. */
+  async #pwaNotifications(): Promise<PwaNotifications> {
+    return PwaNotifications.create(await this.#sessionCallOptions(), globalThis.location.origin);
+  }
+
+  /** What a call made as the session this origin holds is built from. */
+  async #sessionCallOptions(): Promise<NotificationConsentOptions> {
     // Wait for the constructor's session restore, which is what puts the
     // credential these calls are made with where this can read it.
     await this.#init();
@@ -1326,12 +1545,12 @@ export class AuthClient {
       throw new SessionGoneError();
     }
 
-    return NotificationConsent.create({
+    return {
       sessionKey: session.identity,
       sessionChain: session.chain,
       canisterId: this.#canisterId,
       agentOptions: this.#options.agentOptions,
-    });
+    };
   }
 
   /**
@@ -1383,6 +1602,10 @@ export class AuthClient {
   /**
    * Clears the stored session and resets the client to an anonymous state.
    *
+   * Where this origin's push subscription is the one
+   * {@link subscribeToNotifications} made, also removes it at Internet Identity
+   * and unsubscribes it.
+   *
    * @param options - Sign-out options.
    * @param options.returnTo - URL to navigate to after sign-out.
    */
@@ -1418,7 +1641,7 @@ export class AuthClient {
     const revoked: Promise<unknown> =
       session?.chain === undefined || !('sign' in session.identity)
         ? Promise.resolve(undefined)
-        : this.#revoke(session.identity, session.chain).then(
+        : this.#endAtCanister(session.identity, session.chain).then(
             () => undefined,
             (error: unknown) => error,
           );
@@ -1446,7 +1669,7 @@ export class AuthClient {
       // from it.
       const target = sameOriginTarget(options.returnTo);
       if (target !== undefined) {
-        window.location.assign(target.href);
+        globalThis.location.assign(target.href);
       }
     }
   }
@@ -1486,6 +1709,90 @@ export class AuthClient {
     if (this.#interactions > 0) return;
     const identity = this.#identity;
     if (identity instanceof SessionIdentity) await identity.refresh().catch(() => undefined);
+  }
+
+  /**
+   * Subscribes a fresh endpoint for the account just signed in, where an earlier
+   * {@link subscribeToNotifications} recorded a VAPID key on this origin and
+   * notification permission is granted. Without a recorded key it calls
+   * nothing.
+   */
+  #subscribeAfterSignIn(key: SignIdentity, sessionChain: DelegationChain): Promise<void> {
+    return this.#queueSubscribe(async () => {
+      if ((await savedVapidKey()) === undefined) return;
+      // A sign-out, or a later sign-in from any client of this origin, may have run first.
+      if ((await this.#storedSessionKey()) !== publicKeyOf(key)) return;
+      const registration = await pushRegistration();
+      if (registration === undefined || (await pushPermission(registration)) !== 'granted') return;
+      const inbox = await PwaNotifications.create(
+        this.#sessionOptions(key, sessionChain),
+        globalThis.location.origin,
+      );
+      await saveVapidKey(await resubscribeDevice(inbox, registration));
+    });
+  }
+
+  /**
+   * Runs `work` once every subscribe queued before it has settled, holding the
+   * lock every client, tab and service worker of this origin takes around its
+   * push subscription.
+   */
+  #queueSubscribe(work: () => Promise<void>): Promise<void> {
+    const next = this.#subscribing
+      .catch(() => undefined)
+      .then(() => withMintLock(PUSH_SUBSCRIPTION_LOCK, work));
+    this.#subscribing = next;
+    return next;
+  }
+
+  /**
+   * Where this origin's push subscription is the one {@link subscribeToNotifications}
+   * recorded the key of, removes it at Internet Identity and unsubscribes it.
+   * Without a recorded key it calls nothing, and where a later sign-in stored
+   * another session it leaves that sign-in's subscription alone. Best-effort:
+   * delivery stops with the session anyway.
+   */
+  #removePwaSubscription(key: SignIdentity, sessionChain: DelegationChain): Promise<void> {
+    return this.#queueSubscribe(async () => {
+      const savedKey = await savedVapidKey();
+      if (savedKey === undefined) return;
+      // Cleared by this sign-out, or still this session: either way the subscription is its own.
+      const stored = await this.#storedSessionKey();
+      if (stored !== undefined && stored !== publicKeyOf(key)) return;
+      const held = await heldPushSubscription();
+      if (held === null || !subscribedWith(held, savedKey)) return;
+      try {
+        const inbox = await PwaNotifications.create(
+          this.#sessionOptions(key, sessionChain),
+          globalThis.location.origin,
+        );
+        await inbox.set(null);
+      } finally {
+        await held.unsubscribe();
+      }
+    }).catch(() => undefined);
+  }
+
+  /** The public key of the session this origin stores, or `undefined` where it stores none. */
+  async #storedSessionKey(): Promise<string | undefined> {
+    const session = await this.#credentialStorage.get(this.#slots.session).catch(() => null);
+    return session === null ? undefined : publicKeyOf(session.identity);
+  }
+
+  /** What a call made as the session `key` and `sessionChain` make up is built from. */
+  #sessionOptions(key: SignIdentity, sessionChain: DelegationChain): NotificationConsentOptions {
+    return {
+      sessionKey: key,
+      sessionChain,
+      canisterId: this.#canisterId,
+      agentOptions: this.#options.agentOptions,
+    };
+  }
+
+  /** Removes this device's notification subscription, then ends the session. */
+  async #endAtCanister(key: SignIdentity, sessionChain: DelegationChain): Promise<void> {
+    await this.#removePwaSubscription(key, sessionChain);
+    await this.#revoke(key, sessionChain);
   }
 
   /** Ends the session at the canister, so nothing more can be minted from it. */
@@ -1863,6 +2170,41 @@ export class AuthClient {
   }
 }
 
+/** The global scope where this runs in a service worker, or `undefined` in a page. */
+function serviceWorkerScope(): { registration: ServiceWorkerRegistration } | undefined {
+  const scope = (globalThis as { ServiceWorkerGlobalScope?: abstract new () => unknown })
+    .ServiceWorkerGlobalScope;
+  if (scope === undefined || !(globalThis instanceof scope)) return undefined;
+  return globalThis as unknown as { registration: ServiceWorkerRegistration };
+}
+
+/**
+ * The service worker registration that holds this origin's push subscription:
+ * the worker's own inside a service worker, otherwise the page's.
+ */
+async function pushRegistration(): Promise<ServiceWorkerRegistration | undefined> {
+  const worker = serviceWorkerScope();
+  if (worker !== undefined) return worker.registration;
+  return globalThis.navigator?.serviceWorker?.getRegistration();
+}
+
+const noServiceWorkerError = (): Error =>
+  new Error('This origin has no service worker registered to receive notifications');
+
+/** The notification permission as the push manager reads it, which needs no window. */
+async function pushPermission(
+  registration: ServiceWorkerRegistration,
+): Promise<NotificationPermission> {
+  const state = await registration.pushManager.permissionState({ userVisibleOnly: true });
+  return state === 'prompt' ? 'default' : state;
+}
+
+/** The push subscription this origin's service worker holds, where it has one. */
+async function heldPushSubscription(): Promise<PushSubscription | null> {
+  const registration = await pushRegistration();
+  return (await registration?.pushManager.getSubscription()) ?? null;
+}
+
 /** The moment a chain stops being usable: its earliest delegation's expiry. */
 function earliestExpiryMs(chain: DelegationChain): number {
   let earliest: bigint | null = null;
@@ -1891,13 +2233,13 @@ function publicKeyOf(key: SignIdentity | PartialIdentity): string {
 function sameOriginTarget(returnTo: string): URL | undefined {
   let target: URL;
   try {
-    target = new URL(returnTo, window.location.href);
+    target = new URL(returnTo, globalThis.location.href);
   } catch {
     return undefined;
   }
   if (
     (target.protocol === 'https:' || target.protocol === 'http:') &&
-    target.origin === window.location.origin
+    target.origin === globalThis.location.origin
   ) {
     return target;
   }
