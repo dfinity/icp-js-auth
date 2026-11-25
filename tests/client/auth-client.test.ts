@@ -3435,9 +3435,10 @@ describe("AuthClient and this origin's push subscription", () => {
       // Its teardown waits for the subscribe holding the lock.
       const signingOut = client.signOut();
 
+      const superseded = expect(signingIn).rejects.toBeInstanceOf(SupersededError);
       land();
       await signingOut;
-      await expect(signingIn).rejects.toBeInstanceOf(SupersededError);
+      await superseded;
       expect(replace).not.toHaveBeenCalled();
     });
 
