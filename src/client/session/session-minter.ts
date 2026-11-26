@@ -81,6 +81,17 @@ interface SessionService {
 const isGone = (error: AppSessionError): boolean => 'NoSuchSession' in error;
 
 /**
+ * How many times the delegation a prepare stands for is fetched, a second more
+ * between each: the fetch is a query, which can reach a replica that has not yet
+ * applied the prepare's update. The same schedule as Internet Identity's own
+ * frontend uses for its prepare and get pairs.
+ */
+const FETCH_ATTEMPTS = 8;
+const FETCH_BACKOFF_MS = 1_000;
+
+const wait = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
+
+/**
  * Raised when the canister signed nothing for the key and expiration asked for,
  * which means the expiration was not one `app_prepare_delegation` returned.
  *
@@ -149,14 +160,15 @@ export class SessionMinter implements AppDelegationSource {
   }
 
   /**
-   * Prepares and fetches an app delegation, once more if the fetch finds nothing
-   * signed for what the prepare handed out.
+   * Prepares and fetches an app delegation, once more if the fetch keeps finding
+   * nothing signed for what the prepare handed out.
    *
-   * The pair is two calls, and only the first of them is an update: an expiration
-   * the canister will not sign for is one this session no longer holds, and the
-   * answer is to prepare again rather than to sign in again. Attempted a second
-   * time and no further — a third would be pursuing something other than the race
-   * this covers.
+   * The pair is two calls, and only the first of them is an update. The fetch is
+   * retried on its own first, for a replica that is behind the prepare. An
+   * expiration the canister still will not sign for after that is one this
+   * session no longer holds, and the answer is to prepare again rather than to
+   * sign in again. Attempted a second time and no further: a third would be
+   * pursuing something other than the races this covers.
    */
   async mint(appPublicKey: DerEncodedPublicKey): Promise<DelegationChain> {
     try {
@@ -186,15 +198,29 @@ export class SessionMinter implements AppDelegationSource {
       await this.#service.app_prepare_delegation({ session_key: appPublicKey }),
     );
 
-    const signed = unwrapSessionResult(
-      await this.#service.app_get_delegation({
-        session_key: appPublicKey,
-        // Exactly what was prepared. A different value is a different signature.
-        expiration: prepared.expiration,
-      }),
-    );
-
+    const signed = await this.#fetchPrepared(appPublicKey, prepared.expiration);
     return appDelegationChain(prepared.user_key, signed);
+  }
+
+  /**
+   * Fetches what a prepare stands for, again on a linear backoff while it
+   * fails. A session that is gone is final, so it is raised at once.
+   */
+  async #fetchPrepared(appPublicKey: DerEncodedPublicKey, expiration: bigint) {
+    for (let attempt = 0; ; attempt += 1) {
+      if (attempt > 0) await wait(attempt * FETCH_BACKOFF_MS);
+      try {
+        return unwrapSessionResult(
+          await this.#service.app_get_delegation({
+            session_key: appPublicKey,
+            // Exactly what was prepared. A different value is a different signature.
+            expiration,
+          }),
+        );
+      } catch (error) {
+        if (error instanceof SessionGoneError || attempt + 1 >= FETCH_ATTEMPTS) throw error;
+      }
+    }
   }
 }
 
