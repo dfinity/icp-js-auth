@@ -1432,10 +1432,10 @@ export class AuthClient {
    *   where Internet Identity reports pushes to the current one unanswered.
    *
    * Where nothing was subscribed on this origin before, or the user has not
-   * consented, it changes nothing. Call it this way when the app starts, after
-   * the service worker is registered, and from the service worker's
-   * `pushsubscriptionchange` listener. A service worker can only call it this
-   * way.
+   * consented, it changes nothing. Call it this way from the service worker's
+   * `pushsubscriptionchange` listener, and nowhere else: sign-in and sign-out
+   * keep the subscription in order on their own. A service worker can only call
+   * it this way.
    *
    * @param options - Subscribe options.
    * @param options.interactive - Whether it may ask for permission. Defaults to

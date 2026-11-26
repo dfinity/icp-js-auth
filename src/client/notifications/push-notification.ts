@@ -41,7 +41,7 @@ export interface PushNotificationData {
 export interface NotificationPayload {
   title: string;
   /** Spread into `showNotification`'s options before the app's own. */
-  options: NotificationOptions;
+  options: NotificationOptions & { renotify?: boolean };
 }
 
 /** The part of a service worker's `notificationclick` event {@link AuthClient.markNotificationOpened} reads. */
@@ -62,6 +62,8 @@ export interface PushNotificationSource {
 /** The parts of the service worker's global scope a fetch reads. */
 export interface PushNotificationScope {
   readonly location: { readonly origin: string };
+  /** Absent where the browser is not known, which is treated as one honouring the tag. */
+  readonly navigator?: { readonly userAgent: string };
   /** Absent outside a service worker, where nothing on screen can be closed. */
   readonly registration?: {
     getNotifications(): Promise<{ readonly tag: string; close(): void }[]>;
@@ -139,7 +141,26 @@ const inboxNotificationIdOf = (data: NotificationPushEvent['data']): bigint | un
 const tagOf = (canisterId: Principal, id: bigint): string =>
   `${TAG_PREFIX}:${canisterId.toText()}:${id}`;
 
-/** iOS ignores `tag`, so a notification is replaced by closing the old one by hand. */
+/**
+ * Whether showing a notification replaces the one on screen under the same tag.
+ * Apple's WebKit (iOS, Safari) ignores the tag, so there the old one is closed by
+ * hand first; elsewhere it is replaced in place, which is renotified so it alerts.
+ */
+const replacesByTag = (scope: PushNotificationScope): boolean => {
+  const userAgent = scope.navigator?.userAgent ?? '';
+  const isAppleWebKit =
+    userAgent.includes('AppleWebKit') && !/Chrome|Chromium|Android|Edg\//.test(userAgent);
+  return !isAppleWebKit;
+};
+
+/** The options a notification is shown with, so it replaces one under the same tag and alerts. */
+const replacing = (
+  scope: PushNotificationScope,
+  options: NotificationOptions,
+): NotificationPayload['options'] =>
+  replacesByTag(scope) ? { ...options, renotify: true } : options;
+
+/** Closes what is on screen under `tag`. */
 const closeTagged = async (scope: PushNotificationScope, tag: string): Promise<void> => {
   const shown = await scope.registration?.getNotifications().catch(() => []);
   for (const notification of shown ?? []) {
@@ -165,7 +186,7 @@ const notShownReasonOf = (error: unknown): NotShownReason =>
 interface Outcome {
   /** The app's notification, or the generic one where absent. */
   shown?: { title: string; options: NotificationOptions };
-  /** A copy of this notification already on screen, closed before anything is shown. */
+  /** The tag of a copy of this notification on screen, which this one replaces or, dismissed, closes. */
   closeTag?: string;
   /** Reports the notification received to the app, once it is shown. */
   received?: () => Promise<void>;
@@ -257,8 +278,11 @@ const generic = async (
   scope: PushNotificationScope,
   report?: () => Promise<unknown>,
 ): Promise<Fetched> => {
-  await closeTagged(scope, GENERIC_TAG);
-  return { payload: { title: 'New notification', options: { tag: GENERIC_TAG } }, report };
+  if (!replacesByTag(scope)) await closeTagged(scope, GENERIC_TAG);
+  return {
+    payload: { title: 'New notification', options: replacing(scope, { tag: GENERIC_TAG }) },
+    report,
+  };
 };
 
 const globalScope = (): PushNotificationScope => globalThis as unknown as PushNotificationScope;
@@ -280,13 +304,16 @@ async function fetchForPush(
       });
     }
 
-    if (outcome.closeTag !== undefined) await closeTagged(scope, outcome.closeTag);
     const { shown, received, clear } = outcome;
+    // A dismissed notification is closed everywhere; one being replaced only where the tag is ignored.
+    if (outcome.closeTag !== undefined && (shown === undefined || !replacesByTag(scope))) {
+      await closeTagged(scope, outcome.closeTag);
+    }
     if (shown === undefined) {
       return await generic(scope, clear === undefined ? undefined : () => clear(outcome.notShown));
     }
     return {
-      payload: { title: shown.title, options: shown.options },
+      payload: { title: shown.title, options: replacing(scope, shown.options) },
       report: () => Promise.all([received?.(), clear?.()]),
     };
   } catch (error) {

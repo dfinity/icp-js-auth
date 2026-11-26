@@ -40,11 +40,17 @@ const GENERIC = {
   options: { tag: 'ii-notification' },
 };
 
-function fakeScope() {
+const SAFARI =
+  'Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Mobile/15E148 Safari/604.1';
+const CHROME =
+  'Mozilla/5.0 (Linux; Android 15) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Mobile Safari/537.36';
+
+function fakeScope(userAgent = CHROME) {
   const getNotifications = vi.fn(async (): Promise<{ tag: string; close(): void }[]> => []);
   return {
     scope: {
       location: { origin: 'https://app.example.com' },
+      navigator: { userAgent },
       registration: { getNotifications },
     },
     getNotifications,
@@ -163,7 +169,7 @@ describe('fetchPushNotification', () => {
   });
 
   it('closes an earlier generic notification before answering another, since iOS ignores the tag', async () => {
-    const { scope, getNotifications } = fakeScope();
+    const { scope, getNotifications } = fakeScope(SAFARI);
     const close = vi.fn();
     getNotifications.mockResolvedValue([{ tag: 'ii-notification', close }]);
 
@@ -283,6 +289,7 @@ describe('fetchPushNotification', () => {
     expect(notification.options).toEqual({
       body: 'Notifications will show up here.',
       tag: 'ii-notification:probe',
+      renotify: true,
     });
     await notification.settled();
     removeOf(remove, 4);
@@ -345,6 +352,7 @@ describe('fetchPushNotification', () => {
         body: 'There',
         tag: 'ii-notification:aaaaa-aa:5',
         data: { canisterId: 'aaaaa-aa', id: '5', url: 'https://app.example.com/inbox' },
+        renotify: true,
       });
     });
 
@@ -365,19 +373,37 @@ describe('fetchPushNotification', () => {
       removeOf(remove, 3);
     });
 
-    it('closes a copy of the same notification already on screen before answering it', async () => {
+    it('closes a copy of the same notification already on screen before answering it, since iOS ignores the tag', async () => {
       const { inbox } = fakeApp([{ title: 'Hi', body: 'There', url: [] }]);
-      const { scope, getNotifications } = fakeScope();
+      const { scope, getNotifications } = fakeScope(SAFARI);
       const close = vi.fn();
       getNotifications.mockResolvedValue([{ tag: 'ii-notification:aaaaa-aa:5', close }]);
 
-      await fetchAndSettle(
+      const notification = await fetchAndSettle(
         source(async () => inbox),
         push({ inbox_notification_id: 3 }),
         scope,
       );
 
       expect(close).toHaveBeenCalled();
+      expect(notification.options).not.toHaveProperty('renotify');
+    });
+
+    it('replaces a copy of the same notification in place where the tag is honoured, and renotifies', async () => {
+      const { inbox } = fakeApp([{ title: 'Hi', body: 'There', url: [] }]);
+      const { scope, getNotifications } = fakeScope(CHROME);
+
+      const notification = await fetchAndSettle(
+        source(async () => inbox),
+        push({ inbox_notification_id: 3 }),
+        scope,
+      );
+
+      expect(getNotifications).not.toHaveBeenCalled();
+      expect(notification.options).toMatchObject({
+        tag: 'ii-notification:aaaaa-aa:5',
+        renotify: true,
+      });
     });
 
     it('answers the generic notification, and clears the entry as rejected, where the canister rejects the call', async () => {
