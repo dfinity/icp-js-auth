@@ -48,8 +48,15 @@ export interface PushNotificationData {
 /** What to show for one push. */
 export interface NotificationPayload {
   title: string;
-  /** Spread into `showNotification`'s options before the app's own. */
-  options: NotificationOptions & { renotify?: boolean };
+  /**
+   * Spread into `showNotification`'s options before the app's own. `actions`
+   * is empty, which keeps Chrome on Android from adding its own button to
+   * turn the site's notifications off; an app's own actions replace it.
+   */
+  options: NotificationOptions & {
+    renotify?: boolean;
+    actions?: { action: string; title: string }[];
+  };
 }
 
 /** The part of a service worker's `notificationclick` event {@link AuthClient.markNotificationOpened} reads. */
@@ -410,7 +417,7 @@ export async function fetchPushNotificationPayload(
       reporting.catch(() => undefined);
     }
   }
-  return payload;
+  return { title: payload.title, options: { ...payload.options, actions: [] } };
 }
 
 /** The app's notification a click names, or `undefined` where its data is not one this library put there. */

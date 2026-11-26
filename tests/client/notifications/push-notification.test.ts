@@ -38,7 +38,7 @@ function fakeService(answers: Partial<PwaNotificationService>): PwaNotificationS
 
 const GENERIC = {
   title: 'New notification',
-  options: { tag: 'ii-notification' },
+  options: { tag: 'ii-notification', actions: [] },
 };
 
 const SAFARI =
@@ -293,6 +293,7 @@ describe('fetchPushNotification', () => {
       tag: 'ii-notification:probe',
       data: { show: true },
       renotify: true,
+      actions: [],
     });
     await notification.settled();
     removeOf(remove, 4);
@@ -364,6 +365,7 @@ describe('fetchPushNotification', () => {
           show: true,
         },
         renotify: true,
+        actions: [],
       });
     });
 

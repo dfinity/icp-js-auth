@@ -1356,6 +1356,10 @@ export class AuthClient {
    * which wants a notification for every push, always gets `true`, and a
    * dismissed notification is shown again, quietly, under its tag.
    *
+   * `options.actions` is empty, which keeps Chrome on Android from adding its
+   * own button to turn the site's notifications off. Pass the app's own
+   * actions after the payload's options to replace it.
+   *
    * @param event - The service worker's `push` event.
    * @returns The title and options to pass to `showNotification`.
    * @throws {SessionGoneError} Where this origin holds no live session.
