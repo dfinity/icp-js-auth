@@ -1,6 +1,6 @@
 import { Delegation, DelegationChain, Ed25519KeyIdentity } from '@icp-sdk/core/identity';
 import { Principal } from '@icp-sdk/core/principal';
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { SessionGoneError } from '../../../src/client/session/app-delegation-source.ts';
 import {
@@ -182,6 +182,10 @@ describe('assertChainReaches', () => {
 });
 
 describe('SessionMinter.mint', () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
   // The constructor is private so nothing builds a minter without an agent, and
   // what the canister's answers make `mint` do needs no agent to test.
   const over = (service: unknown): SessionMinter =>
@@ -190,33 +194,53 @@ describe('SessionMinter.mint', () => {
   const prepared = { Ok: { user_key: accountKey.getPublicKey().toDer(), expiration: 1n } };
   const appKey = Ed25519KeyIdentity.generate().getPublicKey().toDer();
 
-  it('prepares again when the canister signed nothing for what it prepared', async () => {
+  it('fetches again, for the same prepare, while the query finds nothing yet', async () => {
+    vi.useFakeTimers();
     let gets = 0;
     const service = {
       app_prepare_delegation: vi.fn(async () => prepared),
       app_get_delegation: vi.fn(async () => {
         gets += 1;
-        return gets === 1 ? { Err: { NoSuchDelegation: null } } : { Ok: signed() };
+        return gets < 3 ? { Err: { NoSuchDelegation: null } } : { Ok: signed() };
       }),
       app_revoke_session: vi.fn(async () => ({ Ok: null })),
     };
 
-    await expect(over(service).mint(appKey)).resolves.toBeInstanceOf(DelegationChain);
+    const minting = over(service).mint(appKey);
+    await vi.runAllTimersAsync();
 
-    // The whole pair again, not just the fetch: a new expiration is the point.
-    expect(service.app_prepare_delegation).toHaveBeenCalledTimes(2);
-    expect(service.app_get_delegation).toHaveBeenCalledTimes(2);
+    await expect(minting).resolves.toBeInstanceOf(DelegationChain);
+    // A replica behind the prepare is waited out, not prepared around.
+    expect(service.app_prepare_delegation).toHaveBeenCalledTimes(1);
+    expect(service.app_get_delegation).toHaveBeenCalledTimes(3);
   });
 
-  it('gives up after the second attempt rather than pursuing it', async () => {
+  it('prepares again once the fetches run out, and gives up after that', async () => {
+    vi.useFakeTimers();
     const service = {
       app_prepare_delegation: vi.fn(async () => prepared),
       app_get_delegation: vi.fn(async () => ({ Err: { NoSuchDelegation: null } })),
       app_revoke_session: vi.fn(async () => ({ Ok: null })),
     };
 
-    await expect(over(service).mint(appKey)).rejects.toThrow(/signed no delegation/);
+    const minting = over(service).mint(appKey);
+    const failed = expect(minting).rejects.toThrow(/signed no delegation/);
+    await vi.runAllTimersAsync();
+    await failed;
+
     expect(service.app_prepare_delegation).toHaveBeenCalledTimes(2);
+    expect(service.app_get_delegation).toHaveBeenCalledTimes(16);
+  });
+
+  it('does not fetch again for a session that is gone', async () => {
+    const service = {
+      app_prepare_delegation: vi.fn(async () => prepared),
+      app_get_delegation: vi.fn(async () => ({ Err: { NoSuchSession: null } })),
+      app_revoke_session: vi.fn(async () => ({ Ok: null })),
+    };
+
+    await expect(over(service).mint(appKey)).rejects.toBeInstanceOf(SessionGoneError);
+    expect(service.app_get_delegation).toHaveBeenCalledTimes(1);
   });
 
   it('does not retry a session that is gone, which another prepare cannot fix', async () => {

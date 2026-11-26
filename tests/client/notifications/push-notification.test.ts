@@ -1,4 +1,5 @@
 import { Actor, AnonymousIdentity, HttpAgent, RejectError } from '@icp-sdk/core/agent';
+import { IDL } from '@icp-sdk/core/candid';
 import { Principal } from '@icp-sdk/core/principal';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { AuthClient } from '../../../src/client/auth-client.ts';
@@ -37,7 +38,7 @@ function fakeService(answers: Partial<PwaNotificationService>): PwaNotificationS
 
 const GENERIC = {
   title: 'New notification',
-  options: { tag: 'ii-notification' },
+  options: { tag: 'ii-notification', actions: [] },
 };
 
 const SAFARI =
@@ -45,13 +46,14 @@ const SAFARI =
 const CHROME =
   'Mozilla/5.0 (Linux; Android 15) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Mobile Safari/537.36';
 
-function fakeScope(userAgent = CHROME) {
+function fakeScope(userAgent = CHROME, focused = false) {
   const getNotifications = vi.fn(async (): Promise<{ tag: string; close(): void }[]> => []);
   return {
     scope: {
       location: { origin: 'https://app.example.com' },
       navigator: { userAgent },
       registration: { getNotifications },
+      clients: { matchAll: vi.fn(async () => [{ focused }]) },
     },
     getNotifications,
   };
@@ -82,10 +84,10 @@ const fetchAndSettle = async (
   from: PushNotificationSource,
   event: ReturnType<typeof pushOf>,
   scope: PushNotificationScope,
-) => ({
-  ...(await fetchPushNotificationPayload(from, event, scope)),
-  settled: () => Promise.all(event.held).then(() => undefined),
-});
+) => {
+  const payload = await fetchPushNotificationPayload(from, event, scope);
+  return { ...payload, settled: () => Promise.all(event.held).then(() => undefined) };
+};
 
 const removeOf = (remove: ReturnType<typeof vi.fn>, id: number, notShown: unknown[] = []) =>
   expect(remove).toHaveBeenCalledWith({
@@ -289,7 +291,9 @@ describe('fetchPushNotification', () => {
     expect(notification.options).toEqual({
       body: 'Notifications will show up here.',
       tag: 'ii-notification:probe',
+      data: { show: true },
       renotify: true,
+      actions: [],
     });
     await notification.settled();
     removeOf(remove, 4);
@@ -338,7 +342,9 @@ describe('fetchPushNotification', () => {
     });
 
     it("answers the app's notification with the tag and the data its canister sent", async () => {
-      const { inbox } = fakeApp([{ title: 'Hi', body: 'There', url: ['/inbox'] }]);
+      const { inbox } = fakeApp([
+        { title: 'Hi', body: 'There', url: ['/inbox'], metadata: ['user-42'], dismissed: [] },
+      ]);
       const { scope } = fakeScope();
 
       const notification = await fetchAndSettle(
@@ -351,13 +357,192 @@ describe('fetchPushNotification', () => {
       expect(notification.options).toEqual({
         body: 'There',
         tag: 'ii-notification:aaaaa-aa:5',
-        data: { canisterId: 'aaaaa-aa', id: '5', url: 'https://app.example.com/inbox' },
+        data: {
+          canisterId: 'aaaaa-aa',
+          id: '5',
+          url: 'https://app.example.com/inbox',
+          metadata: 'user-42',
+          show: true,
+        },
         renotify: true,
+        actions: [],
       });
     });
 
+    it('leaves out the metadata where the canister answers none', async () => {
+      const { inbox } = fakeApp([
+        { title: 'Hi', body: 'There', url: [], metadata: [], dismissed: [] },
+      ]);
+      const { scope } = fakeScope();
+
+      const notification = await fetchAndSettle(
+        source(async () => inbox),
+        push({ inbox_notification_id: 3 }),
+        scope,
+      );
+
+      expect(notification.options.data.metadata).toBeUndefined();
+    });
+
+    it('reads the content of a canister whose library answers no metadata field', async () => {
+      const { inbox } = fakeApp([]);
+      const { scope } = fakeScope();
+      const content = vi.fn(async () => {
+        const [factory] = vi.mocked(Actor.createActor).mock.calls[0];
+        const service = factory({ IDL }) as IDL.ServiceClass;
+        const [, query] = service._fields.find(
+          ([name]) => name === '_internet_identity_notification_content',
+        ) as [string, IDL.FuncClass];
+        const reply = IDL.encode(
+          [IDL.Opt(IDL.Record({ title: IDL.Text, body: IDL.Text, url: IDL.Opt(IDL.Text) }))],
+          [[{ title: 'Hi', body: 'There', url: ['/inbox'] }]],
+        );
+        return IDL.decode(query.retTypes, reply)[0];
+      });
+      vi.mocked(Actor.createActor).mockReturnValue({
+        _internet_identity_notification_content: content,
+        _internet_identity_notification_received: vi.fn(async () => undefined),
+      } as never);
+
+      const notification = await fetchAndSettle(
+        source(async () => inbox),
+        push({ inbox_notification_id: 3 }),
+        scope,
+      );
+
+      expect(notification.title).toBe('Hi');
+      expect(notification.options.data).toEqual({
+        canisterId: 'aaaaa-aa',
+        id: '5',
+        url: 'https://app.example.com/inbox',
+        show: true,
+      });
+      expect(notification.options.data.metadata).toBeUndefined();
+    });
+
+    it('shows nothing for a notification the app dismissed, where the tag is honoured', async () => {
+      const { inbox, received, remove } = fakeApp([
+        { title: 'Hi', body: 'There', url: [], metadata: [], dismissed: [true] },
+      ]);
+      const { scope, getNotifications } = fakeScope(CHROME);
+      const event = push({ inbox_notification_id: 3 });
+
+      const payload = await fetchPushNotificationPayload(
+        source(async () => inbox),
+        event,
+        scope,
+      );
+      await Promise.all(event.held);
+
+      expect(payload.options.data.show).toBe(false);
+      // A copy on screen stays as it is, so the list is not even read.
+      expect(getNotifications).not.toHaveBeenCalled();
+      expect(received).not.toHaveBeenCalled();
+      removeOf(remove, 3);
+    });
+
+    it("shows a dismissed notification again, quietly, in Apple's WebKit, which ignores the tag", async () => {
+      const { inbox, received } = fakeApp([
+        { title: 'Hi', body: 'There', url: [], metadata: [], dismissed: [true] },
+      ]);
+      const { scope, getNotifications } = fakeScope(SAFARI);
+      const close = vi.fn();
+      getNotifications.mockResolvedValue([{ tag: 'ii-notification:aaaaa-aa:5', close }]);
+
+      const notification = await fetchAndSettle(
+        source(async () => inbox),
+        push({ inbox_notification_id: 3 }),
+        scope,
+      );
+      await notification.settled();
+
+      expect(close).toHaveBeenCalled();
+      expect(notification.title).toBe('Hi');
+      expect(notification.options).toMatchObject({
+        body: 'There',
+        tag: 'ii-notification:aaaaa-aa:5',
+        silent: true,
+        data: { show: true },
+      });
+      expect(received).not.toHaveBeenCalled();
+    });
+
+    it('reads a dismissal from a canister that answers it as a plain bool', async () => {
+      const { inbox } = fakeApp([]);
+      const { scope } = fakeScope(CHROME);
+      const content = vi.fn(async () => {
+        const [factory] = vi.mocked(Actor.createActor).mock.calls[0];
+        const service = factory({ IDL }) as IDL.ServiceClass;
+        const [, query] = service._fields.find(
+          ([name]) => name === '_internet_identity_notification_content',
+        ) as [string, IDL.FuncClass];
+        const reply = IDL.encode(
+          [
+            IDL.Opt(
+              IDL.Record({
+                title: IDL.Text,
+                body: IDL.Text,
+                url: IDL.Opt(IDL.Text),
+                metadata: IDL.Opt(IDL.Text),
+                dismissed: IDL.Bool,
+              }),
+            ),
+          ],
+          [[{ title: 'Hi', body: 'There', url: [], metadata: [], dismissed: true }]],
+        );
+        return IDL.decode(query.retTypes, reply)[0];
+      });
+      vi.mocked(Actor.createActor).mockReturnValue({
+        _internet_identity_notification_content: content,
+        _internet_identity_notification_received: vi.fn(async () => undefined),
+      } as never);
+
+      const payload = await fetchPushNotificationPayload(
+        source(async () => inbox),
+        push({ inbox_notification_id: 3 }),
+        scope,
+      );
+
+      expect(payload.options.data.show).toBe(false);
+    });
+
+    it('shows nothing while a window of the app has focus here, where the browser allows it', async () => {
+      const { inbox, received, remove } = fakeApp([
+        { title: 'Hi', body: 'There', url: [], metadata: [], dismissed: [] },
+      ]);
+      const { scope } = fakeScope(CHROME, true);
+
+      const notification = await fetchAndSettle(
+        source(async () => inbox),
+        push({ inbox_notification_id: 3 }),
+        scope,
+      );
+      await notification.settled();
+
+      expect(notification.options.data.show).toBe(false);
+      expect(received).not.toHaveBeenCalled();
+      removeOf(remove, 3);
+    });
+
+    it("shows it while the app has focus in Apple's WebKit, which wants a notification for every push", async () => {
+      const { inbox } = fakeApp([
+        { title: 'Hi', body: 'There', url: [], metadata: [], dismissed: [] },
+      ]);
+      const { scope } = fakeScope(SAFARI, true);
+
+      const notification = await fetchAndSettle(
+        source(async () => inbox),
+        push({ inbox_notification_id: 3 }),
+        scope,
+      );
+
+      expect(notification.options.data.show).toBe(true);
+    });
+
     it('reports it received and clears the entry as it resolves, under waitUntil', async () => {
-      const { inbox, received, remove } = fakeApp([{ title: 'Hi', body: 'There', url: [] }]);
+      const { inbox, received, remove } = fakeApp([
+        { title: 'Hi', body: 'There', url: [], metadata: [], dismissed: [] },
+      ]);
       const { scope } = fakeScope();
 
       const notification = await fetchAndSettle(
@@ -374,7 +559,9 @@ describe('fetchPushNotification', () => {
     });
 
     it('closes a copy of the same notification already on screen before answering it, since iOS ignores the tag', async () => {
-      const { inbox } = fakeApp([{ title: 'Hi', body: 'There', url: [] }]);
+      const { inbox } = fakeApp([
+        { title: 'Hi', body: 'There', url: [], metadata: [], dismissed: [] },
+      ]);
       const { scope, getNotifications } = fakeScope(SAFARI);
       const close = vi.fn();
       getNotifications.mockResolvedValue([{ tag: 'ii-notification:aaaaa-aa:5', close }]);
@@ -390,7 +577,9 @@ describe('fetchPushNotification', () => {
     });
 
     it('replaces a copy of the same notification in place where the tag is honoured, and renotifies', async () => {
-      const { inbox } = fakeApp([{ title: 'Hi', body: 'There', url: [] }]);
+      const { inbox } = fakeApp([
+        { title: 'Hi', body: 'There', url: [], metadata: [], dismissed: [] },
+      ]);
       const { scope, getNotifications } = fakeScope(CHROME);
 
       const notification = await fetchAndSettle(
@@ -446,7 +635,9 @@ describe('fetchPushNotification', () => {
 
     it('never shows an answer that arrives after the deadline, and clears it as unreachable', async () => {
       vi.useFakeTimers();
-      const { inbox, received, remove } = fakeApp([{ title: 'Hi', body: 'There', url: [] }]);
+      const { inbox, received, remove } = fakeApp([
+        { title: 'Hi', body: 'There', url: [], metadata: [], dismissed: [] },
+      ]);
       const { scope } = fakeScope();
       let release: () => void = () => undefined;
 

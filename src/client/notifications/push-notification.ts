@@ -35,13 +35,28 @@ export interface PushNotificationData {
   id: string;
   /** Where a click should go, where the canister named a URL on this origin. */
   url?: string;
+  /** App-defined data the canister attached, for the app's own service worker. */
+  metadata?: string;
+  /**
+   * Whether to show it. `false` where the app dismissed it or a window of the
+   * app has focus on this device, and the browser allows a push that shows
+   * nothing: a notification is for when the app is not in view.
+   */
+  show: boolean;
 }
 
 /** What to show for one push. */
 export interface NotificationPayload {
   title: string;
-  /** Spread into `showNotification`'s options before the app's own. */
-  options: NotificationOptions & { renotify?: boolean };
+  /**
+   * Spread into `showNotification`'s options before the app's own. `actions`
+   * is empty, which keeps Chrome on Android from adding its own button to
+   * turn the site's notifications off; an app's own actions replace it.
+   */
+  options: NotificationOptions & {
+    renotify?: boolean;
+    actions?: { action: string; title: string }[];
+  };
 }
 
 /** The part of a service worker's `notificationclick` event {@link AuthClient.markNotificationOpened} reads. */
@@ -68,6 +83,10 @@ export interface PushNotificationScope {
   readonly registration?: {
     getNotifications(): Promise<{ readonly tag: string; close(): void }[]>;
   };
+  /** Absent outside a service worker, where no window of the app is in view. */
+  readonly clients?: {
+    matchAll(options: { type: 'window' }): Promise<readonly { readonly focused: boolean }[]>;
+  };
 }
 
 /** A notification's text, as the app's canister answers for it. */
@@ -75,6 +94,9 @@ interface NotificationContent {
   title: string;
   body: string;
   url: [] | [string];
+  metadata: [] | [string];
+  /** Absent from a canister on a library that predates dismissals it keeps. */
+  dismissed: [] | [boolean];
 }
 
 /** The calls made on the app's canister. */
@@ -89,7 +111,17 @@ const appIdlFactory: IDL.InterfaceFactory = () =>
   IDL.Service({
     _internet_identity_notification_content: IDL.Func(
       [IDL.Nat64],
-      [IDL.Opt(IDL.Record({ title: IDL.Text, body: IDL.Text, url: IDL.Opt(IDL.Text) }))],
+      [
+        IDL.Opt(
+          IDL.Record({
+            title: IDL.Text,
+            body: IDL.Text,
+            url: IDL.Opt(IDL.Text),
+            metadata: IDL.Opt(IDL.Text),
+            dismissed: IDL.Opt(IDL.Bool),
+          }),
+        ),
+      ],
       ['query'],
     ),
     _internet_identity_notification_received: IDL.Func([IDL.Nat64], [], []),
@@ -160,6 +192,18 @@ const replacing = (
 ): NotificationPayload['options'] =>
   replacesByTag(scope) ? { ...options, renotify: true } : options;
 
+/** Whether a window of the app has focus on this device. */
+const isAppInView = async (scope: PushNotificationScope): Promise<boolean> => {
+  const windows = await scope.clients?.matchAll({ type: 'window' }).catch(() => []);
+  return (windows ?? []).some((window) => window.focused);
+};
+
+/** The payload with its data's `show` set. */
+const showing = (payload: NotificationPayload, show: boolean): NotificationPayload => ({
+  title: payload.title,
+  options: { ...payload.options, data: { ...payload.options.data, show } },
+});
+
 /** Closes what is on screen under `tag`. */
 const closeTagged = async (scope: PushNotificationScope, tag: string): Promise<void> => {
   const shown = await scope.registration?.getNotifications().catch(() => []);
@@ -186,6 +230,11 @@ const notShownReasonOf = (error: unknown): NotShownReason =>
 interface Outcome {
   /** The app's notification, or the generic one where absent. */
   shown?: { title: string; options: NotificationOptions };
+  /**
+   * The app dismissed it after Internet Identity took it. What is on screen is
+   * left alone, where the browser allows a push that shows nothing.
+   */
+  dismissed?: { title: string; options: NotificationOptions };
   /** The tag of a copy of this notification on screen, which this one replaces or, dismissed, closes. */
   closeTag?: string;
   /** Reports the notification received to the app, once it is shown. */
@@ -257,7 +306,16 @@ async function resolvePush(
     canisterId: entry.canister_id.toText(),
     id: entry.id.toString(),
     url: sameOriginUrl(shown.url[0], scope.location.origin),
+    metadata: shown.metadata[0],
+    show: true,
   };
+  if (shown.dismissed[0] === true) {
+    return {
+      dismissed: { title: shown.title, options: { body: shown.body, tag, data, silent: true } },
+      closeTag: tag,
+      clear,
+    };
+  }
   return {
     shown: { title: shown.title, options: { body: shown.body, tag, data } },
     closeTag: tag,
@@ -280,7 +338,10 @@ const generic = async (
 ): Promise<Fetched> => {
   if (!replacesByTag(scope)) await closeTagged(scope, GENERIC_TAG);
   return {
-    payload: { title: 'New notification', options: replacing(scope, { tag: GENERIC_TAG }) },
+    payload: {
+      title: 'New notification',
+      options: replacing(scope, { tag: GENERIC_TAG, data: { show: true } }),
+    },
     report,
   };
 };
@@ -304,17 +365,30 @@ async function fetchForPush(
       });
     }
 
-    const { shown, received, clear } = outcome;
-    // A dismissed notification is closed everywhere; one being replaced only where the tag is ignored.
+    const { shown, dismissed, received, clear } = outcome;
+    if (dismissed !== undefined) {
+      // Where the tag is honoured, a copy on screen stays as it is and the push
+      // shows nothing. Apple's WebKit wants a notification for every push, so
+      // there the copy is shown again, quietly, as it was.
+      if (replacesByTag(scope)) return { payload: showing(dismissed, false), report: clear };
+      if (outcome.closeTag !== undefined) await closeTagged(scope, outcome.closeTag);
+      return { payload: showing(dismissed, true), report: clear };
+    }
+    // Gone from the canister (an earlier library, or expired) is closed everywhere;
+    // one being replaced only where the tag is ignored.
     if (outcome.closeTag !== undefined && (shown === undefined || !replacesByTag(scope))) {
       await closeTagged(scope, outcome.closeTag);
     }
     if (shown === undefined) {
       return await generic(scope, clear === undefined ? undefined : () => clear(outcome.notShown));
     }
+    // The app in view on this device needs no notification about itself, where
+    // the browser allows a push that shows nothing. Not shown, so not received.
+    const inView = replacesByTag(scope) && (await isAppInView(scope));
+    const payload = { title: shown.title, options: replacing(scope, shown.options) };
     return {
-      payload: { title: shown.title, options: replacing(scope, shown.options) },
-      report: () => Promise.all([received?.(), clear?.()]),
+      payload: showing(payload, !inView),
+      report: inView ? clear : () => Promise.all([received?.(), clear?.()]),
     };
   } catch (error) {
     if (error instanceof SessionGoneError) throw error;
@@ -343,7 +417,7 @@ export async function fetchPushNotificationPayload(
       reporting.catch(() => undefined);
     }
   }
-  return payload;
+  return { title: payload.title, options: { ...payload.options, actions: [] } };
 }
 
 /** The app's notification a click names, or `undefined` where its data is not one this library put there. */
