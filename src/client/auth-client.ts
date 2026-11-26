@@ -1349,8 +1349,15 @@ export class AuthClient {
    * with the page's options. Where the content cannot be read in time, it
    * answers a generic notification, since iOS requires one for every push.
    *
+   * Where the app dismissed the notification after Internet Identity took it,
+   * it answers `undefined`: show nothing, and whatever is on screen stays as it
+   * is. Only where the browser honours the notification tag; Apple's WebKit,
+   * which wants a notification for every push, gets the dismissed one again,
+   * quietly, under its tag.
+   *
    * @param event - The service worker's `push` event.
-   * @returns The title and options to pass to `showNotification`.
+   * @returns The title and options to pass to `showNotification`, or
+   *   `undefined` for nothing to show.
    * @throws {SessionGoneError} Where this origin holds no live session.
    * @example
    * // service-worker.ts
@@ -1361,11 +1368,12 @@ export class AuthClient {
    * self.addEventListener('push', (event) => {
    *   event.waitUntil((async () => {
    *     const payload = await authClient.fetchNotificationPayload(event);
+   *     if (payload === undefined) return; // dismissed: leave what is on screen alone
    *     await self.registration.showNotification(payload.title, { ...payload.options });
    *   })());
    * });
    */
-  fetchNotificationPayload(event: NotificationPushEvent): Promise<NotificationPayload> {
+  fetchNotificationPayload(event: NotificationPushEvent): Promise<NotificationPayload | undefined> {
     return fetchPushNotificationPayload(this.#pushNotificationSource(), event);
   }
 

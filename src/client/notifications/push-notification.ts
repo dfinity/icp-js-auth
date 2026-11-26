@@ -78,6 +78,8 @@ interface NotificationContent {
   body: string;
   url: [] | [string];
   metadata: [] | [string];
+  /** Absent from a canister on a library that predates dismissals it keeps. */
+  dismissed: [] | [boolean];
 }
 
 /** The calls made on the app's canister. */
@@ -99,6 +101,7 @@ const appIdlFactory: IDL.InterfaceFactory = () =>
             body: IDL.Text,
             url: IDL.Opt(IDL.Text),
             metadata: IDL.Opt(IDL.Text),
+            dismissed: IDL.Opt(IDL.Bool),
           }),
         ),
       ],
@@ -198,6 +201,11 @@ const notShownReasonOf = (error: unknown): NotShownReason =>
 interface Outcome {
   /** The app's notification, or the generic one where absent. */
   shown?: { title: string; options: NotificationOptions };
+  /**
+   * The app dismissed it after Internet Identity took it. What is on screen is
+   * left alone, where the browser allows a push that shows nothing.
+   */
+  dismissed?: { title: string; options: NotificationOptions };
   /** The tag of a copy of this notification on screen, which this one replaces or, dismissed, closes. */
   closeTag?: string;
   /** Reports the notification received to the app, once it is shown. */
@@ -271,6 +279,13 @@ async function resolvePush(
     url: sameOriginUrl(shown.url[0], scope.location.origin),
     metadata: shown.metadata[0],
   };
+  if (shown.dismissed[0] === true) {
+    return {
+      dismissed: { title: shown.title, options: { body: shown.body, tag, data, silent: true } },
+      closeTag: tag,
+      clear,
+    };
+  }
   return {
     shown: { title: shown.title, options: { body: shown.body, tag, data } },
     closeTag: tag,
@@ -281,7 +296,8 @@ async function resolvePush(
 
 /** What to show for one push, and the reporting that follows it. */
 interface Fetched {
-  payload: NotificationPayload;
+  /** Nothing to show where the app dismissed it and the browser allows that. */
+  payload: NotificationPayload | undefined;
   /** Reports it received and clears its entry, or clears a late answer's entry. */
   report?: () => Promise<unknown>;
 }
@@ -317,8 +333,17 @@ async function fetchForPush(
       });
     }
 
-    const { shown, received, clear } = outcome;
-    // A dismissed notification is closed everywhere; one being replaced only where the tag is ignored.
+    const { shown, dismissed, received, clear } = outcome;
+    if (dismissed !== undefined) {
+      // Where the tag is honoured, a copy on screen stays as it is and the push
+      // shows nothing. Apple's WebKit wants a notification for every push, so
+      // there the copy is shown again, quietly, as it was.
+      if (replacesByTag(scope)) return { payload: undefined, report: clear };
+      if (outcome.closeTag !== undefined) await closeTagged(scope, outcome.closeTag);
+      return { payload: dismissed, report: clear };
+    }
+    // Gone from the canister (an earlier library, or expired) is closed everywhere;
+    // one being replaced only where the tag is ignored.
     if (outcome.closeTag !== undefined && (shown === undefined || !replacesByTag(scope))) {
       await closeTagged(scope, outcome.closeTag);
     }
@@ -343,7 +368,7 @@ export async function fetchPushNotificationPayload(
   source: PushNotificationSource,
   event: NotificationPushEvent,
   scope: PushNotificationScope = globalScope(),
-): Promise<NotificationPayload> {
+): Promise<NotificationPayload | undefined> {
   const { payload, report } = await fetchForPush(source, event, scope);
   if (report !== undefined) {
     const reporting = report().catch((error: unknown) => {
