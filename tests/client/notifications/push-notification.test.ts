@@ -46,13 +46,14 @@ const SAFARI =
 const CHROME =
   'Mozilla/5.0 (Linux; Android 15) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Mobile Safari/537.36';
 
-function fakeScope(userAgent = CHROME) {
+function fakeScope(userAgent = CHROME, focused = false) {
   const getNotifications = vi.fn(async (): Promise<{ tag: string; close(): void }[]> => []);
   return {
     scope: {
       location: { origin: 'https://app.example.com' },
       navigator: { userAgent },
       registration: { getNotifications },
+      clients: { matchAll: vi.fn(async () => [{ focused }]) },
     },
     getNotifications,
   };
@@ -85,7 +86,6 @@ const fetchAndSettle = async (
   scope: PushNotificationScope,
 ) => {
   const payload = await fetchPushNotificationPayload(from, event, scope);
-  if (payload === undefined) throw new Error('expected something to show');
   return { ...payload, settled: () => Promise.all(event.held).then(() => undefined) };
 };
 
@@ -291,6 +291,7 @@ describe('fetchPushNotification', () => {
     expect(notification.options).toEqual({
       body: 'Notifications will show up here.',
       tag: 'ii-notification:probe',
+      data: { show: true },
       renotify: true,
     });
     await notification.settled();
@@ -360,6 +361,7 @@ describe('fetchPushNotification', () => {
           id: '5',
           url: 'https://app.example.com/inbox',
           metadata: 'user-42',
+          show: true,
         },
         renotify: true,
       });
@@ -411,6 +413,7 @@ describe('fetchPushNotification', () => {
         canisterId: 'aaaaa-aa',
         id: '5',
         url: 'https://app.example.com/inbox',
+        show: true,
       });
       expect(notification.options.data.metadata).toBeUndefined();
     });
@@ -429,7 +432,7 @@ describe('fetchPushNotification', () => {
       );
       await Promise.all(event.held);
 
-      expect(payload).toBeUndefined();
+      expect(payload.options.data.show).toBe(false);
       // A copy on screen stays as it is, so the list is not even read.
       expect(getNotifications).not.toHaveBeenCalled();
       expect(received).not.toHaveBeenCalled();
@@ -457,6 +460,7 @@ describe('fetchPushNotification', () => {
         body: 'There',
         tag: 'ii-notification:aaaaa-aa:5',
         silent: true,
+        data: { show: true },
       });
       expect(received).not.toHaveBeenCalled();
     });
@@ -497,7 +501,40 @@ describe('fetchPushNotification', () => {
         scope,
       );
 
-      expect(payload).toBeUndefined();
+      expect(payload.options.data.show).toBe(false);
+    });
+
+    it('shows nothing while a window of the app has focus here, where the browser allows it', async () => {
+      const { inbox, received, remove } = fakeApp([
+        { title: 'Hi', body: 'There', url: [], metadata: [], dismissed: [] },
+      ]);
+      const { scope } = fakeScope(CHROME, true);
+
+      const notification = await fetchAndSettle(
+        source(async () => inbox),
+        push({ inbox_notification_id: 3 }),
+        scope,
+      );
+      await notification.settled();
+
+      expect(notification.options.data.show).toBe(false);
+      expect(received).not.toHaveBeenCalled();
+      removeOf(remove, 3);
+    });
+
+    it("shows it while the app has focus in Apple's WebKit, which wants a notification for every push", async () => {
+      const { inbox } = fakeApp([
+        { title: 'Hi', body: 'There', url: [], metadata: [], dismissed: [] },
+      ]);
+      const { scope } = fakeScope(SAFARI, true);
+
+      const notification = await fetchAndSettle(
+        source(async () => inbox),
+        push({ inbox_notification_id: 3 }),
+        scope,
+      );
+
+      expect(notification.options.data.show).toBe(true);
     });
 
     it('reports it received and clears the entry as it resolves, under waitUntil', async () => {

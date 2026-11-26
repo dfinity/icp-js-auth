@@ -1349,15 +1349,15 @@ export class AuthClient {
    * with the page's options. Where the content cannot be read in time, it
    * answers a generic notification, since iOS requires one for every push.
    *
-   * Where the app dismissed the notification after Internet Identity took it,
-   * it answers `undefined`: show nothing, and whatever is on screen stays as it
-   * is. Only where the browser honours the notification tag; Apple's WebKit,
-   * which wants a notification for every push, gets the dismissed one again,
-   * quietly, under its tag.
+   * `options.data.show` says whether to show it. It is `false` where the app
+   * dismissed the notification after Internet Identity took it, or a window of
+   * the app has focus on this device, and the browser allows a push that shows
+   * nothing: a notification is for when the app is not in view. Apple's WebKit,
+   * which wants a notification for every push, always gets `true`, and a
+   * dismissed notification is shown again, quietly, under its tag.
    *
    * @param event - The service worker's `push` event.
-   * @returns The title and options to pass to `showNotification`, or
-   *   `undefined` for nothing to show.
+   * @returns The title and options to pass to `showNotification`.
    * @throws {SessionGoneError} Where this origin holds no live session.
    * @example
    * // service-worker.ts
@@ -1368,12 +1368,12 @@ export class AuthClient {
    * self.addEventListener('push', (event) => {
    *   event.waitUntil((async () => {
    *     const payload = await authClient.fetchNotificationPayload(event);
-   *     if (payload === undefined) return; // dismissed: leave what is on screen alone
+   *     if (!payload.options.data.show) return; // dismissed, or the app is in view
    *     await self.registration.showNotification(payload.title, { ...payload.options });
    *   })());
    * });
    */
-  fetchNotificationPayload(event: NotificationPushEvent): Promise<NotificationPayload | undefined> {
+  fetchNotificationPayload(event: NotificationPushEvent): Promise<NotificationPayload> {
     return fetchPushNotificationPayload(this.#pushNotificationSource(), event);
   }
 

@@ -37,6 +37,12 @@ export interface PushNotificationData {
   url?: string;
   /** App-defined data the canister attached, for the app's own service worker. */
   metadata?: string;
+  /**
+   * Whether to show it. `false` where the app dismissed it or a window of the
+   * app has focus on this device, and the browser allows a push that shows
+   * nothing: a notification is for when the app is not in view.
+   */
+  show: boolean;
 }
 
 /** What to show for one push. */
@@ -69,6 +75,10 @@ export interface PushNotificationScope {
   /** Absent outside a service worker, where nothing on screen can be closed. */
   readonly registration?: {
     getNotifications(): Promise<{ readonly tag: string; close(): void }[]>;
+  };
+  /** Absent outside a service worker, where no window of the app is in view. */
+  readonly clients?: {
+    matchAll(options: { type: 'window' }): Promise<readonly { readonly focused: boolean }[]>;
   };
 }
 
@@ -175,6 +185,18 @@ const replacing = (
 ): NotificationPayload['options'] =>
   replacesByTag(scope) ? { ...options, renotify: true } : options;
 
+/** Whether a window of the app has focus on this device. */
+const isAppInView = async (scope: PushNotificationScope): Promise<boolean> => {
+  const windows = await scope.clients?.matchAll({ type: 'window' }).catch(() => []);
+  return (windows ?? []).some((window) => window.focused);
+};
+
+/** The payload with its data's `show` set. */
+const showing = (payload: NotificationPayload, show: boolean): NotificationPayload => ({
+  title: payload.title,
+  options: { ...payload.options, data: { ...payload.options.data, show } },
+});
+
 /** Closes what is on screen under `tag`. */
 const closeTagged = async (scope: PushNotificationScope, tag: string): Promise<void> => {
   const shown = await scope.registration?.getNotifications().catch(() => []);
@@ -278,6 +300,7 @@ async function resolvePush(
     id: entry.id.toString(),
     url: sameOriginUrl(shown.url[0], scope.location.origin),
     metadata: shown.metadata[0],
+    show: true,
   };
   if (shown.dismissed[0] === true) {
     return {
@@ -296,8 +319,7 @@ async function resolvePush(
 
 /** What to show for one push, and the reporting that follows it. */
 interface Fetched {
-  /** Nothing to show where the app dismissed it and the browser allows that. */
-  payload: NotificationPayload | undefined;
+  payload: NotificationPayload;
   /** Reports it received and clears its entry, or clears a late answer's entry. */
   report?: () => Promise<unknown>;
 }
@@ -309,7 +331,10 @@ const generic = async (
 ): Promise<Fetched> => {
   if (!replacesByTag(scope)) await closeTagged(scope, GENERIC_TAG);
   return {
-    payload: { title: 'New notification', options: replacing(scope, { tag: GENERIC_TAG }) },
+    payload: {
+      title: 'New notification',
+      options: replacing(scope, { tag: GENERIC_TAG, data: { show: true } }),
+    },
     report,
   };
 };
@@ -338,9 +363,9 @@ async function fetchForPush(
       // Where the tag is honoured, a copy on screen stays as it is and the push
       // shows nothing. Apple's WebKit wants a notification for every push, so
       // there the copy is shown again, quietly, as it was.
-      if (replacesByTag(scope)) return { payload: undefined, report: clear };
+      if (replacesByTag(scope)) return { payload: showing(dismissed, false), report: clear };
       if (outcome.closeTag !== undefined) await closeTagged(scope, outcome.closeTag);
-      return { payload: dismissed, report: clear };
+      return { payload: showing(dismissed, true), report: clear };
     }
     // Gone from the canister (an earlier library, or expired) is closed everywhere;
     // one being replaced only where the tag is ignored.
@@ -350,9 +375,13 @@ async function fetchForPush(
     if (shown === undefined) {
       return await generic(scope, clear === undefined ? undefined : () => clear(outcome.notShown));
     }
+    // The app in view on this device needs no notification about itself, where
+    // the browser allows a push that shows nothing. Not shown, so not received.
+    const inView = replacesByTag(scope) && (await isAppInView(scope));
+    const payload = { title: shown.title, options: replacing(scope, shown.options) };
     return {
-      payload: { title: shown.title, options: replacing(scope, shown.options) },
-      report: () => Promise.all([received?.(), clear?.()]),
+      payload: showing(payload, !inView),
+      report: inView ? clear : () => Promise.all([received?.(), clear?.()]),
     };
   } catch (error) {
     if (error instanceof SessionGoneError) throw error;
@@ -368,7 +397,7 @@ export async function fetchPushNotificationPayload(
   source: PushNotificationSource,
   event: NotificationPushEvent,
   scope: PushNotificationScope = globalScope(),
-): Promise<NotificationPayload | undefined> {
+): Promise<NotificationPayload> {
   const { payload, report } = await fetchForPush(source, event, scope);
   if (report !== undefined) {
     const reporting = report().catch((error: unknown) => {
