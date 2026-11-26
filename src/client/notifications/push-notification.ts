@@ -35,6 +35,8 @@ export interface PushNotificationData {
   id: string;
   /** Where a click should go, where the canister named a URL on this origin. */
   url?: string;
+  /** App-defined data the canister attached, for the app's own service worker. */
+  metadata?: string;
 }
 
 /** What to show for one push. */
@@ -75,6 +77,7 @@ interface NotificationContent {
   title: string;
   body: string;
   url: [] | [string];
+  metadata: [] | [string];
 }
 
 /** The calls made on the app's canister. */
@@ -89,7 +92,16 @@ const appIdlFactory: IDL.InterfaceFactory = () =>
   IDL.Service({
     _internet_identity_notification_content: IDL.Func(
       [IDL.Nat64],
-      [IDL.Opt(IDL.Record({ title: IDL.Text, body: IDL.Text, url: IDL.Opt(IDL.Text) }))],
+      [
+        IDL.Opt(
+          IDL.Record({
+            title: IDL.Text,
+            body: IDL.Text,
+            url: IDL.Opt(IDL.Text),
+            metadata: IDL.Opt(IDL.Text),
+          }),
+        ),
+      ],
       ['query'],
     ),
     _internet_identity_notification_received: IDL.Func([IDL.Nat64], [], []),
@@ -257,6 +269,7 @@ async function resolvePush(
     canisterId: entry.canister_id.toText(),
     id: entry.id.toString(),
     url: sameOriginUrl(shown.url[0], scope.location.origin),
+    metadata: shown.metadata[0],
   };
   return {
     shown: { title: shown.title, options: { body: shown.body, tag, data } },
