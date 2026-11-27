@@ -1022,6 +1022,7 @@ export class AuthClient {
         maxTimeToLive: options?.maxTimeToLive,
         maxTimeToIdle: options?.maxTimeToIdle,
         derivationOrigin: this.#options.derivationOrigin?.toString(),
+        installedApp: isSafariInstalledApp(),
       })),
     );
     void sessionChainPromise.catch(() => undefined);

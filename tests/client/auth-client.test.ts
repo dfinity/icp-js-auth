@@ -1076,6 +1076,31 @@ describe('AuthClient signIn', () => {
     expect(transport.requests[0].params?.icrc95DerivationOrigin).toBe('https://example.com');
   });
 
+  it('should say so where it signs in as an installed web app of Safari', async () => {
+    Object.defineProperty(navigator, 'standalone', { configurable: true, value: true });
+    try {
+      const client = track(new AuthClient());
+      const transport = FakeTransport.last();
+      handleSignIn(transport);
+
+      await client.signIn();
+
+      expect(transport.requests[0].params?.installedApp).toBe(true);
+    } finally {
+      Reflect.deleteProperty(navigator, 'standalone');
+    }
+  });
+
+  it('should omit installedApp where it signs in from the browser', async () => {
+    const client = track(new AuthClient());
+    const transport = FakeTransport.last();
+    handleSignIn(transport);
+
+    await client.signIn();
+
+    expect(transport.requests[0].params).not.toHaveProperty('installedApp');
+  });
+
   it('should persist the key and its delegation as one record after sign-in', async () => {
     const storage = spyStorage();
     const client = track(new AuthClient({ credentialStorage: storage }));
