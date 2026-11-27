@@ -443,6 +443,9 @@ export class AuthClient {
   // Set while a ceremony writes the record and installs the identity that goes
   // with it, so `getIdentity()` in between waits for the identity.
   #committing: Promise<void> | null = null;
+  // Set while a sign-in runs, so a consent answered in the same ceremony can
+  // wait for the session it needs.
+  #signingIn: Promise<Identity> | null = null;
   #stateStorage: StateStorage;
   #signer: Signer;
   // Set only in redirect mode, so the redirect-specific paths (nonce/key
@@ -970,9 +973,12 @@ export class AuthClient {
     // written to the store as though it were current. It asks the browser for
     // nothing, so it is safe to do first.
     this.#beginInteraction();
+    const signingIn = this.#runSignIn(options);
+    this.#signingIn = signingIn;
     try {
-      return await this.#runSignIn(options);
+      return await signingIn;
     } finally {
+      if (this.#signingIn === signingIn) this.#signingIn = null;
       this.#endInteraction();
     }
   }
@@ -1333,7 +1339,10 @@ export class AuthClient {
     }
     // A sign-in restores this origin's subscription, which Internet Identity
     // refuses while consent is missing: consent given after it restores it here.
+    // Answered in the same ceremony as a sign-in, consent can arrive before that
+    // sign-in has stored the session the restore is made as.
     if (status.granted) {
+      await this.#signingIn?.catch(() => undefined);
       await this.subscribeToNotifications({ interactive: false }).catch(() => undefined);
     }
     return status;
