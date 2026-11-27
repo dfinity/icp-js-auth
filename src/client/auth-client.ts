@@ -35,6 +35,7 @@ import {
   type PushNotificationSource,
 } from './notifications/push-notification.js';
 import {
+  forgetVapidKey,
   isSafariInstalledApp,
   NotificationsNotAllowedError,
   PwaNotifications,
@@ -1519,6 +1520,37 @@ export class AuthClient {
       }
     });
     return permission;
+  }
+
+  /**
+   * Turns this application's notifications off on this device, and keeps them
+   * off.
+   *
+   * A canister call made as the session, so it needs no ceremony and prompts for
+   * nothing. Internet Identity marks this device's subscription disabled: it
+   * sends nothing to it, and keeps its own path on this device quiet too. The
+   * service worker's push subscription is then unsubscribed, and the VAPID key
+   * {@link subscribeToNotifications} recorded on this origin is forgotten, so
+   * neither a later sign-in nor the `pushsubscriptionchange` listener subscribes
+   * again. The user's consent stays as it is, and so do their other devices.
+   *
+   * Call {@link subscribeToNotifications} from a tap to turn them back on.
+   * Where the call to Internet Identity fails, nothing on this device changes.
+   *
+   * @throws {SessionGoneError} Where this origin holds no live session.
+   * @example
+   * // A notifications toggle in the app's settings.
+   * toggle.addEventListener('change', async () => {
+   *   if (toggle.checked) await authClient.subscribeToNotifications();
+   *   else await authClient.unsubscribeFromNotifications();
+   * });
+   */
+  async unsubscribeFromNotifications(): Promise<void> {
+    await this.#queueSubscribe(async () => {
+      await (await this.#pwaNotifications()).disable();
+      await (await heldPushSubscription())?.unsubscribe();
+      await forgetVapidKey();
+    });
   }
 
   /**

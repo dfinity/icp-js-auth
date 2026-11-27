@@ -3097,12 +3097,14 @@ describe("AuthClient and this origin's push subscription", () => {
         ? undefined
         : { endpoint: held, isPastLimit: isPastLimit && held === registered },
     );
+    const disable = vi.fn(async () => undefined);
     const create = vi.spyOn(PwaNotifications, 'create').mockResolvedValue({
       prepare,
       set,
       registeredSubscription,
+      disable,
     } as unknown as PwaNotifications);
-    return { set, prepare, registeredSubscription, create };
+    return { set, prepare, registeredSubscription, disable, create };
   }
 
   /**
@@ -3190,6 +3192,87 @@ describe("AuthClient and this origin's push subscription", () => {
 
       await expect(client.subscribeToNotifications()).rejects.toThrow('interactive: false');
       expect(requestPermission).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('unsubscribeFromNotifications', () => {
+    it('disables this device at Internet Identity, unsubscribes it, and forgets the VAPID key', async () => {
+      const { subscription } = serviceWorker('granted');
+      const client = await signedIn('unsubscribes');
+      await saveVapidKey(VAPID);
+      const { disable, set } = fakeCalls('https://push.example/1');
+
+      await client.unsubscribeFromNotifications();
+
+      expect(disable).toHaveBeenCalledTimes(1);
+      expect(set).not.toHaveBeenCalled();
+      expect(subscription.unsubscribe).toHaveBeenCalled();
+      await expect(savedVapidKey()).resolves.toBeUndefined();
+    });
+
+    it('changes nothing on this device where Internet Identity refuses', async () => {
+      const { subscription } = serviceWorker('granted');
+      const client = await signedIn('unsubscribe-refused');
+      await saveVapidKey(VAPID);
+      const { disable } = fakeCalls('https://push.example/1');
+      disable.mockRejectedValue(new SessionGoneError());
+
+      await expect(client.unsubscribeFromNotifications()).rejects.toThrow(SessionGoneError);
+
+      expect(subscription.unsubscribe).not.toHaveBeenCalled();
+      await expect(savedVapidKey()).resolves.toEqual(VAPID);
+    });
+
+    it('throws SessionGoneError where this origin holds no session', async () => {
+      serviceWorker('granted');
+      const client = track(new AuthClient({ namespace: 'unsubscribe-signed-out' }));
+      const { disable } = fakeCalls();
+
+      await expect(client.unsubscribeFromNotifications()).rejects.toThrow(SessionGoneError);
+      expect(disable).not.toHaveBeenCalled();
+    });
+
+    it('is not undone by the pushsubscriptionchange listener', async () => {
+      const { getSubscription } = serviceWorker('granted');
+      const client = await signedIn('unsubscribe-then-subscription-change');
+      await saveVapidKey(VAPID);
+      const { create } = fakeCalls('https://push.example/1');
+      await client.unsubscribeFromNotifications();
+      getSubscription.mockResolvedValue(null);
+      create.mockClear();
+
+      await client.subscribeToNotifications({ interactive: false });
+
+      expect(create).not.toHaveBeenCalled();
+    });
+
+    it('is not undone by a later sign-in', async () => {
+      const { subscribe } = serviceWorker('granted');
+      const client = await signedIn('unsubscribe-then-sign-in');
+      await saveVapidKey(VAPID);
+      const { create, set } = fakeCalls('https://push.example/1');
+      await client.unsubscribeFromNotifications();
+      create.mockClear();
+
+      await signedIn('unsubscribe-then-sign-in-again');
+      await new Promise((resolve) => setTimeout(resolve, 0));
+
+      expect(create).not.toHaveBeenCalled();
+      expect(subscribe).not.toHaveBeenCalled();
+      expect(set).not.toHaveBeenCalled();
+    });
+
+    it('is undone by a tap on subscribeToNotifications', async () => {
+      serviceWorker('granted');
+      const client = await signedIn('unsubscribe-then-subscribe');
+      await saveVapidKey(VAPID);
+      const { set } = fakeCalls('https://push.example/1');
+      await client.unsubscribeFromNotifications();
+
+      await expect(client.subscribeToNotifications()).resolves.toBe('granted');
+
+      expect(set).toHaveBeenCalledTimes(1);
+      await expect(savedVapidKey()).resolves.toEqual(VAPID);
     });
   });
 

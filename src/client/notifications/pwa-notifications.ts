@@ -56,6 +56,12 @@ type SubscriptionError =
   | { EndpointInUse: null }
   | { InternalCanisterError: string };
 
+/** Why Internet Identity did not disable a subscription. */
+type DisableError =
+  | { NoSuchSession: null }
+  | { NoSuchFrontend: null }
+  | { InternalCanisterError: string };
+
 /** Why Internet Identity could not answer an inbox or status call. */
 type NotificationError = { NoSuchSession: null } | { InternalCanisterError: string };
 
@@ -100,7 +106,7 @@ interface FrontendRequest {
 /** The Internet Identity methods an installed app's subscription is made of. */
 export interface PwaNotificationService {
   app_prepare_pwa_webpush_subscription(
-    request: [] | [FrontendRequest],
+    request: FrontendRequest,
   ): Promise<
     | { Ok: { vapid_public_key: Uint8Array; transport_public_key: Uint8Array } }
     | { Pending: null }
@@ -109,7 +115,7 @@ export interface PwaNotificationService {
   app_set_pwa_webpush_subscription(
     request: FrontendRequest & { subscription: [] | [SealedSubscription] },
   ): Promise<{ Ok: null } | { Err: SubscriptionError }>;
-  app_get_pwa_webpush_subscription_status(request: [] | [FrontendRequest]): Promise<
+  app_get_pwa_webpush_subscription_status(request: FrontendRequest): Promise<
     | {
         Ok:
           | []
@@ -122,6 +128,9 @@ export interface PwaNotificationService {
       }
     | { Err: NotificationError }
   >;
+  app_disable_pwa_webpush_subscription(
+    request: FrontendRequest,
+  ): Promise<{ Ok: null } | { Err: DisableError }>;
   app_get_pwa_notification(request: { inbox_notification_id: bigint }): Promise<
     | {
         Ok: {
@@ -161,6 +170,11 @@ const idlFactory: IDL.InterfaceFactory = ({ IDL }) => {
     EndpointInUse: IDL.Null,
     InternalCanisterError: IDL.Text,
   });
+  const DisableError = IDL.Variant({
+    NoSuchSession: IDL.Null,
+    NoSuchFrontend: IDL.Null,
+    InternalCanisterError: IDL.Text,
+  });
   const NotificationError = IDL.Variant({
     NoSuchSession: IDL.Null,
     InternalCanisterError: IDL.Text,
@@ -175,7 +189,7 @@ const idlFactory: IDL.InterfaceFactory = ({ IDL }) => {
   const NotShownReason = IDL.Variant({ PayloadUnreachable: IDL.Null, PayloadRejected: IDL.Null });
   return IDL.Service({
     app_prepare_pwa_webpush_subscription: IDL.Func(
-      [IDL.Opt(FrontendRequest)],
+      [FrontendRequest],
       [
         IDL.Variant({
           Ok: IDL.Record({
@@ -206,7 +220,7 @@ const idlFactory: IDL.InterfaceFactory = ({ IDL }) => {
       [],
     ),
     app_get_pwa_webpush_subscription_status: IDL.Func(
-      [IDL.Opt(FrontendRequest)],
+      [FrontendRequest],
       [
         IDL.Variant({
           Ok: IDL.Opt(
@@ -219,6 +233,11 @@ const idlFactory: IDL.InterfaceFactory = ({ IDL }) => {
         }),
       ],
       ['query'],
+    ),
+    app_disable_pwa_webpush_subscription: IDL.Func(
+      [FrontendRequest],
+      [IDL.Variant({ Ok: IDL.Null, Err: DisableError })],
+      [],
     ),
     app_get_pwa_notification: IDL.Func(
       [IDL.Record({ inbox_notification_id: IDL.Nat64 })],
@@ -290,7 +309,8 @@ export class NotificationsNotAllowedError extends Error {
 }
 
 const unwrapSubscription = <T>(
-  result: { Ok: T } | { Err: PrepareError | SubscriptionError },
+  result: { Ok: T } | { Err: PrepareError | SubscriptionError | DisableError },
+  failed = 'Internet Identity could not register this push subscription',
 ): T => {
   if ('Ok' in result) return result.Ok;
   const error = result.Err;
@@ -304,9 +324,7 @@ const unwrapSubscription = <T>(
     throw new Error('Internet Identity no longer holds the key this subscription was sealed to');
   }
   const detail = error.InternalCanisterError;
-  throw new Error(
-    `Internet Identity could not register this push subscription${detail === '' ? '' : `: ${detail}`}`,
-  );
+  throw new Error(`${failed}${detail === '' ? '' : `: ${detail}`}`);
 };
 
 const unwrapNotification = <T>(
@@ -391,7 +409,7 @@ export class PwaNotifications {
   async prepare(): Promise<SubscriptionKeys> {
     for (let attempt = 0; attempt < PREPARE_ATTEMPTS; attempt++) {
       if (attempt > 0) await wait(attempt * PREPARE_RETRY_STEP_MS);
-      const response = await this.#service.app_prepare_pwa_webpush_subscription([this.#frontend]);
+      const response = await this.#service.app_prepare_pwa_webpush_subscription(this.#frontend);
       if ('Pending' in response) continue;
       const keys = unwrapSubscription(response);
       return {
@@ -413,12 +431,24 @@ export class PwaNotifications {
   }
 
   /**
+   * Marks this device's subscription disabled: Internet Identity sends nothing
+   * to it, and still keeps its own path on this device quiet. A later
+   * {@link set} registers a fresh, enabled one.
+   */
+  async disable(): Promise<void> {
+    unwrapSubscription(
+      await this.#service.app_disable_pwa_webpush_subscription(this.#frontend),
+      'Internet Identity could not disable this push subscription',
+    );
+  }
+
+  /**
    * The subscription Internet Identity delivers to for this session's browser,
    * account and frontend, or `undefined` where it holds none for them.
    */
   async registeredSubscription(): Promise<RegisteredSubscription | undefined> {
     const [status] = unwrapNotification(
-      await this.#service.app_get_pwa_webpush_subscription_status([this.#frontend]),
+      await this.#service.app_get_pwa_webpush_subscription_status(this.#frontend),
       'Internet Identity could not read this subscription',
     );
     if (status === undefined) return undefined;
@@ -686,6 +716,15 @@ export async function savedVapidKey(): Promise<Uint8Array | undefined> {
 export async function saveVapidKey(vapidPublicKey: Uint8Array): Promise<void> {
   const db = await IdbKeyVal.create(VAPID_KEY_DB);
   await db.set(VAPID_KEY, vapidPublicKey);
+}
+
+/**
+ * Forgets the VAPID key this origin's push subscription was bound to, so
+ * nothing subscribes it again until `AuthClient.subscribeToNotifications` runs.
+ */
+export async function forgetVapidKey(): Promise<void> {
+  const db = await IdbKeyVal.create(VAPID_KEY_DB);
+  await db.remove(VAPID_KEY);
 }
 
 /** Internet Identity's page that claims a same-device link from Safari. */
