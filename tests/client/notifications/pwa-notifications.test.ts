@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
+  forgetVapidKey,
   isSafariInstalledApp,
   type PwaNotificationService,
   PwaNotifications,
@@ -107,9 +108,12 @@ describe('PwaNotifications', () => {
     const inbox = over(
       fakeService({
         app_get_pwa_webpush_subscription_status: vi.fn(async () => ({
-          Ok: [{ endpoint: 'https://push.example/1', unanswered_pushes: [unanswered] }] as [
-            { endpoint: string; unanswered_pushes: [typeof unanswered] },
-          ],
+          Ok: {
+            Subscribed: {
+              endpoint: 'https://push.example/1',
+              unanswered_pushes: [unanswered] as [typeof unanswered],
+            },
+          },
         })),
       }),
     );
@@ -122,7 +126,7 @@ describe('PwaNotifications', () => {
 
   it('names the frontend in every subscription call', async () => {
     const prepare = vi.fn(async () => ({ Ok: KEYS }));
-    const status = vi.fn(async () => ({ Ok: [] as [] }));
+    const status = vi.fn(async () => ({ Ok: { NotSubscribed: null } }));
     const inbox = over(
       fakeService({
         app_prepare_pwa_webpush_subscription: prepare,
@@ -133,8 +137,31 @@ describe('PwaNotifications', () => {
     await inbox.prepare();
     await inbox.registeredSubscription();
 
-    expect(prepare).toHaveBeenCalledWith([{ frontend_origin: [FRONTEND] }]);
-    expect(status).toHaveBeenCalledWith([{ frontend_origin: [FRONTEND] }]);
+    expect(prepare).toHaveBeenCalledWith({ frontend_origin: [FRONTEND] });
+    expect(status).toHaveBeenCalledWith({ frontend_origin: [FRONTEND] });
+  });
+
+  it('disables this device for the frontend', async () => {
+    const disable = vi.fn(async () => ({ Ok: null }));
+
+    await over(fakeService({ app_disable_pwa_webpush_subscription: disable })).disable();
+
+    expect(disable).toHaveBeenCalledWith({ frontend_origin: [FRONTEND] });
+  });
+
+  it.each([
+    [{ NoSuchSession: null }, SessionGoneError],
+    [{ NoSuchFrontend: null }, "lists no frontend at this page's origin"],
+    [
+      { InternalCanisterError: 'out of memory' },
+      'could not disable this push subscription: out of memory',
+    ],
+  ] as const)('turns a refused disable of %o into an error', async (error, thrown) => {
+    const inbox = over(
+      fakeService({ app_disable_pwa_webpush_subscription: vi.fn(async () => ({ Err: error })) }),
+    );
+
+    await expect(inbox.disable()).rejects.toThrow(thrown);
   });
 
   it('removes an entry with why it was not shown', async () => {
@@ -389,6 +416,14 @@ describe('the saved VAPID key', () => {
     await saveVapidKey(new Uint8Array([4, 5, 6]));
 
     await expect(savedVapidKey()).resolves.toEqual(new Uint8Array([4, 5, 6]));
+  });
+
+  it('reads back nothing once forgotten', async () => {
+    await saveVapidKey(new Uint8Array([4, 5, 6]));
+
+    await forgetVapidKey();
+
+    await expect(savedVapidKey()).resolves.toBeUndefined();
   });
 });
 describe('same-device link', () => {

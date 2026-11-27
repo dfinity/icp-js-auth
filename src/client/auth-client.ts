@@ -35,6 +35,8 @@ import {
   type PushNotificationSource,
 } from './notifications/push-notification.js';
 import {
+  type DeviceNotificationStatus,
+  forgetVapidKey,
   isSafariInstalledApp,
   NotificationsNotAllowedError,
   PwaNotifications,
@@ -442,6 +444,9 @@ export class AuthClient {
   // Set while a ceremony writes the record and installs the identity that goes
   // with it, so `getIdentity()` in between waits for the identity.
   #committing: Promise<void> | null = null;
+  // Set while a sign-in runs, so a consent answered in the same ceremony can
+  // wait for the session it needs.
+  #signingIn: Promise<Identity> | null = null;
   #stateStorage: StateStorage;
   #signer: Signer;
   // Set only in redirect mode, so the redirect-specific paths (nonce/key
@@ -969,9 +974,12 @@ export class AuthClient {
     // written to the store as though it were current. It asks the browser for
     // nothing, so it is safe to do first.
     this.#beginInteraction();
+    const signingIn = this.#runSignIn(options);
+    this.#signingIn = signingIn;
     try {
-      return await this.#runSignIn(options);
+      return await signingIn;
     } finally {
+      if (this.#signingIn === signingIn) this.#signingIn = null;
       this.#endInteraction();
     }
   }
@@ -1021,6 +1029,7 @@ export class AuthClient {
         maxTimeToLive: options?.maxTimeToLive,
         maxTimeToIdle: options?.maxTimeToIdle,
         derivationOrigin: this.#options.derivationOrigin?.toString(),
+        installedApp: isSafariInstalledApp(),
       })),
     );
     void sessionChainPromise.catch(() => undefined);
@@ -1291,7 +1300,8 @@ export class AuthClient {
    *
    * Opens the identity provider the way a sign-in does, because consent is the
    * user's answer and nothing else can stand in for it. Where they agree, the
-   * browser they answered on is registered for delivery.
+   * browser they answered on is registered for delivery, and a subscription
+   * {@link subscribeToNotifications} made on this origin before is restored.
    *
    * In a Safari installed web app (iOS, macOS) this records consent only: call
    * {@link subscribeToNotifications} from a second tap once it returns
@@ -1316,6 +1326,7 @@ export class AuthClient {
     // takes it: this opens the signer channel, which an origin has one of, and
     // writes nothing anyone else reads.
     this.#beginInteraction();
+    let status: NotificationConsentStatus;
     try {
       const response = sendConsentRequest(
         this.#signer,
@@ -1323,10 +1334,19 @@ export class AuthClient {
         isSafariInstalledApp(),
       );
       this.#takeChannelLock();
-      return await response;
+      status = await response;
     } finally {
       this.#endInteraction();
     }
+    // A sign-in restores this origin's subscription, which Internet Identity
+    // refuses while consent is missing: consent given after it restores it here.
+    // Answered in the same ceremony as a sign-in, consent can arrive before that
+    // sign-in has stored the session the restore is made as.
+    if (status.granted) {
+      await this.#signingIn?.catch(() => undefined);
+      await this.subscribeToNotifications({ interactive: false }).catch(() => undefined);
+    }
+    return status;
   }
 
   /**
@@ -1445,9 +1465,9 @@ export class AuthClient {
    *
    * Where nothing was subscribed on this origin before, or the user has not
    * consented, it changes nothing. Call it this way from the service worker's
-   * `pushsubscriptionchange` listener, and nowhere else: sign-in and sign-out
-   * keep the subscription in order on their own. A service worker can only call
-   * it this way.
+   * `pushsubscriptionchange` listener, and nowhere else: sign-in, consent and
+   * sign-out keep the subscription in order on their own. A service worker can
+   * only call it this way.
    *
    * @param options - Subscribe options.
    * @param options.interactive - Whether it may ask for permission. Defaults to
@@ -1519,6 +1539,71 @@ export class AuthClient {
       }
     });
     return permission;
+  }
+
+  /**
+   * Turns this application's notifications off on this device, and keeps them
+   * off.
+   *
+   * A canister call made as the session, so it needs no ceremony and prompts for
+   * nothing. Internet Identity marks this device's subscription disabled: it
+   * sends nothing to it, and keeps its own path on this device quiet too. The
+   * service worker's push subscription is then unsubscribed, and the VAPID key
+   * {@link subscribeToNotifications} recorded on this origin is forgotten, so
+   * neither a later sign-in nor the `pushsubscriptionchange` listener subscribes
+   * again. The user's consent stays as it is, and so do their other devices.
+   *
+   * Call {@link subscribeToNotifications} from a tap to turn them back on.
+   * Where the call to Internet Identity fails, nothing on this device changes.
+   *
+   * @throws {SessionGoneError} Where this origin holds no live session.
+   * @example
+   * // A notifications toggle in the app's settings.
+   * toggle.addEventListener('change', async () => {
+   *   if (toggle.checked) await authClient.subscribeToNotifications();
+   *   else await authClient.unsubscribeFromNotifications();
+   * });
+   */
+  async unsubscribeFromNotifications(): Promise<void> {
+    await this.#queueSubscribe(async () => {
+      await (await this.#pwaNotifications()).disable();
+      try {
+        await (await heldPushSubscription())?.unsubscribe();
+      } finally {
+        await forgetVapidKey();
+      }
+    });
+  }
+
+  /**
+   * Whether this device delivers this application's notifications through the
+   * application's own service worker, for the signed-in account.
+   *
+   * Answers `off` where {@link unsubscribeFromNotifications} turned this device
+   * off, until {@link subscribeToNotifications} turns it on again or the user
+   * allows it again at Internet Identity. Read it to paint a per-device switch,
+   * and to leave a device the user turned off alone: `none` alone is where an
+   * application with notification permission already granted subscribes
+   * without asking.
+   *
+   * @returns Whether this device is on, turned off, or neither.
+   * @throws {NotificationsUnsupportedError} Where this browser has no Web Push.
+   * @throws {SessionGoneError} Where this origin holds no live session.
+   * @example
+   * const status = await authClient.getDeviceNotificationStatus();
+   * if (status === 'none' && Notification.permission === 'granted') {
+   *   await authClient.subscribeToNotifications();
+   * }
+   */
+  async getDeviceNotificationStatus(): Promise<DeviceNotificationStatus> {
+    if (globalThis.PushManager === undefined) {
+      throw new NotificationsUnsupportedError('This browser has no Web Push');
+    }
+    const status = await (await this.#pwaNotifications()).subscriptionStatus();
+    if (status.kind === 'disabled') return 'off';
+    if (status.kind === 'not-subscribed') return 'none';
+    const held = await heldPushSubscription();
+    return held?.endpoint === status.subscription.endpoint ? 'on' : 'none';
   }
 
   /**

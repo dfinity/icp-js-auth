@@ -73,6 +73,11 @@ interface SessionDelegationParams {
   maxTimeToLive?: bigint;
   maxTimeToIdle?: bigint;
   derivationOrigin?: string;
+  /**
+   * Whether the application runs as an installed web app, so the provider knows
+   * the app itself is the one signing in.
+   */
+  installedApp?: boolean;
 }
 
 const sessionDelegationRequest = (params: SessionDelegationParams) => ({
@@ -90,6 +95,7 @@ const sessionDelegationRequest = (params: SessionDelegationParams) => ({
     ...(params.derivationOrigin === undefined
       ? {}
       : { icrc95DerivationOrigin: params.derivationOrigin }),
+    ...(params.installedApp ? { installedApp: true } : {}),
   },
 });
 
