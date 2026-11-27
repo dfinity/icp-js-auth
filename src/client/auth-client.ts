@@ -1293,7 +1293,8 @@ export class AuthClient {
    *
    * Opens the identity provider the way a sign-in does, because consent is the
    * user's answer and nothing else can stand in for it. Where they agree, the
-   * browser they answered on is registered for delivery.
+   * browser they answered on is registered for delivery, and a subscription
+   * {@link subscribeToNotifications} made on this origin before is restored.
    *
    * In a Safari installed web app (iOS, macOS) this records consent only: call
    * {@link subscribeToNotifications} from a second tap once it returns
@@ -1318,6 +1319,7 @@ export class AuthClient {
     // takes it: this opens the signer channel, which an origin has one of, and
     // writes nothing anyone else reads.
     this.#beginInteraction();
+    let status: NotificationConsentStatus;
     try {
       const response = sendConsentRequest(
         this.#signer,
@@ -1325,10 +1327,16 @@ export class AuthClient {
         isSafariInstalledApp(),
       );
       this.#takeChannelLock();
-      return await response;
+      status = await response;
     } finally {
       this.#endInteraction();
     }
+    // A sign-in restores this origin's subscription, which Internet Identity
+    // refuses while consent is missing: consent given after it restores it here.
+    if (status.granted) {
+      await this.subscribeToNotifications({ interactive: false }).catch(() => undefined);
+    }
+    return status;
   }
 
   /**
@@ -1447,9 +1455,9 @@ export class AuthClient {
    *
    * Where nothing was subscribed on this origin before, or the user has not
    * consented, it changes nothing. Call it this way from the service worker's
-   * `pushsubscriptionchange` listener, and nowhere else: sign-in and sign-out
-   * keep the subscription in order on their own. A service worker can only call
-   * it this way.
+   * `pushsubscriptionchange` listener, and nowhere else: sign-in, consent and
+   * sign-out keep the subscription in order on their own. A service worker can
+   * only call it this way.
    *
    * @param options - Subscribe options.
    * @param options.interactive - Whether it may ask for permission. Defaults to
