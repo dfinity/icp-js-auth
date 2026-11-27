@@ -38,6 +38,34 @@ type CandidSameDeviceLinkStatus =
   | { OtherPathMayDeliver: null }
   | { NoOtherPath: null };
 
+/**
+ * Whether this device delivers this application's notifications through the
+ * application's own service worker, for the signed-in account:
+ * - `on`: it does.
+ * - `off`: the application turned it off here with
+ *   `AuthClient.unsubscribeFromNotifications`, so nothing reaches this device
+ *   until it subscribes again.
+ * - `none`: it does not, and was not turned off.
+ */
+export type DeviceNotificationStatus = 'on' | 'off' | 'none';
+
+/** What Internet Identity holds for this session's browser, account and frontend. */
+type CandidSubscriptionStatus =
+  | { NotSubscribed: null }
+  | { Disabled: null }
+  | {
+      Subscribed: {
+        endpoint: string;
+        unanswered_pushes: [] | [CandidUnansweredPushes];
+      };
+    };
+
+/** What Internet Identity holds for this session's browser, account and frontend. */
+export type SubscriptionStatus =
+  | { kind: 'not-subscribed' }
+  | { kind: 'disabled' }
+  | { kind: 'subscribed'; subscription: RegisteredSubscription };
+
 /** Why the service worker could not show a notification. */
 export type NotShownReason = { PayloadUnreachable: null } | { PayloadRejected: null };
 
@@ -64,6 +92,13 @@ type DisableError =
 
 /** Why Internet Identity could not answer an inbox or status call. */
 type NotificationError = { NoSuchSession: null } | { InternalCanisterError: string };
+
+/** Fails the build where a {@link CandidSubscriptionStatus} variant has no arm. */
+const unhandledSubscriptionStatus = (status: never): never => {
+  throw new Error(
+    `Internet Identity answered an unknown subscription status: ${JSON.stringify(status)}`,
+  );
+};
 
 /** Fails the build where a {@link CandidSameDeviceLinkStatus} variant has no arm. */
 const unhandledStatus = (status: never): never => {
@@ -115,19 +150,9 @@ export interface PwaNotificationService {
   app_set_pwa_webpush_subscription(
     request: FrontendRequest & { subscription: [] | [SealedSubscription] },
   ): Promise<{ Ok: null } | { Err: SubscriptionError }>;
-  app_get_pwa_webpush_subscription_status(request: FrontendRequest): Promise<
-    | {
-        Ok:
-          | []
-          | [
-              {
-                endpoint: string;
-                unanswered_pushes: [] | [CandidUnansweredPushes];
-              },
-            ];
-      }
-    | { Err: NotificationError }
-  >;
+  app_get_pwa_webpush_subscription_status(
+    request: FrontendRequest,
+  ): Promise<{ Ok: CandidSubscriptionStatus } | { Err: NotificationError }>;
   app_disable_pwa_webpush_subscription(
     request: FrontendRequest,
   ): Promise<{ Ok: null } | { Err: DisableError }>;
@@ -223,12 +248,14 @@ const idlFactory: IDL.InterfaceFactory = ({ IDL }) => {
       [FrontendRequest],
       [
         IDL.Variant({
-          Ok: IDL.Opt(
-            IDL.Record({
+          Ok: IDL.Variant({
+            NotSubscribed: IDL.Null,
+            Disabled: IDL.Null,
+            Subscribed: IDL.Record({
               endpoint: IDL.Text,
               unanswered_pushes: IDL.Opt(UnansweredPushes),
             }),
-          ),
+          }),
           Err: NotificationError,
         }),
       ],
@@ -447,13 +474,30 @@ export class PwaNotifications {
    * account and frontend, or `undefined` where it holds none for them.
    */
   async registeredSubscription(): Promise<RegisteredSubscription | undefined> {
-    const [status] = unwrapNotification(
+    const status = await this.subscriptionStatus();
+    return status.kind === 'subscribed' ? status.subscription : undefined;
+  }
+
+  /**
+   * What Internet Identity holds for this session's browser, account and
+   * frontend: a subscription, one the application disabled, or nothing.
+   */
+  async subscriptionStatus(): Promise<SubscriptionStatus> {
+    const status = unwrapNotification(
       await this.#service.app_get_pwa_webpush_subscription_status(this.#frontend),
       'Internet Identity could not read this subscription',
     );
-    if (status === undefined) return undefined;
-    const [unanswered] = status.unanswered_pushes;
-    return { endpoint: status.endpoint, isPastLimit: unanswered?.is_past_limit === true };
+    if ('NotSubscribed' in status) return { kind: 'not-subscribed' };
+    if ('Disabled' in status) return { kind: 'disabled' };
+    if ('Subscribed' in status) {
+      const { endpoint, unanswered_pushes } = status.Subscribed;
+      const [unanswered] = unanswered_pushes;
+      return {
+        kind: 'subscribed',
+        subscription: { endpoint, isPastLimit: unanswered?.is_past_limit === true },
+      };
+    }
+    return unhandledSubscriptionStatus(status);
   }
 
   /** The entry a wake-up named, empty where it is gone. */

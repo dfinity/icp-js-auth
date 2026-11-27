@@ -108,9 +108,12 @@ describe('PwaNotifications', () => {
     const inbox = over(
       fakeService({
         app_get_pwa_webpush_subscription_status: vi.fn(async () => ({
-          Ok: [{ endpoint: 'https://push.example/1', unanswered_pushes: [unanswered] }] as [
-            { endpoint: string; unanswered_pushes: [typeof unanswered] },
-          ],
+          Ok: {
+            Subscribed: {
+              endpoint: 'https://push.example/1',
+              unanswered_pushes: [unanswered] as [typeof unanswered],
+            },
+          },
         })),
       }),
     );
@@ -123,7 +126,7 @@ describe('PwaNotifications', () => {
 
   it('names the frontend in every subscription call', async () => {
     const prepare = vi.fn(async () => ({ Ok: KEYS }));
-    const status = vi.fn(async () => ({ Ok: [] as [] }));
+    const status = vi.fn(async () => ({ Ok: { NotSubscribed: null } }));
     const inbox = over(
       fakeService({
         app_prepare_pwa_webpush_subscription: prepare,

@@ -35,6 +35,7 @@ import {
   type PushNotificationSource,
 } from './notifications/push-notification.js';
 import {
+  type DeviceNotificationStatus,
   forgetVapidKey,
   isSafariInstalledApp,
   NotificationsNotAllowedError,
@@ -1572,6 +1573,37 @@ export class AuthClient {
         await forgetVapidKey();
       }
     });
+  }
+
+  /**
+   * Whether this device delivers this application's notifications through the
+   * application's own service worker, for the signed-in account.
+   *
+   * Answers `off` where {@link unsubscribeFromNotifications} turned this device
+   * off, until {@link subscribeToNotifications} turns it on again or the user
+   * allows it again at Internet Identity. Read it to paint a per-device switch,
+   * and to leave a device the user turned off alone: `none` alone is where an
+   * application with notification permission already granted subscribes
+   * without asking.
+   *
+   * @returns Whether this device is on, turned off, or neither.
+   * @throws {NotificationsUnsupportedError} Where this browser has no Web Push.
+   * @throws {SessionGoneError} Where this origin holds no live session.
+   * @example
+   * const status = await authClient.getDeviceNotificationStatus();
+   * if (status === 'none' && Notification.permission === 'granted') {
+   *   await authClient.subscribeToNotifications();
+   * }
+   */
+  async getDeviceNotificationStatus(): Promise<DeviceNotificationStatus> {
+    if (globalThis.PushManager === undefined) {
+      throw new NotificationsUnsupportedError('This browser has no Web Push');
+    }
+    const status = await (await this.#pwaNotifications()).subscriptionStatus();
+    if (status.kind === 'disabled') return 'off';
+    if (status.kind === 'not-subscribed') return 'none';
+    const held = await heldPushSubscription();
+    return held?.endpoint === status.subscription.endpoint ? 'on' : 'none';
   }
 
   /**
