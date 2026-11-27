@@ -1549,8 +1549,11 @@ export class AuthClient {
   async unsubscribeFromNotifications(): Promise<void> {
     await this.#queueSubscribe(async () => {
       await (await this.#pwaNotifications()).disable();
-      await (await heldPushSubscription())?.unsubscribe();
-      await forgetVapidKey();
+      try {
+        await (await heldPushSubscription())?.unsubscribe();
+      } finally {
+        await forgetVapidKey();
+      }
     });
   }
 

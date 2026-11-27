@@ -3248,6 +3248,18 @@ describe("AuthClient and this origin's push subscription", () => {
       await expect(savedVapidKey()).resolves.toEqual(VAPID);
     });
 
+    it('forgets the VAPID key where unsubscribing the browser fails after Internet Identity disabled it', async () => {
+      const { subscription } = serviceWorker('granted');
+      const client = await signedIn('unsubscribe-browser-fails');
+      await saveVapidKey(VAPID);
+      fakeCalls('https://push.example/1');
+      subscription.unsubscribe.mockRejectedValue(new Error('unsubscribe failed'));
+
+      await expect(client.unsubscribeFromNotifications()).rejects.toThrow('unsubscribe failed');
+
+      await expect(savedVapidKey()).resolves.toBeUndefined();
+    });
+
     it('throws SessionGoneError where this origin holds no session', async () => {
       serviceWorker('granted');
       const client = track(new AuthClient({ namespace: 'unsubscribe-signed-out' }));
